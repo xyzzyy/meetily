@@ -1182,6 +1182,13 @@ mod tests {
                 audio_start_time: Some(0.0),
                 audio_end_time: Some(1.5),
                 duration: Some(1.5),
+                speaker_id: None,
+                speaker_label: None,
+                speaker_color: None,
+                is_overlap: Some(false),
+                diarization_status: Some("none".to_string()),
+                diarization_method: None,
+                diarization_confidence: None,
             },
             TranscriptSegment {
                 id: "t-2".to_string(),
@@ -1190,6 +1197,13 @@ mod tests {
                 audio_start_time: Some(2.0),
                 audio_end_time: Some(3.5),
                 duration: Some(1.5),
+                speaker_id: None,
+                speaker_label: None,
+                speaker_color: None,
+                is_overlap: Some(false),
+                diarization_status: Some("none".to_string()),
+                diarization_method: None,
+                diarization_confidence: None,
             },
         ];
 
