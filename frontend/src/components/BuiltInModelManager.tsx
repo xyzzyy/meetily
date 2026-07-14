@@ -3,6 +3,7 @@
 import { useState, useEffect } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
+import { confirm } from '@tauri-apps/plugin-dialog';
 import { Button } from '@/components/ui/button';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { cn } from '@/lib/utils';
@@ -244,7 +245,10 @@ export function BuiltInModelManager({
   };
 
   const deleteModel = async (modelName: string) => {
-    const confirmed = window.confirm(`Delete downloaded model ${modelName}? This will remove it from disk.`);
+    const confirmed = await confirm(
+      `Delete downloaded model ${modelName}? This will remove it from disk.`,
+      { title: 'Delete model?', kind: 'warning' }
+    );
     if (!confirmed) {
       return;
     }

@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import { invoke } from '@tauri-apps/api/core';
+import { confirm } from '@tauri-apps/plugin-dialog';
 import { motion, AnimatePresence } from 'framer-motion';
 import { toast } from 'sonner';
 import {
@@ -347,6 +348,13 @@ export function ModelManager({
 
   const deleteModel = async (modelName: string) => {
     const displayName = getDisplayName(modelName);
+    const confirmed = await confirm(
+      `Delete transcription model ${displayName}? This will remove it from disk.`,
+      { title: 'Delete transcription model?', kind: 'warning' }
+    );
+    if (!confirmed) {
+      return;
+    }
 
     try {
       await WhisperAPI.deleteCorruptedModel(modelName);
