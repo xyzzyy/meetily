@@ -17,7 +17,8 @@ use crate::{
         decoder::decode_audio_file,
         recording_state::{AudioChunk, DeviceType},
         transcription::{
-            engine::get_or_init_transcription_engine, worker::transcribe_chunk_with_provider,
+            engine::{get_or_init_transcription_engine, validate_transcription_model_ready},
+            worker::transcribe_chunk_with_provider,
         },
     },
     database::models::Transcript,
@@ -338,6 +339,9 @@ async fn run_inner<R: Runtime>(
     check_cancelled()?;
     let audio = load_source_audio(&sidecar_request.sources).await?;
     let profile_labels = recognize_final_profiles(app, &mut windows, &audio).await;
+    validate_transcription_model_ready(app)
+        .await
+        .map_err(|error| anyhow!("Unable to load the selected transcription model: {error}"))?;
     let engine = get_or_init_transcription_engine(app)
         .await
         .map_err(|error| anyhow!(error))?;

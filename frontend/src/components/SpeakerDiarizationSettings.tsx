@@ -27,7 +27,6 @@ export function SpeakerDiarizationSettings() {
     id: string; name: string; modelVersion: string; sampleCount: number; speechSeconds: number;
   }>>([]);
   const {
-    betaFeatures,
     diarizationSettings,
     isLoadingDiarizationSettings,
     updateDiarizationSettings,
@@ -46,10 +45,6 @@ export function SpeakerDiarizationSettings() {
     });
     return () => { unlistenPromise.then(unlisten => unlisten()); };
   }, []);
-
-  if (!betaFeatures.speakerDiarization) {
-    return null;
-  }
 
   const downloadModel = async () => {
     setModelBusy(true);
