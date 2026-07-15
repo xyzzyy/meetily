@@ -413,10 +413,13 @@ export function useRecordingStop(
           }
 
         } catch (saveError) {
+          const saveErrorMessage = saveError instanceof Error
+            ? saveError.message
+            : String(saveError || 'Unknown error');
           console.error('Failed to save meeting to database:', saveError);
-          setStatus(RecordingStatus.ERROR, saveError instanceof Error ? saveError.message : 'Unknown error');
+          setStatus(RecordingStatus.ERROR, saveErrorMessage);
           toast.error('Failed to save meeting', {
-            description: saveError instanceof Error ? saveError.message : 'Unknown error'
+            description: saveErrorMessage
           });
           throw saveError;
         }
@@ -429,8 +432,11 @@ export function useRecordingStop(
       // isRecording already set to false at function start
       setIsRecordingDisabled(false);
     } catch (error) {
+      const errorMessage = error instanceof Error
+        ? error.message
+        : String(error || 'Unknown error');
       console.error('Error in handleRecordingStop:', error);
-      setStatus(RecordingStatus.ERROR, error instanceof Error ? error.message : 'Unknown error');
+      setStatus(RecordingStatus.ERROR, errorMessage);
       // isRecording already set to false at function start
       setIsRecordingDisabled(false);
     } finally {
