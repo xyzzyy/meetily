@@ -86,8 +86,11 @@ impl DiarizationRepository {
             "UPDATE transcripts SET
                 speaker_id = ?,
                 speaker_label = ?,
+                speaker_profile_id = ?,
+                speaker_source = ?,
                 speaker_color = ?,
                 is_overlap = ?,
+                candidate_speaker_ids = ?,
                 diarization_status = ?,
                 diarization_method = ?,
                 diarization_confidence = ?
@@ -95,8 +98,11 @@ impl DiarizationRepository {
         )
         .bind(&assignment.speaker_id)
         .bind(&assignment.speaker_label)
+        .bind(&assignment.speaker_profile_id)
+        .bind(&assignment.speaker_source)
         .bind(&assignment.speaker_color)
         .bind(assignment.is_overlap as i64)
+        .bind(serde_json::to_string(&assignment.candidate_speaker_ids).ok())
         .bind(diarization_status)
         .bind(&assignment.diarization_method)
         .bind(assignment.diarization_confidence)
@@ -172,6 +178,87 @@ impl DiarizationRepository {
 
         Ok(transcript_result.rows_affected() + segment_result.rows_affected())
     }
+
+    pub async fn merge_speakers(
+        pool: &SqlitePool,
+        meeting_id: &str,
+        source_speaker_ids: &[String],
+        target_speaker_id: &str,
+        target_label: &str,
+    ) -> Result<u64, sqlx::Error> {
+        let mut transaction = pool.begin().await?;
+        let mut updated = 0;
+        for source_id in source_speaker_ids {
+            if source_id == target_speaker_id {
+                continue;
+            }
+            updated += sqlx::query(
+                "UPDATE transcripts SET
+                    speaker_id = ?, speaker_label = ?, diarization_method = 'manual'
+                 WHERE meeting_id = ? AND speaker_id = ?",
+            )
+            .bind(target_speaker_id)
+            .bind(target_label)
+            .bind(meeting_id)
+            .bind(source_id)
+            .execute(&mut *transaction)
+            .await?
+            .rows_affected();
+
+            sqlx::query(
+                "UPDATE speaker_segments SET speaker_id = ?, speaker_label = ?,
+                    diarization_method = 'manual'
+                 WHERE meeting_id = ? AND speaker_id = ?",
+            )
+            .bind(target_speaker_id)
+            .bind(target_label)
+            .bind(meeting_id)
+            .bind(source_id)
+            .execute(&mut *transaction)
+            .await?;
+        }
+        transaction.commit().await?;
+        Ok(updated)
+    }
+
+    pub async fn reassign_transcripts(
+        pool: &SqlitePool,
+        meeting_id: &str,
+        transcript_ids: &[String],
+        speaker_id: Option<&str>,
+        speaker_label: Option<&str>,
+        is_overlap: bool,
+        candidate_speaker_ids: &[String],
+    ) -> Result<u64, sqlx::Error> {
+        let mut transaction = pool.begin().await?;
+        let candidates =
+            serde_json::to_string(candidate_speaker_ids).unwrap_or_else(|_| "[]".to_string());
+        let mut updated = 0;
+        for transcript_id in transcript_ids {
+            updated += sqlx::query(
+                "UPDATE transcripts SET
+                    speaker_id = ?, speaker_label = ?, is_overlap = ?,
+                    candidate_speaker_ids = ?, diarization_status = 'final',
+                    diarization_method = 'manual', diarization_confidence = 1.0
+                 WHERE meeting_id = ? AND id = ?",
+            )
+            .bind(speaker_id)
+            .bind(if is_overlap {
+                Some("Multiple speakers")
+            } else {
+                speaker_label
+            })
+            .bind(is_overlap as i64)
+            .bind(&candidates)
+            .bind(meeting_id)
+            .bind(transcript_id)
+            .execute(&mut *transaction)
+            .await?
+            .rows_affected();
+        }
+        transaction.commit().await?;
+        Ok(updated)
+    }
 }
 
 pub(crate) fn diarization_status_to_database_value(
@@ -201,8 +288,11 @@ mod tests {
                 id TEXT PRIMARY KEY,
                 speaker_id TEXT,
                 speaker_label TEXT,
+                speaker_profile_id TEXT,
+                speaker_source TEXT,
                 speaker_color TEXT,
                 is_overlap INTEGER NOT NULL DEFAULT 0,
+                candidate_speaker_ids TEXT,
                 diarization_status TEXT NOT NULL DEFAULT 'none',
                 diarization_method TEXT,
                 diarization_confidence REAL
@@ -271,12 +361,10 @@ mod tests {
         .await
         .expect("meeting_diarization_status table should be created");
 
-        sqlx::query(
-            "INSERT INTO meeting_diarization_status (meeting_id) VALUES ('meeting-1')",
-        )
-        .execute(&pool)
-        .await
-        .expect("meeting diarization status should be inserted");
+        sqlx::query("INSERT INTO meeting_diarization_status (meeting_id) VALUES ('meeting-1')")
+            .execute(&pool)
+            .await
+            .expect("meeting diarization status should be inserted");
 
         for (id, meeting_id, speaker_id, speaker_label, speaker_color, audio_start_time) in [
             (
@@ -366,8 +454,11 @@ mod tests {
         let assignment = SpeakerAssignment {
             speaker_id: Some("speaker-1".to_string()),
             speaker_label: Some("Speaker 1".to_string()),
+            speaker_profile_id: None,
+            speaker_source: Some("system".to_string()),
             speaker_color: Some("#2563eb".to_string()),
             is_overlap: true,
+            candidate_speaker_ids: vec!["speaker-1".to_string(), "speaker-2".to_string()],
             diarization_status: DiarizationStatus::Final,
             diarization_method: Some("pyannote-rs".to_string()),
             diarization_confidence: Some(0.82),

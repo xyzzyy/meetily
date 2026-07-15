@@ -37,8 +37,11 @@ pub struct Transcript {
     pub duration: Option<f64>,
     pub speaker_id: Option<String>,
     pub speaker_label: Option<String>,
+    pub speaker_profile_id: Option<String>,
+    pub speaker_source: Option<String>,
     pub speaker_color: Option<String>,
     pub is_overlap: Option<i64>,
+    pub candidate_speaker_ids: Option<String>,
     pub diarization_status: Option<String>,
     pub diarization_method: Option<String>,
     pub diarization_confidence: Option<f64>,
@@ -174,4 +177,33 @@ pub struct SpeakerSegmentModel {
     pub diarization_status: String,
     pub diarization_method: Option<String>,
     pub created_at: DateTimeUtc,
+}
+
+#[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
+pub struct SpeakerProfileModel {
+    pub id: String,
+    pub name: String,
+    pub embedding: Vec<u8>,
+    pub model_version: String,
+    pub sample_count: i64,
+    pub speech_seconds: f64,
+    pub created_at: DateTimeUtc,
+    pub updated_at: DateTimeUtc,
+    pub last_used_at: Option<DateTimeUtc>,
+}
+
+#[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
+pub struct DiarizationRunModel {
+    pub id: String,
+    pub meeting_id: String,
+    pub status: String,
+    pub method: String,
+    pub progress: i64,
+    pub quality_flags: Option<String>,
+    pub error: Option<String>,
+    pub transcript_backup: Option<String>,
+    pub assigned_coverage: Option<f64>,
+    pub transcription_success_rate: Option<f64>,
+    pub started_at: DateTimeUtc,
+    pub completed_at: Option<DateTimeUtc>,
 }

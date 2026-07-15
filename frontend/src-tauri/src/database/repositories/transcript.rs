@@ -50,10 +50,11 @@ impl TranscriptsRepository {
                 "INSERT INTO transcripts (
                     id, meeting_id, transcript, timestamp,
                     audio_start_time, audio_end_time, duration,
-                    speaker_id, speaker_label, speaker_color, is_overlap,
+                    speaker_id, speaker_label, speaker_profile_id, speaker_source,
+                    speaker_color, is_overlap, candidate_speaker_ids,
                     diarization_status, diarization_method, diarization_confidence
                  )
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             )
             .bind(&transcript_id)
             .bind(&meeting_id)
@@ -64,8 +65,16 @@ impl TranscriptsRepository {
             .bind(segment.duration)
             .bind(&segment.speaker_id)
             .bind(&segment.speaker_label)
+            .bind(&segment.speaker_profile_id)
+            .bind(&segment.speaker_source)
             .bind(&segment.speaker_color)
             .bind(segment.is_overlap.unwrap_or(false) as i64)
+            .bind(
+                segment
+                    .candidate_speaker_ids
+                    .as_ref()
+                    .and_then(|ids| serde_json::to_string(ids).ok()),
+            )
             .bind(segment.diarization_status.as_deref().unwrap_or("none"))
             .bind(&segment.diarization_method)
             .bind(segment.diarization_confidence)

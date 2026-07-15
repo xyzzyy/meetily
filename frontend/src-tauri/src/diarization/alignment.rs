@@ -58,11 +58,14 @@ pub fn assign_speaker_to_transcript(
     }
 
     if let Some((segment, _)) = best_overlap_segment {
-        return SpeakerAssignment::overlap(
+        let mut assignment = SpeakerAssignment::overlap(
             segment.confidence.unwrap_or(0.0),
             segment.diarization_status,
             method.to_string(),
         );
+        assignment.speaker_source = Some(segment.source.clone());
+        assignment.candidate_speaker_ids = segment.candidate_speaker_ids.clone();
+        return assignment;
     }
 
     let Some((segment, _)) = best_speaker_segment else {
@@ -78,8 +81,11 @@ pub fn assign_speaker_to_transcript(
             .speaker_label
             .clone()
             .or_else(|| Some("Unknown speaker".to_string())),
+        speaker_profile_id: segment.speaker_profile_id.clone(),
+        speaker_source: Some(segment.source.clone()),
         speaker_color: None,
         is_overlap: false,
+        candidate_speaker_ids: segment.candidate_speaker_ids.clone(),
         diarization_status: segment.diarization_status,
         diarization_method: Some(method.to_string()),
         diarization_confidence: segment.confidence,
@@ -106,6 +112,8 @@ mod tests {
             end_time: end,
             speaker_id: Some(label.to_lowercase().replace(' ', "-")),
             speaker_label: Some(label.to_string()),
+            speaker_profile_id: None,
+            candidate_speaker_ids: Vec::new(),
             confidence: Some(0.8),
             is_overlap: false,
             diarization_status: DiarizationStatus::Provisional,

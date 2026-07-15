@@ -1,17 +1,22 @@
-use std::sync::Arc;
-use std::collections::VecDeque;
-use tokio::sync::mpsc;
-use tokio::task::JoinHandle;
+use super::batch_processor::AudioMetricsBatcher;
+use crate::batch_audio_metric;
 use anyhow::Result;
 use log::{debug, error, info, warn};
-use crate::batch_audio_metric;
-use super::batch_processor::AudioMetricsBatcher;
-use rubato::{Resampler, SincFixedIn, SincInterpolationParameters, SincInterpolationType, WindowFunction};
+use rubato::{
+    Resampler, SincFixedIn, SincInterpolationParameters, SincInterpolationType, WindowFunction,
+};
+use std::collections::VecDeque;
+use std::sync::Arc;
+use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
 
+use super::audio_processing::{
+    audio_to_mono, HighPassFilter, LoudnessNormalizer, NoiseSuppressionProcessor,
+};
 use super::devices::AudioDevice;
-use super::recording_state::{AudioChunk, AudioError, RecordingState, DeviceType};
-use super::audio_processing::{audio_to_mono, LoudnessNormalizer, NoiseSuppressionProcessor, HighPassFilter};
-use super::vad::{ContinuousVadProcessor};
+use super::diarization_stems::StemWindow;
+use super::recording_state::{AudioChunk, AudioError, DeviceType, RecordingState, SourceActivity};
+use super::vad::ContinuousVadProcessor;
 
 /// How long a silence must last before the VAD closes a speech segment, and
 /// therefore how long the audio clips handed to the ASR engine are.
@@ -31,8 +36,23 @@ const VAD_REDEMPTION_TIME_MS: u32 = 500;
 struct AudioMixerRingBuffer {
     mic_buffer: VecDeque<f32>,
     system_buffer: VecDeque<f32>,
-    window_size_samples: usize,  // Fixed mixing window (e.g., 50ms)
-    max_buffer_size: usize,  // Safety limit (e.g., 100ms)
+    window_size_samples: usize, // Fixed mixing window (e.g., 50ms)
+    max_buffer_size: usize,     // Safety limit (e.g., 100ms)
+}
+
+#[derive(Debug)]
+struct SourceActivityWindow {
+    start: f64,
+    end: f64,
+    microphone_active: bool,
+    system_active: bool,
+}
+
+fn rms(samples: &[f32]) -> f32 {
+    if samples.is_empty() {
+        return 0.0;
+    }
+    (samples.iter().map(|sample| sample * sample).sum::<f32>() / samples.len() as f32).sqrt()
 }
 
 impl AudioMixerRingBuffer {
@@ -45,11 +65,15 @@ impl AudioMixerRingBuffer {
         // System audio (especially Core Audio on macOS) can have significant jitter
         // due to sample-by-sample streaming → batching → channel transmission
         // Accounts for: RNNoise buffering + Core Audio jitter + processing delays
-        let max_buffer_size = window_size_samples * 8;  // 400ms (was 200ms)
+        let max_buffer_size = window_size_samples * 8; // 400ms (was 200ms)
 
-        info!("🔊 Ring buffer initialized: window={}ms ({} samples), max={}ms ({} samples)",
-              window_ms, window_size_samples,
-              window_ms * 8.0, max_buffer_size);
+        info!(
+            "🔊 Ring buffer initialized: window={}ms ({} samples), max={}ms ({} samples)",
+            window_ms,
+            window_size_samples,
+            window_ms * 8.0,
+            max_buffer_size
+        );
 
         Self {
             mic_buffer: VecDeque::with_capacity(max_buffer_size),
@@ -65,8 +89,12 @@ impl AudioMixerRingBuffer {
         unsafe {
             SAMPLE_COUNTER += 1;
             if SAMPLE_COUNTER % 200 == 0 {
-                debug!("📊 Ring buffer status: mic={} samples, sys={} samples (max={})",
-                       self.mic_buffer.len(), self.system_buffer.len(), self.max_buffer_size);
+                debug!(
+                    "📊 Ring buffer status: mic={} samples, sys={} samples (max={})",
+                    self.mic_buffer.len(),
+                    self.system_buffer.len(),
+                    self.max_buffer_size
+                );
             }
         }
 
@@ -78,9 +106,12 @@ impl AudioMixerRingBuffer {
         // CRITICAL FIX: Add warnings before dropping samples
         // This helps diagnose timing issues in production
         if self.mic_buffer.len() > self.max_buffer_size {
-            warn!("⚠️ Microphone buffer overflow: {} > {} samples, dropping oldest {} samples",
-                  self.mic_buffer.len(), self.max_buffer_size,
-                  self.mic_buffer.len() - self.max_buffer_size);
+            warn!(
+                "⚠️ Microphone buffer overflow: {} > {} samples, dropping oldest {} samples",
+                self.mic_buffer.len(),
+                self.max_buffer_size,
+                self.mic_buffer.len() - self.max_buffer_size
+            );
         }
         if self.system_buffer.len() > self.max_buffer_size {
             error!("🔴 SYSTEM AUDIO BUFFER OVERFLOW: {} > {} samples, dropping {} samples - THIS CAUSES DISTORTION!",
@@ -98,8 +129,8 @@ impl AudioMixerRingBuffer {
     }
 
     fn can_mix(&self) -> bool {
-        self.mic_buffer.len() >= self.window_size_samples ||
-        self.system_buffer.len() >= self.window_size_samples
+        self.mic_buffer.len() >= self.window_size_samples
+            || self.system_buffer.len() >= self.window_size_samples
     }
 
     fn extract_window(&mut self) -> Option<(Vec<f32>, Vec<f32>)> {
@@ -133,7 +164,9 @@ impl AudioMixerRingBuffer {
         // Extract system window (or pad with zeros if insufficient data)
         let sys_window = if self.system_buffer.len() >= self.window_size_samples {
             // Enough system data - drain window
-            self.system_buffer.drain(0..self.window_size_samples).collect()
+            self.system_buffer
+                .drain(0..self.window_size_samples)
+                .collect()
         } else if !self.system_buffer.is_empty() {
             // Some system data but not enough - consume all + pad with zeros
             let available: Vec<f32> = self.system_buffer.drain(..).collect();
@@ -152,7 +185,6 @@ impl AudioMixerRingBuffer {
 
         Some((mic_window, sys_window))
     }
-
 }
 
 /// Simple audio mixer without aggressive ducking
@@ -179,7 +211,7 @@ impl ProfessionalAudioMixer {
             // This prevents constant soft scaling which can cause pumping artifacts
             // Mic is normalized to -23 LUFS (already optimal), system needs reduction
             let sys_scaled = sys * 1.0;
-            let _mic_scaled = mic * 0.8;  // Reserved for future mic scaling
+            let _mic_scaled = mic * 0.8; // Reserved for future mic scaling
 
             // Sum without ducking - mic stays at full volume, system slightly reduced
             let sum = mic + sys_scaled;
@@ -207,17 +239,17 @@ impl ProfessionalAudioMixer {
 pub struct AudioCapture {
     device: Arc<AudioDevice>,
     state: Arc<RecordingState>,
-    sample_rate: u32,        // Original device sample rate
+    sample_rate: u32, // Original device sample rate
     channels: u16,
     chunk_counter: Arc<std::sync::atomic::AtomicU64>,
     device_type: DeviceType,
     recording_sender: Option<mpsc::UnboundedSender<AudioChunk>>,
-    needs_resampling: bool,  // Flag if resampling is required
+    needs_resampling: bool, // Flag if resampling is required
     // CRITICAL FIX: Persistent resampler to preserve energy across chunks
     resampler: Arc<std::sync::Mutex<Option<SincFixedIn<f32>>>>,
     // Buffering for variable-size chunks → fixed-size resampler input
     resampler_input_buffer: Arc<std::sync::Mutex<Vec<f32>>>,
-    resampler_chunk_size: usize,  // Fixed chunk size for resampler (512 samples)
+    resampler_chunk_size: usize, // Fixed chunk size for resampler (512 samples)
     // Audio enhancement processors (microphone only)
     noise_suppressor: Arc<std::sync::Mutex<Option<NoiseSuppressionProcessor>>>,
     high_pass_filter: Arc<std::sync::Mutex<Option<HighPassFilter>>>,
@@ -242,12 +274,11 @@ impl AudioCapture {
 
         // Detect device kind (Bluetooth vs Wired) for adaptive processing
         // Use reasonable defaults for buffer size (512 samples is typical)
-        let device_kind = super::device_detection::InputDeviceKind::detect(&device.name, 512, sample_rate);
+        let device_kind =
+            super::device_detection::InputDeviceKind::detect(&device.name, 512, sample_rate);
 
         if needs_resampling {
-            warn!(
-                "⚠️ SAMPLE RATE MISMATCH DETECTED ⚠️"
-            );
+            warn!("⚠️ SAMPLE RATE MISMATCH DETECTED ⚠️");
             warn!(
                 "🔄 [{:?}] Audio device '{}' ({:?}) reports {} Hz (pipeline expects {} Hz)",
                 device_type, device.name, device_kind, sample_rate, TARGET_SAMPLE_RATE
@@ -280,7 +311,10 @@ impl AudioCapture {
 
         // Initialize audio enhancement processors for MICROPHONE ONLY
         // System audio doesn't need enhancement (already clean)
-        let (noise_suppressor, high_pass_filter, normalizer) = if matches!(device_type, DeviceType::Microphone) {
+        let (noise_suppressor, high_pass_filter, normalizer) = if matches!(
+            device_type,
+            DeviceType::Microphone
+        ) {
             // Initialize noise suppression (RNNoise) at 48kHz - CONDITIONAL based on flag
             let ns = if super::ffmpeg_mixer::RNNOISE_APPLY_ENABLED {
                 match NoiseSuppressionProcessor::new(TARGET_SAMPLE_RATE) {
@@ -302,18 +336,27 @@ impl AudioCapture {
             // Initialize high-pass filter (removes rumble below 80 Hz)
             let hpf = {
                 let filter = HighPassFilter::new(TARGET_SAMPLE_RATE, 80.0);
-                info!("✅ High-pass filter initialized for microphone '{}' (cutoff: 80 Hz)", device.name);
+                info!(
+                    "✅ High-pass filter initialized for microphone '{}' (cutoff: 80 Hz)",
+                    device.name
+                );
                 Some(filter)
             };
 
             // Initialize EBU R128 normalizer (professional loudness standard)
             let norm = match LoudnessNormalizer::new(1, TARGET_SAMPLE_RATE) {
                 Ok(normalizer) => {
-                    info!("✅ EBU R128 normalizer initialized for microphone '{}' (target: -23 LUFS)", device.name);
+                    info!(
+                        "✅ EBU R128 normalizer initialized for microphone '{}' (target: -23 LUFS)",
+                        device.name
+                    );
                     Some(normalizer)
                 }
                 Err(e) => {
-                    warn!("⚠️ Failed to create normalizer for microphone: {}, normalization disabled", e);
+                    warn!(
+                        "⚠️ Failed to create normalizer for microphone: {}, normalization disabled",
+                        e
+                    );
                     None
                 }
             };
@@ -321,7 +364,10 @@ impl AudioCapture {
             (ns, hpf, norm)
         } else {
             // System audio: no enhancement needed
-            info!("ℹ️ System audio '{}' captured raw (no enhancement)", device.name);
+            info!(
+                "ℹ️ System audio '{}' captured raw (no enhancement)",
+                device.name
+            );
             (None, None, None)
         };
 
@@ -356,19 +402,24 @@ impl AudioCapture {
 
             match SincFixedIn::<f32>::new(
                 ratio,
-                2.0,  // Maximum relative deviation
+                2.0, // Maximum relative deviation
                 params,
                 RESAMPLER_CHUNK_SIZE,
-                1,    // Mono
+                1, // Mono
             ) {
                 Ok(resampler) => {
-                    info!("✅ Persistent resampler initialized for '{}' ({}Hz → {}Hz, chunk_size={})",
-                          device.name, sample_rate, TARGET_SAMPLE_RATE, RESAMPLER_CHUNK_SIZE);
+                    info!(
+                        "✅ Persistent resampler initialized for '{}' ({}Hz → {}Hz, chunk_size={})",
+                        device.name, sample_rate, TARGET_SAMPLE_RATE, RESAMPLER_CHUNK_SIZE
+                    );
                     info!("   Buffering enabled for variable-size chunks (e.g., 320, 512, 1024, etc.)");
                     Some(resampler)
                 }
                 Err(e) => {
-                    warn!("⚠️ Failed to create persistent resampler: {}, will use fallback", e);
+                    warn!(
+                        "⚠️ Failed to create persistent resampler: {}, will use fallback",
+                        e
+                    );
                     None
                 }
             }
@@ -386,7 +437,9 @@ impl AudioCapture {
             recording_sender,
             needs_resampling,
             resampler: Arc::new(std::sync::Mutex::new(resampler)),
-            resampler_input_buffer: Arc::new(std::sync::Mutex::new(Vec::with_capacity(RESAMPLER_CHUNK_SIZE * 2))),
+            resampler_input_buffer: Arc::new(std::sync::Mutex::new(Vec::with_capacity(
+                RESAMPLER_CHUNK_SIZE * 2,
+            ))),
             resampler_chunk_size: RESAMPLER_CHUNK_SIZE,
             noise_suppressor: Arc::new(std::sync::Mutex::new(noise_suppressor)),
             high_pass_filter: Arc::new(std::sync::Mutex::new(high_pass_filter)),
@@ -441,7 +494,8 @@ impl AudioCapture {
                         // Process as many complete chunks as we have
                         while buffer_lock.len() >= self.resampler_chunk_size {
                             // Extract exactly chunk_size samples
-                            let chunk: Vec<f32> = buffer_lock.drain(0..self.resampler_chunk_size).collect();
+                            let chunk: Vec<f32> =
+                                buffer_lock.drain(0..self.resampler_chunk_size).collect();
 
                             // Rubato expects input as Vec<Vec<f32>> (one Vec per channel)
                             let waves_in = vec![chunk];
@@ -495,7 +549,11 @@ impl AudioCapture {
                     0.0
                 };
                 let ratio = TARGET_SAMPLE_RATE as f64 / self.sample_rate as f64;
-                let rms_preservation = if before_rms > 0.0 { (after_rms / before_rms) * 100.0 } else { 100.0 };
+                let rms_preservation = if before_rms > 0.0 {
+                    (after_rms / before_rms) * 100.0
+                } else {
+                    100.0
+                };
 
                 let buffer_size = if let Ok(buf) = self.resampler_input_buffer.lock() {
                     buf.len()
@@ -505,18 +563,11 @@ impl AudioCapture {
 
                 info!(
                     "🔄 [{:?}] Persistent buffered resampler: {}Hz → {}Hz (ratio: {:.2}x)",
-                    self.device_type,
-                    self.sample_rate,
-                    TARGET_SAMPLE_RATE,
-                    ratio
+                    self.device_type, self.sample_rate, TARGET_SAMPLE_RATE, ratio
                 );
                 info!(
                     "   Chunk {}: {} → {} samples, RMS preservation: {:.1}%, buffer: {}",
-                    chunk_id,
-                    before_len,
-                    after_len,
-                    rms_preservation,
-                    buffer_size
+                    chunk_id, before_len, after_len, rms_preservation, buffer_size
                 );
             }
         }
@@ -560,8 +611,10 @@ impl AudioCapture {
 
                             // WARN if significant length mismatch
                             if length_delta > 50 {
-                                warn!("⚠️ RNNoise length mismatch: input={} output={} (delta={})",
-                                      before_len, after_len, length_delta);
+                                warn!(
+                                    "⚠️ RNNoise length mismatch: input={} output={} (delta={})",
+                                    before_len, after_len, length_delta
+                                );
                             }
                         }
                     }
@@ -576,16 +629,23 @@ impl AudioCapture {
                     // Log normalization occasionally for debugging
                     let chunk_id = self.chunk_counter.load(std::sync::atomic::Ordering::SeqCst);
                     if chunk_id % 200 == 0 && !mono_data.is_empty() {
-                        let rms = (mono_data.iter().map(|&x| x * x).sum::<f32>() / mono_data.len() as f32).sqrt();
+                        let rms = (mono_data.iter().map(|&x| x * x).sum::<f32>()
+                            / mono_data.len() as f32)
+                            .sqrt();
                         let peak = mono_data.iter().map(|&x| x.abs()).fold(0.0f32, f32::max);
-                        debug!("🎤 After normalization chunk {}: RMS={:.4}, Peak={:.4}", chunk_id, rms, peak);
+                        debug!(
+                            "🎤 After normalization chunk {}: RMS={:.4}, Peak={:.4}",
+                            chunk_id, rms, peak
+                        );
                     }
                 }
             }
         }
 
         // Create audio chunk with stream-specific timestamp (get ID first for logging)
-        let chunk_id = self.chunk_counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let chunk_id = self
+            .chunk_counter
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
 
         // RAW AUDIO: No gain applied here - will be applied AFTER mixing
         // This prevents amplifying system audio bleed-through in the microphone
@@ -608,7 +668,7 @@ impl AudioCapture {
         //     let raw_peak = mono_data.iter().map(|&x| x.abs()).fold(0.0f32, f32::max);
         //     info!("🔊 [{:?}] Chunk {} - Raw: RMS={:.6}, Peak={:.6}",
         //       self.device_type, chunk_id, raw_rms, raw_peak);
-            
+
         //     // Warn if system audio is completely silent
         //     if raw_rms == 0.0 && raw_peak == 0.0 {
         //         warn!("⚠️ System audio producing ZERO audio - check permissions or hardware!");
@@ -621,12 +681,17 @@ impl AudioCapture {
         // RAW AUDIO CHUNK: No gain applied - will be mixed and gained downstream
         // Use 48kHz if we resampled, otherwise use original rate
         let audio_chunk = AudioChunk {
-            data: mono_data,  // Raw audio (resampled if needed), no gain yet
-            sample_rate: if self.needs_resampling { 48000 } else { self.sample_rate },
+            data: mono_data, // Raw audio (resampled if needed), no gain yet
+            sample_rate: if self.needs_resampling {
+                48000
+            } else {
+                self.sample_rate
+            },
             timestamp,
             end_timestamp: None,
             chunk_id,
             device_type: self.device_type.clone(),
+            source_activity: None,
         };
 
         // NOTE: Raw audio is NOT sent to recording saver to prevent echo
@@ -708,6 +773,10 @@ pub struct AudioPipeline {
     mixer: ProfessionalAudioMixer,
     // Recording sender for pre-mixed audio
     recording_sender_for_mixed: Option<mpsc::UnboundedSender<AudioChunk>>,
+    stem_sender: Option<mpsc::UnboundedSender<StemWindow>>,
+    source_activity: VecDeque<SourceActivityWindow>,
+    source_timeline_seconds: f64,
+    system_available: bool,
 }
 
 impl AudioPipeline {
@@ -724,14 +793,28 @@ impl AudioPipeline {
     ) -> Result<Self> {
         // Log device characteristics for adaptive buffering
         info!("🎛️ AudioPipeline initializing with device characteristics:");
-        info!("   Mic: '{}' ({:?}) - Buffer: {:?}",
-              mic_device_name, mic_device_kind, mic_device_kind.buffer_timeout());
-        info!("   System: '{}' ({:?}) - Buffer: {:?}",
-              system_device_name, system_device_kind, system_device_kind.buffer_timeout());
+        info!(
+            "   Mic: '{}' ({:?}) - Buffer: {:?}",
+            mic_device_name,
+            mic_device_kind,
+            mic_device_kind.buffer_timeout()
+        );
+        info!(
+            "   System: '{}' ({:?}) - Buffer: {:?}",
+            system_device_name,
+            system_device_kind,
+            system_device_kind.buffer_timeout()
+        );
 
         // Device kind information can be used for adaptive buffering in the future
         // For now, we log it for monitoring and potential optimization
-        let _ = (mic_device_name, mic_device_kind, system_device_name, system_device_kind);
+        let system_available = system_device_name != "No System Audio";
+        let _ = (
+            mic_device_name,
+            mic_device_kind,
+            system_device_name,
+            system_device_kind,
+        );
 
         // Create VAD processor. The VAD processor handles 48kHz->16kHz resampling
         // internally.
@@ -786,6 +869,10 @@ impl AudioPipeline {
             ring_buffer,
             mixer,
             recording_sender_for_mixed: None,  // Will be set by manager
+            stem_sender: None,
+            source_activity: VecDeque::new(),
+            source_timeline_seconds: 0.0,
+            system_available,
         })
     }
 
@@ -801,13 +888,18 @@ impl AudioPipeline {
             // Receive audio chunks with timeout
             match tokio::time::timeout(
                 std::time::Duration::from_millis(50), // Shorter timeout for responsiveness
-                self.receiver.recv()
-            ).await {
+                self.receiver.recv(),
+            )
+            .await
+            {
                 Ok(Some(chunk)) => {
                     // PERFORMANCE: Check for flush signal (special chunk with ID >= u64::MAX - 10)
                     // Multiple flush signals may be sent to ensure processing
                     if chunk.chunk_id >= u64::MAX - 10 {
-                        info!("📥 Received FLUSH signal #{} - flushing VAD processor", u64::MAX - chunk.chunk_id);
+                        info!(
+                            "📥 Received FLUSH signal #{} - flushing VAD processor",
+                            u64::MAX - chunk.chunk_id
+                        );
                         self.flush_remaining_audio()?;
                         // Continue processing to handle any remaining chunks
                         continue;
@@ -819,8 +911,10 @@ impl AudioPipeline {
 
                     // Smart batching: collect metrics instead of logging every chunk
                     if let Some(ref batcher) = self.metrics_batcher {
-                        let avg_level = chunk.data.iter().map(|&x| x.abs()).sum::<f32>() / chunk.data.len() as f32;
-                        let duration_ms = chunk.data.len() as f64 / chunk.sample_rate as f64 * 1000.0;
+                        let avg_level = chunk.data.iter().map(|&x| x.abs()).sum::<f32>()
+                            / chunk.data.len() as f32;
+                        let duration_ms =
+                            chunk.data.len() as f64 / chunk.sample_rate as f64 * 1000.0;
 
                         batch_audio_metric!(
                             Some(batcher),
@@ -834,20 +928,34 @@ impl AudioPipeline {
                     // CRITICAL: Log summary only every 200 chunks OR every 60 seconds (99.5% reduction)
                     // This eliminates I/O overhead in the audio processing hot path
                     // Use performance-optimized debug macro that compiles to nothing in release builds
-                    if self.processed_chunks % 200 == 0 || self.last_summary_time.elapsed().as_secs() >= 60 {
-                        perf_debug!("Pipeline processed {} chunks, current chunk: {} ({} samples)",
-                                   self.processed_chunks, chunk.chunk_id, chunk.data.len());
+                    if self.processed_chunks % 200 == 0
+                        || self.last_summary_time.elapsed().as_secs() >= 60
+                    {
+                        perf_debug!(
+                            "Pipeline processed {} chunks, current chunk: {} ({} samples)",
+                            self.processed_chunks,
+                            chunk.chunk_id,
+                            chunk.data.len()
+                        );
                         self.last_summary_time = std::time::Instant::now();
                     }
 
                     // STEP 1: Add raw audio to ring buffer for mixing
                     // Microphone audio is already normalized at capture level (AudioCapture)
                     // System audio remains raw
-                    self.ring_buffer.add_samples(chunk.device_type.clone(), chunk.data);
+                    self.ring_buffer
+                        .add_samples(chunk.device_type.clone(), chunk.data);
 
                     // STEP 2: Mix audio in fixed windows when both streams have sufficient data
                     while self.ring_buffer.can_mix() {
                         if let Some((mic_window, sys_window)) = self.ring_buffer.extract_window() {
+                            if let Some(sender) = &self.stem_sender {
+                                let _ = sender.send(StemWindow {
+                                    microphone: mic_window.clone(),
+                                    system: sys_window.clone(),
+                                });
+                            }
+                            self.record_source_activity(&mic_window, &sys_window);
                             // Simple mixing without aggressive ducking
                             let mixed_clean = self.mixer.mix_window(&mic_window, &sys_window);
 
@@ -861,22 +969,37 @@ impl AudioPipeline {
                             match self.vad_processor.process_audio(&mixed_with_gain) {
                                 Ok(speech_segments) => {
                                     for segment in speech_segments {
-                                        let duration_ms = segment.end_timestamp_ms - segment.start_timestamp_ms;
+                                        let duration_ms =
+                                            segment.end_timestamp_ms - segment.start_timestamp_ms;
 
-                                        if segment.samples.len() >= 800 {  // Minimum 50ms at 16kHz - matches Parakeet capability
-                                            info!("📤 Sending VAD segment: {:.1}ms, {} samples",
-                                                  duration_ms, segment.samples.len());
+                                        if segment.samples.len() >= 800 {
+                                            // Minimum 50ms at 16kHz - matches Parakeet capability
+                                            info!(
+                                                "📤 Sending VAD segment: {:.1}ms, {} samples",
+                                                duration_ms,
+                                                segment.samples.len()
+                                            );
 
                                             let transcription_chunk = AudioChunk {
                                                 data: segment.samples,
                                                 sample_rate: 16000,
                                                 timestamp: segment.start_timestamp_ms / 1000.0,
-                                                end_timestamp: Some(segment.end_timestamp_ms / 1000.0),
+                                                end_timestamp: Some(
+                                                    segment.end_timestamp_ms / 1000.0,
+                                                ),
                                                 chunk_id: self.chunk_id_counter,
-                                                device_type: DeviceType::Microphone,  // Mixed audio
+                                                device_type: DeviceType::Microphone, // Mixed audio
+                                                source_activity: Some(
+                                                    self.source_activity_for_interval(
+                                                        segment.start_timestamp_ms / 1000.0,
+                                                        segment.end_timestamp_ms / 1000.0,
+                                                    ),
+                                                ),
                                             };
 
-                                            if let Err(e) = self.transcription_sender.send(transcription_chunk) {
+                                            if let Err(e) =
+                                                self.transcription_sender.send(transcription_chunk)
+                                            {
                                                 warn!("Failed to send VAD segment: {}", e);
                                             } else {
                                                 self.chunk_id_counter += 1;
@@ -900,7 +1023,8 @@ impl AudioPipeline {
                                     timestamp: chunk.timestamp,
                                     end_timestamp: None,
                                     chunk_id: self.chunk_id_counter,
-                                    device_type: DeviceType::Microphone,  // Mixed audio
+                                    device_type: DeviceType::Microphone, // Mixed audio
+                                    source_activity: None,
                                 };
                                 let _ = sender.send(recording_chunk);
                             }
@@ -908,7 +1032,10 @@ impl AudioPipeline {
                     }
                 }
                 Ok(None) => {
-                    info!("Audio pipeline: sender closed after processing {} chunks", self.processed_chunks);
+                    info!(
+                        "Audio pipeline: sender closed after processing {} chunks",
+                        self.processed_chunks
+                    );
                     break;
                 }
                 Err(_) => {
@@ -926,7 +1053,10 @@ impl AudioPipeline {
     }
 
     fn flush_remaining_audio(&mut self) -> Result<()> {
-        info!("Flushing remaining audio from pipeline (processed {} chunks)", self.processed_chunks);
+        info!(
+            "Flushing remaining audio from pipeline (processed {} chunks)",
+            self.processed_chunks
+        );
 
         // Flush any remaining audio from VAD processor and send segments to transcription
         match self.vad_processor.flush() {
@@ -936,8 +1066,11 @@ impl AudioPipeline {
 
                     // Send segments >= 50ms (800 samples at 16kHz) - matches main pipeline filter
                     if segment.samples.len() >= 800 {
-                        info!("📤 Sending final VAD segment to Whisper: {:.1}ms duration, {} samples",
-                              duration_ms, segment.samples.len());
+                        info!(
+                            "📤 Sending final VAD segment to Whisper: {:.1}ms duration, {} samples",
+                            duration_ms,
+                            segment.samples.len()
+                        );
 
                         let transcription_chunk = AudioChunk {
                             data: segment.samples,
@@ -946,6 +1079,10 @@ impl AudioPipeline {
                             end_timestamp: Some(segment.end_timestamp_ms / 1000.0),
                             chunk_id: self.chunk_id_counter,
                             device_type: DeviceType::Microphone,
+                            source_activity: Some(self.source_activity_for_interval(
+                                segment.start_timestamp_ms / 1000.0,
+                                segment.end_timestamp_ms / 1000.0,
+                            )),
                         };
 
                         if let Err(e) = self.transcription_sender.send(transcription_chunk) {
@@ -954,8 +1091,11 @@ impl AudioPipeline {
                             self.chunk_id_counter += 1;
                         }
                     } else {
-                        info!("⏭️ Skipping short final segment: {:.1}ms ({} samples < 800)",
-                              duration_ms, segment.samples.len());
+                        info!(
+                            "⏭️ Skipping short final segment: {:.1}ms ({} samples < 800)",
+                            duration_ms,
+                            segment.samples.len()
+                        );
                     }
                 }
             }
@@ -967,6 +1107,41 @@ impl AudioPipeline {
         Ok(())
     }
 
+    fn record_source_activity(&mut self, microphone: &[f32], system: &[f32]) {
+        let duration = microphone.len().max(system.len()) as f64 / self.sample_rate as f64;
+        let start = self.source_timeline_seconds;
+        let end = start + duration;
+        self.source_timeline_seconds = end;
+        self.source_activity.push_back(SourceActivityWindow {
+            start,
+            end,
+            microphone_active: rms(microphone) >= 0.003,
+            system_active: rms(system) >= 0.003,
+        });
+        while self
+            .source_activity
+            .front()
+            .is_some_and(|window| window.end < end - 120.0)
+        {
+            self.source_activity.pop_front();
+        }
+    }
+
+    fn source_activity_for_interval(&self, start: f64, end: f64) -> SourceActivity {
+        let mut microphone_active = false;
+        let mut system_active = false;
+        for window in &self.source_activity {
+            if window.end > start && window.start < end {
+                microphone_active |= window.microphone_active;
+                system_active |= window.system_active;
+            }
+        }
+        SourceActivity {
+            microphone_active,
+            system_active,
+            system_available: self.system_available,
+        }
+    }
 }
 
 /// Simple audio pipeline manager
@@ -991,6 +1166,7 @@ impl AudioPipelineManager {
         target_chunk_duration_ms: u32,
         sample_rate: u32,
         recording_sender: Option<mpsc::UnboundedSender<AudioChunk>>,
+        stem_sender: Option<mpsc::UnboundedSender<StemWindow>>,
         mic_device_name: String,
         mic_device_kind: super::device_detection::InputDeviceKind,
         system_device_name: String,
@@ -998,8 +1174,14 @@ impl AudioPipelineManager {
     ) -> Result<()> {
         // Log device information for adaptive buffering
         info!("🎙️ Starting pipeline with device info:");
-        info!("   Microphone: '{}' ({:?})", mic_device_name, mic_device_kind);
-        info!("   System Audio: '{}' ({:?})", system_device_name, system_device_kind);
+        info!(
+            "   Microphone: '{}' ({:?})",
+            mic_device_name, mic_device_kind
+        );
+        info!(
+            "   System Audio: '{}' ({:?})",
+            system_device_name, system_device_kind
+        );
 
         // Create audio processing channel
         let (audio_sender, audio_receiver) = mpsc::unbounded_channel::<AudioChunk>();
@@ -1022,10 +1204,9 @@ impl AudioPipelineManager {
         // CRITICAL FIX: Connect recording sender to receive pre-mixed audio
         // This ensures both mic AND system audio are captured in recordings
         pipeline.recording_sender_for_mixed = recording_sender;
+        pipeline.stem_sender = stem_sender;
 
-        let handle = tokio::spawn(async move {
-            pipeline.run().await
-        });
+        let handle = tokio::spawn(async move { pipeline.run().await });
 
         self.pipeline_handle = Some(handle);
         self.audio_sender = Some(audio_sender);
@@ -1068,6 +1249,7 @@ impl AudioPipelineManager {
                 end_timestamp: None,
                 chunk_id: u64::MAX, // Special ID to indicate flush
                 device_type: super::recording_state::DeviceType::Microphone,
+                source_activity: None,
             };
 
             if let Err(e) = sender.send(flush_chunk) {
@@ -1089,6 +1271,7 @@ impl AudioPipelineManager {
                         end_timestamp: None,
                         chunk_id: u64::MAX - (i as u64),
                         device_type: super::recording_state::DeviceType::Microphone,
+                        source_activity: None,
                     };
                     let _ = sender.send(additional_flush);
                 }

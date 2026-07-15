@@ -25,6 +25,10 @@ pub struct SpeakerSegment {
     pub end_time: f64,
     pub speaker_id: Option<String>,
     pub speaker_label: Option<String>,
+    #[serde(default)]
+    pub speaker_profile_id: Option<String>,
+    #[serde(default)]
+    pub candidate_speaker_ids: Vec<String>,
     pub confidence: Option<f64>,
     pub is_overlap: bool,
     pub diarization_status: DiarizationStatus,
@@ -42,8 +46,11 @@ pub struct TranscriptWindow {
 pub struct SpeakerAssignment {
     pub speaker_id: Option<String>,
     pub speaker_label: Option<String>,
+    pub speaker_profile_id: Option<String>,
+    pub speaker_source: Option<String>,
     pub speaker_color: Option<String>,
     pub is_overlap: bool,
+    pub candidate_speaker_ids: Vec<String>,
     pub diarization_status: DiarizationStatus,
     pub diarization_method: Option<String>,
     pub diarization_confidence: Option<f64>,
@@ -54,8 +61,11 @@ impl SpeakerAssignment {
         Self {
             speaker_id: None,
             speaker_label: Some("Unknown speaker".to_string()),
+            speaker_profile_id: None,
+            speaker_source: None,
             speaker_color: None,
             is_overlap: false,
+            candidate_speaker_ids: Vec::new(),
             diarization_status: status,
             diarization_method: method.map(Into::into),
             diarization_confidence: None,
@@ -66,8 +76,11 @@ impl SpeakerAssignment {
         Self {
             speaker_id: None,
             speaker_label: Some("Multiple speakers".to_string()),
+            speaker_profile_id: None,
+            speaker_source: None,
             speaker_color: Some("#f97316".to_string()),
             is_overlap: true,
+            candidate_speaker_ids: Vec::new(),
             diarization_status: status,
             diarization_method: Some(method.into()),
             diarization_confidence: Some(confidence),

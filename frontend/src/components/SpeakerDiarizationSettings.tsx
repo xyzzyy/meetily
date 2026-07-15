@@ -1,6 +1,11 @@
 'use client';
 
+import { useEffect, useState } from 'react';
+import { invoke } from '@tauri-apps/api/core';
+import { listen } from '@tauri-apps/api/event';
+import { message } from '@tauri-apps/plugin-dialog';
 import { Switch } from '@/components/ui/switch';
+import { Button } from '@/components/ui/button';
 import {
   Select,
   SelectContent,
@@ -15,6 +20,12 @@ import { useConfig } from '@/contexts/ConfigContext';
 import type { DiarizationMode } from '@/types/diarization';
 
 export function SpeakerDiarizationSettings() {
+  const [modelInstalled, setModelInstalled] = useState(false);
+  const [modelBusy, setModelBusy] = useState(false);
+  const [downloadPercent, setDownloadPercent] = useState<number | null>(null);
+  const [profiles, setProfiles] = useState<Array<{
+    id: string; name: string; modelVersion: string; sampleCount: number; speechSeconds: number;
+  }>>([]);
   const {
     betaFeatures,
     diarizationSettings,
@@ -22,9 +33,58 @@ export function SpeakerDiarizationSettings() {
     updateDiarizationSettings,
   } = useConfig();
 
+  useEffect(() => {
+    invoke<{ installed: boolean }>('get_diarization_model_status')
+      .then(status => setModelInstalled(status.installed))
+      .catch(error => console.error('[SpeakerDiarizationSettings] Model status failed:', error));
+    invoke<typeof profiles>('list_speaker_profiles')
+      .then(setProfiles)
+      .catch(error => console.error('[SpeakerDiarizationSettings] Profile list failed:', error));
+
+    const unlistenPromise = listen<{ percent: number }>('diarization-model-download-progress', event => {
+      setDownloadPercent(event.payload.percent);
+    });
+    return () => { unlistenPromise.then(unlisten => unlisten()); };
+  }, []);
+
   if (!betaFeatures.speakerDiarization) {
     return null;
   }
+
+  const downloadModel = async () => {
+    setModelBusy(true);
+    setDownloadPercent(0);
+    try {
+      await invoke('download_diarization_model');
+      setModelInstalled(true);
+      setDownloadPercent(null);
+    } catch (error) {
+      await message(String(error), { title: 'Speaker model download failed', kind: 'error' });
+    } finally {
+      setModelBusy(false);
+    }
+  };
+
+  const deleteModel = async () => {
+    setModelBusy(true);
+    try {
+      await invoke('delete_diarization_model');
+      setModelInstalled(false);
+    } catch (error) {
+      await message(String(error), { title: 'Could not delete speaker model', kind: 'error' });
+    } finally {
+      setModelBusy(false);
+    }
+  };
+
+  const deleteProfile = async (profileId: string) => {
+    try {
+      await invoke('delete_speaker_profile', { profileId });
+      setProfiles(current => current.filter(profile => profile.id !== profileId));
+    } catch (error) {
+      await message(String(error), { title: 'Could not delete remembered voice', kind: 'error' });
+    }
+  };
 
   const update = (patch: Partial<typeof diarizationSettings>) => {
     updateDiarizationSettings({ ...diarizationSettings, ...patch })
@@ -61,12 +121,27 @@ export function SpeakerDiarizationSettings() {
       badge={<SettingsStatusBadge tone="beta">Beta</SettingsStatusBadge>}
     >
       <SettingsRow
+        title="Local speaker model"
+        description={modelInstalled ? 'Installed locally (28 MB).' : 'Required for live speaker recognition and remembered voices.'}
+        control={modelInstalled ? (
+          <div className="flex items-center gap-2">
+            <SettingsStatusBadge tone="local">Installed</SettingsStatusBadge>
+            <Button variant="outline" size="sm" disabled={modelBusy} onClick={deleteModel}>Delete</Button>
+          </div>
+        ) : (
+          <Button size="sm" disabled={modelBusy} onClick={downloadModel}>
+            {downloadPercent !== null ? `Downloading ${downloadPercent}%` : 'Download model'}
+          </Button>
+        )}
+      />
+
+      <SettingsRow
         title="Enable speaker diarization"
         description="Add speaker labels to transcripts without identifying people by voice."
         control={
           <Switch
             checked={diarizationSettings.enabled}
-            disabled={isLoadingDiarizationSettings}
+            disabled={isLoadingDiarizationSettings || !modelInstalled}
             onCheckedChange={handleEnabledChange}
           />
         }
@@ -135,6 +210,19 @@ export function SpeakerDiarizationSettings() {
           />
         }
       />
+
+      {profiles.map(profile => (
+        <SettingsRow
+          key={profile.id}
+          title={profile.name}
+          description={`Remembered locally from ${profile.speechSeconds.toFixed(1)} seconds of speech. No voice clip is stored.`}
+          control={
+            <Button variant="outline" size="sm" onClick={() => void deleteProfile(profile.id)}>
+              Forget voice
+            </Button>
+          }
+        />
+      ))}
     </SettingsSection>
   );
 }

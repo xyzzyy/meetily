@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import { useRouter } from 'next/navigation';
 import { listen } from '@tauri-apps/api/event';
 import { toast } from 'sonner';
+import { invoke } from '@tauri-apps/api/core';
 import { useTranscripts } from '@/contexts/TranscriptContext';
 import { useSidebar } from '@/components/Sidebar/SidebarProvider';
 import { useRecordingState, RecordingStatus } from '@/contexts/RecordingStateContext';
@@ -292,6 +293,22 @@ export function useRecordingStop(
           console.log('✅ Successfully saved COMPLETE meeting with ID:', meetingId);
           console.log('   Transcripts:', freshTranscripts.length);
           console.log('   folder_path:', folderPath);
+
+          void (async () => {
+            try {
+              const settings = await invoke<{ enabled: boolean; postCallRefinementEnabled: boolean }>(
+                'get_diarization_settings'
+              );
+              if (settings.enabled && settings.postCallRefinementEnabled && folderPath) {
+                await invoke('start_final_diarization', {
+                  request: { meetingId, overwriteManualEdits: false }
+                });
+                await refetchMeetings();
+              }
+            } catch (error) {
+              console.warn('Final speaker refinement kept the live transcript:', error);
+            }
+          })();
 
           // Mark meeting as saved in IndexedDB (for recovery system)
           await markMeetingAsSaved();

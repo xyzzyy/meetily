@@ -1,7 +1,7 @@
-use std::sync::Arc;
-use tokio::sync::mpsc;
 use anyhow::Result;
 use log::{debug, error, info, warn};
+use std::sync::Arc;
+use tokio::sync::mpsc;
 #[cfg(target_os = "macos")]
 use std::time::Duration;
 #[cfg(target_os = "macos")]
@@ -10,9 +10,10 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use super::devices::AudioDevice;
 
 use super::recording_state::{RecordingState, AudioChunk};
+use super::diarization_stems::DiarizationStemSaver;
 use super::pipeline::AudioPipelineManager;
-use super::stream::AudioStreamManager;
 use super::recording_saver::RecordingSaver;
+use super::stream::AudioStreamManager;
 use super::device_monitor::{AudioDeviceMonitor, DeviceEvent};
 
 /// Stream manager type enumeration
@@ -191,6 +192,8 @@ pub struct RecordingManager {
     recording_saver: RecordingSaver,
     device_monitor: Option<AudioDeviceMonitor>,
     device_event_receiver: Option<mpsc::UnboundedReceiver<DeviceEvent>>,
+    diarization_enabled: bool,
+    stem_saver: Option<DiarizationStemSaver>,
 }
 
 // SAFETY: RecordingManager contains types that we've marked as Send
@@ -211,6 +214,8 @@ impl RecordingManager {
             recording_saver: RecordingSaver::new(),
             device_monitor: Some(device_monitor),
             device_event_receiver: Some(device_event_receiver),
+            diarization_enabled: false,
+            stem_saver: None,
         }
     }
 
@@ -237,6 +242,24 @@ impl RecordingManager {
         let (transcription_sender, transcription_receiver) = mpsc::unbounded_channel::<AudioChunk>();
         let (recording_sender, recording_receiver) = mpsc::unbounded_channel::<AudioChunk>();
 
+        let stem_sender = if self.diarization_enabled {
+            self.recording_saver
+                .get_meeting_folder()
+                .and_then(|folder| match DiarizationStemSaver::start(folder) {
+                    Ok(saver) => {
+                        let sender = saver.sender();
+                        self.stem_saver = Some(saver);
+                        sender
+                    }
+                    Err(error) => {
+                        warn!("Diarization stems unavailable; recording will continue: {error}");
+                        None
+                    }
+                })
+        } else {
+            None
+        };
+
         // Start recording state first
         self.state.start_recording()?;
 
@@ -245,17 +268,25 @@ impl RecordingManager {
         // - Bluetooth: Larger buffers (80-200ms) to handle jitter
         // - Wired: Smaller buffers (20-50ms) for low latency
         let (mic_name, mic_kind) = if let Some(ref mic) = microphone_device {
-            let device_kind = super::device_detection::InputDeviceKind::detect(&mic.name, 512, 48000);
+            let device_kind =
+                super::device_detection::InputDeviceKind::detect(&mic.name, 512, 48000);
             (mic.name.clone(), device_kind)
         } else {
-            ("No Microphone".to_string(), super::device_detection::InputDeviceKind::Unknown)
+            (
+                "No Microphone".to_string(),
+                super::device_detection::InputDeviceKind::Unknown,
+            )
         };
 
         let (sys_name, sys_kind) = if let Some(ref sys) = system_device {
-            let device_kind = super::device_detection::InputDeviceKind::detect(&sys.name, 512, 48000);
+            let device_kind =
+                super::device_detection::InputDeviceKind::detect(&sys.name, 512, 48000);
             (sys.name.clone(), device_kind)
         } else {
-            ("No System Audio".to_string(), super::device_detection::InputDeviceKind::Unknown)
+            (
+                "No System Audio".to_string(),
+                super::device_detection::InputDeviceKind::Unknown,
+            )
         };
 
         // Start the audio processing pipeline with FFmpeg adaptive mixer
@@ -264,9 +295,10 @@ impl RecordingManager {
         if let Err(error) = self.pipeline_manager.start(
             self.state.clone(),
             transcription_sender,
-            0, // Ignored - using dynamic sizing internally
-            48000, // 48kHz sample rate
+            0,                      // Ignored - using dynamic sizing internally
+            48000,                  // 48kHz sample rate
             Some(recording_sender), // CRITICAL: Pass recording sender to receive pre-mixed audio
+            stem_sender,
             mic_name,
             mic_kind,
             sys_name,
@@ -287,7 +319,9 @@ impl RecordingManager {
 
         // Start audio streams - they send RAW unmixed chunks to pipeline for mixing
         // Pipeline handles mixing and distribution to both recording and transcription
-        self.stream_manager.start_streams(microphone_device.clone(), system_device.clone(), None).await?;
+        self.stream_manager
+            .start_streams(microphone_device.clone(), system_device.clone(), None)
+            .await?;
 
         // Start device monitoring to detect disconnects
         if let Some(ref mut monitor) = self.device_monitor {
@@ -299,8 +333,10 @@ impl RecordingManager {
             }
         }
 
-        info!("Recording manager started successfully with {} active streams",
-               self.stream_manager.active_stream_count());
+        info!(
+            "Recording manager started successfully with {} active streams",
+            self.stream_manager.active_stream_count()
+        );
 
         Ok(transcription_receiver)
     }
@@ -365,7 +401,10 @@ impl RecordingManager {
     }
 
     /// Save recording after transcription is complete
-    pub async fn save_recording_only<R: tauri::Runtime>(&mut self, app: &tauri::AppHandle<R>) -> Result<()> {
+    pub async fn save_recording_only<R: tauri::Runtime>(
+        &mut self,
+        app: &tauri::AppHandle<R>,
+    ) -> Result<()> {
         debug!("Saving recording with transcript chunks");
 
         // Get actual recording duration from state
@@ -373,7 +412,11 @@ impl RecordingManager {
         info!("Recording duration from state: {:?}s", recording_duration);
 
         // Save the recording with actual duration
-        match self.recording_saver.stop_and_save(app, recording_duration).await {
+        match self
+            .recording_saver
+            .stop_and_save(app, recording_duration)
+            .await
+        {
             Ok(Some(file_path)) => {
                 info!("Recording saved successfully to: {}", file_path);
             }
@@ -387,11 +430,15 @@ impl RecordingManager {
         }
 
         debug!("Recording save operation completed");
+        self.finalize_diarization_stems().await;
         Ok(())
     }
 
     /// Stop recording and save audio (legacy method)
-    pub async fn stop_recording<R: tauri::Runtime>(&mut self, app: &tauri::AppHandle<R>) -> Result<()> {
+    pub async fn stop_recording<R: tauri::Runtime>(
+        &mut self,
+        app: &tauri::AppHandle<R>,
+    ) -> Result<()> {
         info!("Stopping recording manager");
 
         // Get recording duration BEFORE stopping (important!)
@@ -410,9 +457,14 @@ impl RecordingManager {
         if let Err(e) = self.pipeline_manager.stop().await {
             error!("Error stopping audio pipeline: {}", e);
         }
+        self.finalize_diarization_stems().await;
 
         // Save the recording with actual duration
-        match self.recording_saver.stop_and_save(app, recording_duration).await {
+        match self
+            .recording_saver
+            .stop_and_save(app, recording_duration)
+            .await
+        {
             Ok(Some(file_path)) => {
                 info!("Recording saved successfully to: {}", file_path);
             }
@@ -512,6 +564,18 @@ impl RecordingManager {
     /// Set the meeting name for this recording session
     pub fn set_meeting_name(&mut self, name: Option<String>) {
         self.recording_saver.set_meeting_name(name);
+    }
+
+    pub fn set_diarization_enabled(&mut self, enabled: bool) {
+        self.diarization_enabled = enabled;
+    }
+
+    async fn finalize_diarization_stems(&mut self) {
+        if let Some(mut saver) = self.stem_saver.take() {
+            if let Err(error) = saver.finalize().await {
+                warn!("Diarization stem finalization failed; recording remains usable: {error}");
+            }
+        }
     }
 
     /// Add a structured transcript segment to be saved later

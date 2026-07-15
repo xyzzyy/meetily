@@ -4,12 +4,15 @@
 
 use super::engine::TranscriptionEngine;
 use super::provider::TranscriptionError;
+use crate::audio::recording_state::SourceActivity;
 use crate::audio::AudioChunk;
+use crate::database::repositories::speaker_profile::SpeakerProfilesRepository;
+use crate::diarization::session::DiarizationSession;
 use log::{error, info, warn};
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
-use tauri::{AppHandle, Emitter, Runtime};
+use tauri::{AppHandle, Emitter, Manager, Runtime};
 
 // Sequence counter for transcript updates
 static SEQUENCE_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -20,7 +23,10 @@ static SPEECH_DETECTED_EMITTED: AtomicBool = AtomicBool::new(false);
 /// Reset the speech detected flag for a new recording session
 pub fn reset_speech_detected_flag() {
     SPEECH_DETECTED_EMITTED.store(false, Ordering::SeqCst);
-    info!("🔍 SPEECH_DETECTED_EMITTED reset to: {}", SPEECH_DETECTED_EMITTED.load(Ordering::SeqCst));
+    info!(
+        "🔍 SPEECH_DETECTED_EMITTED reset to: {}",
+        SPEECH_DETECTED_EMITTED.load(Ordering::SeqCst)
+    );
 }
 
 /// Returns true if the transcript text is non-trivial and should be emitted.
@@ -41,7 +47,137 @@ pub struct TranscriptUpdate {
     // NEW: Recording-relative timestamps for playback sync
     pub audio_start_time: f64, // Seconds from recording start (e.g., 125.3)
     pub audio_end_time: f64,   // Seconds from recording start (e.g., 128.6)
-    pub duration: f64,          // Segment duration in seconds (e.g., 3.3)
+    pub duration: f64,         // Segment duration in seconds (e.g., 3.3)
+    pub speaker_id: Option<String>,
+    pub speaker_label: Option<String>,
+    pub speaker_profile_id: Option<String>,
+    pub speaker_source: Option<String>,
+    pub speaker_color: Option<String>,
+    pub is_overlap: Option<bool>,
+    pub candidate_speaker_ids: Option<Vec<String>>,
+    pub diarization_status: Option<String>,
+    pub diarization_method: Option<String>,
+    pub diarization_confidence: Option<f32>,
+}
+
+#[derive(Default)]
+struct LiveSpeakerAssignment {
+    speaker_id: Option<String>,
+    speaker_label: Option<String>,
+    speaker_profile_id: Option<String>,
+    speaker_source: Option<String>,
+    speaker_color: Option<String>,
+    is_overlap: Option<bool>,
+    candidate_speaker_ids: Option<Vec<String>>,
+    diarization_status: Option<String>,
+    diarization_method: Option<String>,
+    confidence: Option<f32>,
+}
+
+async fn initialize_live_diarization<R: Runtime>(app: &AppHandle<R>) -> Option<DiarizationSession> {
+    let state = app.state::<crate::state::AppState>();
+    let settings = crate::database::repositories::diarization::DiarizationRepository::get_settings(
+        state.db_manager.pool(),
+    )
+    .await
+    .ok()?;
+    if settings.enabled == 0 || settings.show_provisional_labels == 0 {
+        return None;
+    }
+
+    let model_path = crate::diarization::models::embedding_model_path(app).ok()?;
+    if crate::diarization::models::validate_model_file(&model_path).is_err() {
+        warn!("Live speaker labels disabled because the WeSpeaker model is unavailable");
+        return None;
+    }
+    let profiles = SpeakerProfilesRepository::list(state.db_manager.pool())
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|profile| {
+            profile.model_version == crate::diarization::models::EMBEDDING_MODEL_VERSION
+        })
+        .map(|profile| (profile.id, profile.name, profile.embedding))
+        .collect();
+
+    tokio::task::spawn_blocking(move || DiarizationSession::with_profiles(&model_path, profiles))
+        .await
+        .ok()?
+        .map_err(|error| warn!("Unable to start live speaker recognition: {error}"))
+        .ok()
+}
+
+fn assign_live_speaker(
+    activity: Option<&SourceActivity>,
+    samples: &[f32],
+    session: &mut Option<DiarizationSession>,
+) -> LiveSpeakerAssignment {
+    let Some(activity) = activity else {
+        return LiveSpeakerAssignment::default();
+    };
+    let base = |id: &str, label: &str, source: &str, overlap: bool| LiveSpeakerAssignment {
+        speaker_id: Some(id.to_string()),
+        speaker_label: Some(label.to_string()),
+        speaker_source: Some(source.to_string()),
+        speaker_color: Some(if overlap { "orange" } else { "blue" }.to_string()),
+        is_overlap: Some(overlap),
+        diarization_status: Some("provisional".to_string()),
+        diarization_method: Some("live_source_wespeaker".to_string()),
+        ..Default::default()
+    };
+
+    match (activity.microphone_active, activity.system_active) {
+        (true, true) => {
+            let mut assignment = base("multiple-speakers", "Multiple speakers", "mixed", true);
+            assignment.candidate_speaker_ids = Some(vec!["local-you".to_string()]);
+            assignment
+        }
+        (true, false) if activity.system_available => base("local-you", "You", "microphone", false),
+        (true, false) | (false, true) => {
+            let source = if activity.system_active {
+                "system"
+            } else {
+                "microphone"
+            };
+            if let Some(result) = session
+                .as_mut()
+                .and_then(|session| session.label_segment_detailed(samples))
+            {
+                let mut assignment = base(
+                    result.profile_id.as_deref().unwrap_or_else(|| {
+                        if source == "system" {
+                            "remote-speaker"
+                        } else {
+                            "room-speaker"
+                        }
+                    }),
+                    &result.label,
+                    source,
+                    false,
+                );
+                if result.profile_id.is_none() {
+                    assignment.speaker_id = Some(format!(
+                        "{}-{}",
+                        if source == "system" { "remote" } else { "room" },
+                        result
+                            .label
+                            .to_lowercase()
+                            .replace(|character: char| !character.is_ascii_alphanumeric(), "-")
+                    ));
+                }
+                assignment.speaker_profile_id = result.profile_id;
+                assignment.confidence = Some(result.confidence);
+                if result.needs_review {
+                    assignment.diarization_status = Some("needs_review".to_string());
+                    assignment.speaker_color = Some("gray".to_string());
+                }
+                assignment
+            } else {
+                base("unknown-speaker", "Unknown speaker", source, false)
+            }
+        }
+        (false, false) => base("unknown-speaker", "Unknown speaker", "mixed", false),
+    }
 }
 
 /// Resolve stable recording-relative timing for a transcription chunk.
@@ -81,7 +217,8 @@ pub fn start_transcription_task<R: Runtime>(
         info!("🚀 Starting optimized parallel transcription task - guaranteeing zero chunk loss");
 
         // Initialize transcription engine (Whisper or Parakeet based on config)
-        let transcription_engine = match super::engine::get_or_init_transcription_engine(&app).await {
+        let transcription_engine = match super::engine::get_or_init_transcription_engine(&app).await
+        {
             Ok(engine) => engine,
             Err(e) => {
                 error!("Failed to initialize transcription engine: {}", e);
@@ -105,7 +242,11 @@ pub fn start_transcription_task<R: Runtime>(
         let chunks_completed = Arc::new(AtomicU64::new(0));
         let input_finished = Arc::new(AtomicBool::new(false));
 
-        info!("📊 Starting {} transcription worker{} (serial mode for ordered emission)", NUM_WORKERS, if NUM_WORKERS == 1 { "" } else { "s" });
+        info!(
+            "📊 Starting {} transcription worker{} (serial mode for ordered emission)",
+            NUM_WORKERS,
+            if NUM_WORKERS == 1 { "" } else { "s" }
+        );
 
         // Spawn worker tasks
         let mut worker_handles = Vec::new();
@@ -123,6 +264,7 @@ pub fn start_transcription_task<R: Runtime>(
 
             let worker_handle = tokio::spawn(async move {
                 info!("👷 Worker {} started", worker_id);
+                let mut diarization_session = initialize_live_diarization(&app_clone).await;
 
                 // PRE-VALIDATE model state to avoid repeated async calls per chunk
                 let initial_model_loaded = engine_clone.is_model_loaded().await;
@@ -139,7 +281,10 @@ pub fn start_transcription_task<R: Runtime>(
                         worker_id, engine_name, current_model
                     );
                 } else {
-                    warn!("⚠️ Worker {} pre-validation: {} model not loaded - chunks may be skipped", worker_id, engine_name);
+                    warn!(
+                        "⚠️ Worker {} pre-validation: {} model not loaded - chunks may be skipped",
+                        worker_id, engine_name
+                    );
                 }
 
                 loop {
@@ -174,14 +319,15 @@ pub fn start_transcription_task<R: Runtime>(
 
                             let (audio_start_time, audio_end_time, chunk_duration) =
                                 resolve_transcript_timing(&chunk);
+                            let live_speaker = assign_live_speaker(
+                                chunk.source_activity.as_ref(),
+                                &chunk.data,
+                                &mut diarization_session,
+                            );
 
                             // Transcribe with provider-agnostic approach
-                            match transcribe_chunk_with_provider(
-                                &engine_clone,
-                                chunk,
-                                &app_clone,
-                            )
-                            .await
+                            match transcribe_chunk_with_provider(&engine_clone, chunk, &app_clone)
+                                .await
                             {
                                 Ok((transcript, confidence_opt, is_partial)) => {
                                     let confidence_str = match confidence_opt {
@@ -199,7 +345,8 @@ pub fn start_transcription_task<R: Runtime>(
 
                                         // Emit speech-detected event for frontend UX (only on first detection per session)
                                         // This is lightweight and provides better user feedback
-                                        let current_flag = SPEECH_DETECTED_EMITTED.load(Ordering::SeqCst);
+                                        let current_flag =
+                                            SPEECH_DETECTED_EMITTED.load(Ordering::SeqCst);
                                         info!("🔍 Checking speech-detected flag: current={}, will_emit={}", current_flag, !current_flag);
 
                                         if !current_flag {
@@ -215,7 +362,8 @@ pub fn start_transcription_task<R: Runtime>(
                                         }
 
                                         // Generate sequence ID and calculate timestamps FIRST
-                                        let sequence_id = SEQUENCE_COUNTER.fetch_add(1, Ordering::SeqCst);
+                                        let sequence_id =
+                                            SEQUENCE_COUNTER.fetch_add(1, Ordering::SeqCst);
                                         // Save structured transcript segment to recording manager (only final results)
                                         // Save ALL segments (partial and final) to ensure complete JSON
                                         // Create structured segment with full timestamp data
@@ -237,6 +385,17 @@ pub fn start_transcription_task<R: Runtime>(
                                             audio_start_time,
                                             audio_end_time,
                                             duration: chunk_duration,
+                                            speaker_id: live_speaker.speaker_id,
+                                            speaker_label: live_speaker.speaker_label,
+                                            speaker_profile_id: live_speaker.speaker_profile_id,
+                                            speaker_source: live_speaker.speaker_source,
+                                            speaker_color: live_speaker.speaker_color,
+                                            is_overlap: live_speaker.is_overlap,
+                                            candidate_speaker_ids: live_speaker
+                                                .candidate_speaker_ids,
+                                            diarization_status: live_speaker.diarization_status,
+                                            diarization_method: live_speaker.diarization_method,
+                                            diarization_confidence: live_speaker.confidence,
                                         };
 
                                         if let Err(e) = app_clone.emit("transcript-update", &update)
@@ -259,13 +418,20 @@ pub fn start_transcription_task<R: Runtime>(
                                             continue;
                                         }
                                         TranscriptionError::ModelNotLoaded => {
-                                            warn!("Worker {}: Model unloaded during transcription", worker_id);
+                                            warn!(
+                                                "Worker {}: Model unloaded during transcription",
+                                                worker_id
+                                            );
                                             chunks_completed_clone.fetch_add(1, Ordering::SeqCst);
                                             continue;
                                         }
                                         _ => {
-                                            warn!("Worker {}: Transcription failed: {}", worker_id, e);
-                                            let _ = app_clone.emit("transcription-warning", e.to_string());
+                                            warn!(
+                                                "Worker {}: Transcription failed: {}",
+                                                worker_id, e
+                                            );
+                                            let _ = app_clone
+                                                .emit("transcription-warning", e.to_string());
                                         }
                                     }
                                 }
@@ -419,7 +585,7 @@ pub fn start_transcription_task<R: Runtime>(
 
 /// Transcribe audio chunk using the appropriate provider (Whisper, Parakeet, or trait-based)
 /// Returns: (text, confidence Option, is_partial)
-async fn transcribe_chunk_with_provider<R: Runtime>(
+pub(crate) async fn transcribe_chunk_with_provider<R: Runtime>(
     engine: &TranscriptionEngine,
     chunk: AudioChunk,
     app: &AppHandle<R>,
@@ -615,7 +781,7 @@ fn format_recording_time(seconds: f64) -> String {
     #[cfg(test)]
     mod tests {
         use super::*;
-        use crate::audio::recording_state::{AudioChunk, DeviceType};
+        use crate::audio::recording_state::{AudioChunk, DeviceType, SourceActivity};
 
         #[test]
         fn keeps_short_acknowledgements() {
@@ -638,6 +804,7 @@ fn format_recording_time(seconds: f64) -> String {
                 end_timestamp: end,
                 chunk_id: 1,
                 device_type: DeviceType::Microphone,
+                source_activity: None,
             }
         }
 
@@ -660,5 +827,40 @@ fn format_recording_time(seconds: f64) -> String {
         fn timing_rejects_an_end_before_the_start() {
             let timing = resolve_transcript_timing(&chunk(8.0, Some(7.0), 8_000, 16_000));
             assert_eq!(timing, (8.0, 8.5, 0.5));
+        }
+
+        #[test]
+        fn source_activity_labels_clean_local_speech_as_you() {
+            let activity = SourceActivity {
+                microphone_active: true,
+                system_active: false,
+                system_available: true,
+            };
+            let assignment = assign_live_speaker(Some(&activity), &[], &mut None);
+            assert_eq!(assignment.speaker_id.as_deref(), Some("local-you"));
+            assert_eq!(assignment.speaker_label.as_deref(), Some("You"));
+        }
+
+        #[test]
+        fn simultaneous_sources_are_never_forced_to_one_speaker() {
+            let activity = SourceActivity {
+                microphone_active: true,
+                system_active: true,
+                system_available: true,
+            };
+            let assignment = assign_live_speaker(Some(&activity), &[], &mut None);
+            assert_eq!(assignment.speaker_label.as_deref(), Some("Multiple speakers"));
+            assert_eq!(assignment.is_overlap, Some(true));
+        }
+
+        #[test]
+        fn microphone_only_room_audio_is_not_assumed_to_be_you() {
+            let activity = SourceActivity {
+                microphone_active: true,
+                system_active: false,
+                system_available: false,
+            };
+            let assignment = assign_live_speaker(Some(&activity), &[], &mut None);
+            assert_eq!(assignment.speaker_label.as_deref(), Some("Unknown speaker"));
         }
     }

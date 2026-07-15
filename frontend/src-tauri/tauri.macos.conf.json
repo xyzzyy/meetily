@@ -1,0 +1,9 @@
+{
+    "bundle": {
+        "externalBin": [
+            "binaries/llama-helper",
+            "binaries/ffmpeg",
+            "binaries/meetily-diarization"
+        ]
+    }
+}

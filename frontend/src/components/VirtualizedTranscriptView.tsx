@@ -35,6 +35,8 @@ export interface VirtualizedTranscriptViewProps {
     totalCount?: number;
     loadedCount?: number;
     onLoadMore?: () => void;
+    selectedSegmentIds?: Set<string>;
+    onToggleSegment?: (id: string) => void;
 }
 
 // Threshold for enabling virtualization (below this, use simple rendering)
@@ -87,6 +89,8 @@ const TranscriptSegment = memo(function TranscriptSegment({
     diarizationStatus,
     isStreaming,
     showConfidence,
+    selected,
+    onToggle,
 }: {
     id: string;
     timestamp: number;
@@ -99,6 +103,8 @@ const TranscriptSegment = memo(function TranscriptSegment({
     diarizationStatus?: DiarizationStatus | null;
     isStreaming: boolean;
     showConfidence: boolean;
+    selected?: boolean;
+    onToggle?: (id: string) => void;
 }) {
     const displayText = cleanStopWords(text) || (text.trim() === '' ? '[Silence]' : text);
     const duration = endTime !== undefined && endTime >= timestamp
@@ -124,6 +130,15 @@ const TranscriptSegment = memo(function TranscriptSegment({
     return (
         <div id={`segment-${id}`} className="mb-3">
             <div className="flex items-start gap-2">
+                {onToggle && (
+                    <input
+                        type="checkbox"
+                        aria-label="Select transcript row"
+                        className="mt-1"
+                        checked={selected}
+                        onChange={() => onToggle(id)}
+                    />
+                )}
                 {hasTooltip ? (
                     <Tooltip>
                         <TooltipTrigger asChild>
@@ -186,6 +201,8 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
     totalCount = 0,
     loadedCount = 0,
     onLoadMore,
+    selectedSegmentIds,
+    onToggleSegment,
 }) => {
     // Create scroll ref first - shared between virtualizer and auto-scroll hook
     const scrollRef = useRef<HTMLDivElement>(null);
@@ -363,6 +380,8 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
                                         diarizationStatus={segment.diarization_status}
                                         isStreaming={isStreaming}
                                         showConfidence={showConfidence}
+                                        selected={selectedSegmentIds?.has(segment.id)}
+                                        onToggle={onToggleSegment}
                                     />
                                 </div>
                             );
@@ -424,6 +443,8 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
                                         diarizationStatus={segment.diarization_status}
                                         isStreaming={isStreaming}
                                         showConfidence={showConfidence}
+                                        selected={selectedSegmentIds?.has(segment.id)}
+                                        onToggle={onToggleSegment}
                                     />
                                 </motion.div>
                             );

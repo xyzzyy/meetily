@@ -1,3 +1,9 @@
 pub mod alignment;
+pub mod clustering;
 pub mod commands;
+pub mod embedding;
+pub mod fbank;
+pub mod finalize;
+pub mod models;
+pub mod session;
 pub mod types;
