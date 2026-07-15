@@ -309,6 +309,7 @@ export function TranscriptPanel({
 
     setSavingSpeakerId(speaker.speakerId);
     try {
+      let voiceRemembered = false;
       await invoke('rename_speaker', {
         request: {
           meetingId,
@@ -317,9 +318,17 @@ export function TranscriptPanel({
         },
       });
       if (rememberVoice) {
-        await invoke('remember_speaker', {
-          request: { meetingId, speakerId: speaker.speakerId, name: label }
-        });
+        try {
+          await invoke('remember_speaker', {
+            request: { meetingId, speakerId: speaker.speakerId, name: label }
+          });
+          voiceRemembered = true;
+        } catch (error) {
+          toast.warning('Speaker renamed, but voice was not remembered', {
+            description: String(error),
+          });
+          setRememberVoice(false);
+        }
       }
 
       setSpeakers(previousSpeakers =>
@@ -336,7 +345,7 @@ export function TranscriptPanel({
       }
       await loadSpeakers();
 
-      toast.success(rememberVoice ? 'Speaker renamed and voice remembered' : 'Speaker renamed');
+      toast.success(voiceRemembered ? 'Speaker renamed and voice remembered' : 'Speaker renamed');
     } catch (error) {
       console.error('Failed to rename speaker:', error);
       toast.error('Failed to rename speaker', {

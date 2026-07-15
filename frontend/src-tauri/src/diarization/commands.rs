@@ -362,6 +362,14 @@ pub async fn remember_speaker<R: Runtime>(
     request: RememberSpeakerRequest,
 ) -> Result<String, String> {
     const MIN_PROFILE_SPEECH_SECONDS: f64 = 8.0;
+    let executable = std::env::current_exe()
+        .map_err(|error| format!("Unable to locate the running Meetily app: {error}"))?;
+    if is_running_from_mounted_disk_image(&executable) {
+        return Err(
+            "Move Meetily to Applications and eject the installer disk image before remembering voices"
+                .to_string(),
+        );
+    }
     let name = normalize_speaker_label(&request.name)?;
     let model_path = crate::diarization::models::embedding_model_path(&app)?;
     crate::diarization::models::validate_model_file(&model_path)?;
@@ -469,6 +477,10 @@ pub async fn remember_speaker<R: Runtime>(
     .map_err(|error| error.to_string())?;
 
     Ok(profile_id)
+}
+
+fn is_running_from_mounted_disk_image(executable: &std::path::Path) -> bool {
+    executable.starts_with("/Volumes/")
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -683,6 +695,16 @@ fn normalize_speaker_label(label: &str) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn detects_apps_running_from_a_mounted_disk_image() {
+        assert!(is_running_from_mounted_disk_image(std::path::Path::new(
+            "/Volumes/meetily/meetily.app/Contents/MacOS/meetily"
+        )));
+        assert!(!is_running_from_mounted_disk_image(std::path::Path::new(
+            "/Applications/meetily.app/Contents/MacOS/meetily"
+        )));
+    }
 
     fn segment(meeting_id: &str, speaker_label: &str) -> SpeakerSegment {
         SpeakerSegment {
