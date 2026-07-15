@@ -67,6 +67,7 @@ function cleanStopWords(text: string): string {
 const TranscriptSegment = memo(function TranscriptSegment({
     id,
     timestamp,
+    endTime,
     text,
     confidence,
     isStreaming,
@@ -74,28 +75,43 @@ const TranscriptSegment = memo(function TranscriptSegment({
 }: {
     id: string;
     timestamp: number;
+    endTime?: number;
     text: string;
     confidence?: number;
     isStreaming: boolean;
     showConfidence: boolean;
 }) {
     const displayText = cleanStopWords(text) || (text.trim() === '' ? '[Silence]' : text);
+    const duration = endTime !== undefined && endTime >= timestamp
+        ? endTime - timestamp
+        : undefined;
+    const hasConfidence = confidence !== undefined && showConfidence;
+    const timestampLabel = (
+        <span className="text-xs text-gray-400 mt-1 flex-shrink-0 min-w-[50px]">
+            {formatRecordingTime(timestamp)}
+        </span>
+    );
 
     return (
         <div id={`segment-${id}`} className="mb-3">
             <div className="flex items-start gap-2">
-                <Tooltip>
-                    <TooltipTrigger>
-                        <span className="text-xs text-gray-400 mt-1 flex-shrink-0 min-w-[50px]">
-                            {formatRecordingTime(timestamp)}
-                        </span>
-                    </TooltipTrigger>
-                    <TooltipContent>
-                        {confidence !== undefined && showConfidence && (
-                            <ConfidenceIndicator confidence={confidence} showIndicator={showConfidence} />
-                        )}
-                    </TooltipContent>
-                </Tooltip>
+                {duration !== undefined || hasConfidence ? (
+                    <Tooltip>
+                        <TooltipTrigger asChild>
+                            {timestampLabel}
+                        </TooltipTrigger>
+                        <TooltipContent>
+                            <div className="flex items-center gap-2">
+                                {duration !== undefined && (
+                                    <span>{duration.toFixed(1)}s</span>
+                                )}
+                                {hasConfidence && (
+                                    <ConfidenceIndicator confidence={confidence} showIndicator={showConfidence} />
+                                )}
+                            </div>
+                        </TooltipContent>
+                    </Tooltip>
+                ) : timestampLabel}
                 <div className="flex-1">
                     {isStreaming ? (
                         <div className="bg-gray-100 border border-gray-200 rounded-lg px-3 py-2">
@@ -292,6 +308,7 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
                                     <TranscriptSegment
                                         id={segment.id}
                                         timestamp={segment.timestamp}
+                                        endTime={segment.endTime}
                                         text={getDisplayText(segment)}
                                         confidence={segment.confidence}
                                         isStreaming={isStreaming}
@@ -348,6 +365,7 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
                                     <TranscriptSegment
                                         id={segment.id}
                                         timestamp={segment.timestamp}
+                                        endTime={segment.endTime}
                                         text={getDisplayText(segment)}
                                         confidence={segment.confidence}
                                         isStreaming={isStreaming}
