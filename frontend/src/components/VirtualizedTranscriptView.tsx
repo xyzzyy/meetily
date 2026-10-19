@@ -86,8 +86,13 @@ const TranscriptSegment = memo(function TranscriptSegment({
         ? endTime - timestamp
         : undefined;
     const hasConfidence = confidence !== undefined && showConfidence;
+    const hasTooltip = duration !== undefined || hasConfidence;
     const timestampLabel = (
-        <span className="text-xs text-gray-400 mt-1 flex-shrink-0 min-w-[50px]">
+        // Focusable only as a tooltip trigger, so keyboard users can open it.
+        <span
+            className="text-xs text-gray-400 mt-1 flex-shrink-0 min-w-[50px]"
+            tabIndex={hasTooltip ? 0 : undefined}
+        >
             {formatRecordingTime(timestamp)}
         </span>
     );
@@ -95,7 +100,7 @@ const TranscriptSegment = memo(function TranscriptSegment({
     return (
         <div id={`segment-${id}`} className="mb-3">
             <div className="flex items-start gap-2">
-                {duration !== undefined || hasConfidence ? (
+                {hasTooltip ? (
                     <Tooltip>
                         <TooltipTrigger asChild>
                             {timestampLabel}
