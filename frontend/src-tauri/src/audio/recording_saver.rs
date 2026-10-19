@@ -131,21 +131,11 @@ impl RecordingSaver {
         self.add_transcript_segment(segment);
     }
 
-    /// Start accumulation with optional incremental saving
-    ///
-    /// # Arguments
-    /// * `auto_save` - If true, creates checkpoints and enables saving. If false, audio chunks are discarded.
-    pub fn start_accumulation(
-        &mut self,
-        auto_save: bool,
-        mut receiver: mpsc::UnboundedReceiver<AudioChunk>,
-    ) {
-        if auto_save {
-            info!("Initializing incremental audio saver for recording (auto-save ENABLED)");
-        } else {
-            info!("Starting recording without audio saving (auto-save DISABLED - transcripts only)");
-        }
-
+    /// Create the meeting folder (and checkpoints when `auto_save` is on) so
+    /// other recorders, like the diarization stem saver, can write into it
+    /// before accumulation starts. `start_accumulation` calls this itself if
+    /// the folder hasn't been prepared.
+    pub fn prepare_meeting_folder(&mut self, auto_save: bool) {
         // Initialize meeting folder and incremental saver ONLY if auto_save is enabled
         if auto_save {
             if let Some(name) = self.meeting_name.clone() {
@@ -168,6 +158,26 @@ impl RecordingSaver {
                     }
                 }
             }
+        }
+    }
+
+    /// Start accumulation with optional incremental saving
+    ///
+    /// # Arguments
+    /// * `auto_save` - If true, creates checkpoints and enables saving. If false, audio chunks are discarded.
+    pub fn start_accumulation(
+        &mut self,
+        auto_save: bool,
+        mut receiver: mpsc::UnboundedReceiver<AudioChunk>,
+    ) {
+        if auto_save {
+            info!("Initializing incremental audio saver for recording (auto-save ENABLED)");
+        } else {
+            info!("Starting recording without audio saving (auto-save DISABLED - transcripts only)");
+        }
+
+        if self.meeting_folder.is_none() {
+            self.prepare_meeting_folder(auto_save);
         }
 
         // Start accumulation task

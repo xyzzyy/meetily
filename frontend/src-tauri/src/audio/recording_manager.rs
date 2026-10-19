@@ -242,6 +242,9 @@ impl RecordingManager {
         let (transcription_sender, transcription_receiver) = mpsc::unbounded_channel::<AudioChunk>();
         let (recording_sender, recording_receiver) = mpsc::unbounded_channel::<AudioChunk>();
 
+        // The stem saver writes into the meeting folder, so create it now;
+        // start_accumulation runs only after the pipeline has started.
+        self.recording_saver.prepare_meeting_folder(auto_save);
         let stem_sender = if self.diarization_enabled {
             self.recording_saver
                 .get_meeting_folder()
