@@ -28,6 +28,30 @@ pub fn validate_runtime_identity<R: Runtime>(app: &AppHandle<R>) -> Result<(), S
     validate_compiled_identity(&app.config().identifier)
 }
 
+/// Reject a storage directory that is a symlink. A link could point the
+/// branch build straight at the official installation, so neither the branch
+/// nor the legacy directory may be used through one.
+fn ensure_not_symlink(path: &Path, label: &str) -> Result<(), String> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink() {
+                return Err(format!(
+                    "Meetily Branch refused to use a symlinked {label} directory: {}. No files were opened.",
+                    path.display()
+                ));
+            }
+            Ok(())
+        }
+        // A directory that does not exist yet cannot be a link to official
+        // storage, and it is created later by the normal storage setup.
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!(
+            "Meetily Branch could not verify the {label} directory {}: {error}. No files were opened.",
+            path.display()
+        )),
+    }
+}
+
 /// Resolve branch-owned storage only after the identity has been validated.
 pub fn branch_app_data_dir<R: Runtime>(app: &AppHandle<R>) -> Result<PathBuf, String> {
     validate_runtime_identity(app)?;
@@ -42,6 +66,10 @@ pub fn branch_app_data_dir<R: Runtime>(app: &AppHandle<R>) -> Result<PathBuf, St
             path.display()
         ));
     }
+    // The name check above only looks at the last path component. Verify the
+    // directory itself is not a link that redirects the branch build into
+    // official Meetily storage.
+    ensure_not_symlink(&path, "branch storage")?;
     Ok(path)
 }
 
@@ -65,26 +93,39 @@ pub fn adopt_legacy_speaker_test_installation<R: Runtime>(
 ) -> Result<PathBuf, String> {
     let resolved_branch_dir = branch_app_data_dir(app)?;
     let (legacy_dir, branch_dir) = legacy_and_branch_dirs(&resolved_branch_dir)?;
+    adopt_legacy_directory(&legacy_dir, &branch_dir)
+}
+
+/// Move the previous speaker-test installation into the branch directory.
+/// Both paths are proven to be real directories, so neither the move nor the
+/// resulting branch directory can resolve to official storage.
+fn adopt_legacy_directory(legacy_dir: &Path, branch_dir: &Path) -> Result<PathBuf, String> {
+    ensure_not_symlink(legacy_dir, "previous speaker-test storage")?;
+    ensure_not_symlink(branch_dir, "branch storage")?;
+
     let legacy_exists = legacy_dir.exists();
     let branch_exists = branch_dir.exists();
 
     match (legacy_exists, branch_exists) {
         (true, false) => {
-            std::fs::rename(&legacy_dir, &branch_dir).map_err(|error| {
+            std::fs::rename(legacy_dir, branch_dir).map_err(|error| {
                 format!(
                     "Could not move the previous speaker-test installation from {} to {}: {error}",
                     legacy_dir.display(),
                     branch_dir.display()
                 )
             })?;
-            Ok(branch_dir)
+            // The adopted directory is used from here on, so it is verified
+            // again before it is handed back.
+            ensure_not_symlink(branch_dir, "branch storage")?;
+            Ok(branch_dir.to_path_buf())
         }
         (true, true) => Err(format!(
             "Meetily Branch found two separate installations and will not merge them automatically. Neither was modified.\n\nPrevious test data: {}\nBranch data: {}",
             legacy_dir.display(),
             branch_dir.display()
         )),
-        _ => Ok(branch_dir),
+        _ => Ok(branch_dir.to_path_buf()),
     }
 }
 
@@ -107,5 +148,74 @@ mod tests {
         assert_eq!(resolved.file_name().unwrap(), BRANCH_IDENTIFIER);
         assert_ne!(legacy.file_name().unwrap(), OFFICIAL_IDENTIFIER);
         assert_ne!(resolved.file_name().unwrap(), OFFICIAL_IDENTIFIER);
+    }
+
+    #[test]
+    fn real_and_missing_directories_pass_the_symlink_check() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = dir.path().join(BRANCH_IDENTIFIER);
+        std::fs::create_dir_all(&storage).unwrap();
+        assert!(ensure_not_symlink(&storage, "branch storage").is_ok());
+        assert!(ensure_not_symlink(&dir.path().join("missing"), "branch storage").is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_directories_are_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let official = dir.path().join(OFFICIAL_IDENTIFIER);
+        std::fs::create_dir_all(&official).unwrap();
+
+        let link = dir.path().join(BRANCH_IDENTIFIER);
+        std::os::unix::fs::symlink(&official, &link).unwrap();
+        assert!(ensure_not_symlink(&link, "branch storage").is_err());
+
+        // A link with a missing target is rejected as well, so it cannot
+        // start pointing at official storage later on.
+        let broken = dir.path().join(LEGACY_SPEAKER_TEST_IDENTIFIER);
+        std::os::unix::fs::symlink(dir.path().join("missing"), &broken).unwrap();
+        assert!(ensure_not_symlink(&broken, "previous speaker-test storage").is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_legacy_directory_is_never_adopted() {
+        let dir = tempfile::tempdir().unwrap();
+        let official = dir.path().join(OFFICIAL_IDENTIFIER);
+        std::fs::create_dir_all(&official).unwrap();
+
+        let legacy = dir.path().join(LEGACY_SPEAKER_TEST_IDENTIFIER);
+        std::os::unix::fs::symlink(&official, &legacy).unwrap();
+        let branch = dir.path().join(BRANCH_IDENTIFIER);
+
+        assert!(adopt_legacy_directory(&legacy, &branch).is_err());
+        assert!(official.is_dir());
+        assert!(!branch.exists());
+    }
+
+    #[test]
+    fn a_real_legacy_directory_is_adopted() {
+        let dir = tempfile::tempdir().unwrap();
+        let legacy = dir.path().join(LEGACY_SPEAKER_TEST_IDENTIFIER);
+        let branch = dir.path().join(BRANCH_IDENTIFIER);
+        std::fs::create_dir_all(&legacy).unwrap();
+
+        let adopted = adopt_legacy_directory(&legacy, &branch).unwrap();
+        assert_eq!(adopted, branch);
+        assert!(branch.is_dir());
+        assert!(!legacy.exists());
+    }
+
+    #[test]
+    fn two_existing_installations_are_left_untouched() {
+        let dir = tempfile::tempdir().unwrap();
+        let legacy = dir.path().join(LEGACY_SPEAKER_TEST_IDENTIFIER);
+        let branch = dir.path().join(BRANCH_IDENTIFIER);
+        std::fs::create_dir_all(&legacy).unwrap();
+        std::fs::create_dir_all(&branch).unwrap();
+
+        assert!(adopt_legacy_directory(&legacy, &branch).is_err());
+        assert!(legacy.is_dir());
+        assert!(branch.is_dir());
     }
 }
