@@ -221,4 +221,23 @@ for (const currentStatus of ['processing', 'preparing_models', 'rebuilding_windo
   assert.ok(content.includes('Transcript recovery is required'));
   assert.equal(content.includes('Using the live transcript'), false);
 }
+// Collapsing hides the controls and ends row selection. Correction reopens them.
+{
+  const panel = makePanel({ speakers: [alice], correctionMode: true,
+    selectedRowIds: new Set(['r1']), diarizationSettings: { enabled: true },
+    diarizationStatus: { currentStatus: 'completed', progress: 100 } });
+  const toggle = tree => nodes(tree).find(node => node.props['aria-controls'] === 'speaker-controls-meeting');
+  const body = tree => nodes(tree).find(node => node.props.id === 'speaker-controls-meeting');
+  assert.equal(toggle(panel.render()).props['aria-expanded'], true);
+  toggle(panel.render()).props.onClick();
+  const collapsed = panel.render();
+  assert.equal(toggle(collapsed).props['aria-expanded'], false);
+  assert.equal(body(collapsed).props.hidden, true);
+  assert.equal(panel.states.get('selectedRowIds').size, 0);
+  assert.equal(panel.states.get('correctionMode'), false);
+  button(collapsed, 'Run again');
+  button(collapsed, 'Correct rows').props.onClick();
+  assert.equal(body(panel.render()).props.hidden, false);
+  assert.equal(panel.states.get('correctionMode'), true);
+}
 console.log('Speaker review controls: all checks passed');
