@@ -6,18 +6,10 @@ import { listen } from '@tauri-apps/api/event';
 import { message } from '@tauri-apps/plugin-dialog';
 import { Switch } from '@/components/ui/switch';
 import { Button } from '@/components/ui/button';
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/components/ui/select';
 import { SettingsSection } from '@/components/settings/SettingsSection';
 import { SettingsRow } from '@/components/settings/SettingsRow';
 import { SettingsStatusBadge } from '@/components/settings/SettingsStatusBadge';
 import { useConfig } from '@/contexts/ConfigContext';
-import type { DiarizationMode } from '@/types/diarization';
 
 export function SpeakerDiarizationSettings() {
   const [modelInstalled, setModelInstalled] = useState(false);
@@ -86,28 +78,12 @@ export function SpeakerDiarizationSettings() {
       .catch(error => console.error('[SpeakerDiarizationSettings] Failed to save:', error));
   };
 
-  const handleEnabledChange = (enabled: boolean) => {
-    if (!enabled) {
-      update({ enabled: false, mode: 'off' });
-      return;
-    }
-
-    update({
-      enabled: true,
-      mode: diarizationSettings.mode === 'off' ? 'live_plus_post_call' : diarizationSettings.mode,
-    });
-  };
-
-  const handleModeChange = (mode: DiarizationMode) => {
-    if (mode === 'off') {
-      update({ mode: 'off', enabled: false });
-      return;
-    }
-
-    update({ mode, enabled: true });
-  };
-
-  const liveModeEnabled = diarizationSettings.enabled && diarizationSettings.mode === 'live_plus_post_call';
+  const showLiveLabels = diarizationSettings.showProvisionalLabels
+    && diarizationSettings.mode !== 'post_call_only';
+  const handleEnabledChange = (enabled: boolean) => update({
+    enabled,
+    mode: showLiveLabels ? 'live_plus_post_call' : 'post_call_only',
+  });
 
   return (
     <SettingsSection
@@ -143,35 +119,16 @@ export function SpeakerDiarizationSettings() {
       />
 
       <SettingsRow
-        title="Mode"
-        description="Choose when to identify speakers. Post-call only adds no speaker labels during recording."
-        control={
-          <Select
-            value={diarizationSettings.mode}
-            disabled={!diarizationSettings.enabled || isLoadingDiarizationSettings}
-            onValueChange={(mode) => handleModeChange(mode as DiarizationMode)}
-          >
-            <SelectTrigger className="w-[260px]">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="live_plus_post_call">During and after the meeting</SelectItem>
-              <SelectItem value="post_call_only">After the meeting only</SelectItem>
-              <SelectItem value="off">Off</SelectItem>
-            </SelectContent>
-          </Select>
-        }
-      />
-
-      <SettingsRow
-        title="Show provisional labels during call"
+        title="Show speaker labels during recording"
         description="Show temporary labels during recording. Turn this off to hide all live speaker labels."
-        disabledReason={!liveModeEnabled ? 'Available only in During and after the meeting mode.' : undefined}
         control={
           <Switch
-            checked={diarizationSettings.showProvisionalLabels}
-            disabled={!liveModeEnabled || isLoadingDiarizationSettings}
-            onCheckedChange={(showProvisionalLabels) => update({ showProvisionalLabels })}
+            checked={showLiveLabels}
+            disabled={!diarizationSettings.enabled || isLoadingDiarizationSettings}
+            onCheckedChange={(showProvisionalLabels) => update({
+              showProvisionalLabels,
+              mode: showProvisionalLabels ? 'live_plus_post_call' : 'post_call_only',
+            })}
           />
         }
       />
@@ -182,7 +139,7 @@ export function SpeakerDiarizationSettings() {
         control={
           <Switch
             checked={diarizationSettings.postCallRefinementEnabled}
-            disabled={!diarizationSettings.enabled || diarizationSettings.mode === 'off' || isLoadingDiarizationSettings}
+            disabled={!diarizationSettings.enabled || isLoadingDiarizationSettings}
             onCheckedChange={(postCallRefinementEnabled) => update({ postCallRefinementEnabled })}
           />
         }
