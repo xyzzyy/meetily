@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use tauri::{AppHandle, Runtime};
 
 pub fn owned_models_root<R: Runtime>(app: &AppHandle<R>) -> Result<PathBuf, String> {
@@ -36,23 +36,37 @@ pub fn models_root<R: Runtime>(app: &AppHandle<R>) -> Result<PathBuf, String> {
 
 /// Resolve a file or model directory for reading, preferring branch-owned data.
 /// The returned path may be shared and must never be used for mutations.
+///
+/// `relative_path` must stay inside the models roots. An absolute path or a
+/// `..` component would let `join` escape them, including into official model
+/// storage, so such paths are rejected before either root is consulted.
 pub fn resolve_model_for_read(
     owned_root: &Path,
     shared_root: Option<&Path>,
     relative_path: impl AsRef<Path>,
-) -> PathBuf {
+) -> Result<PathBuf, String> {
     let relative_path = relative_path.as_ref();
+    let stays_inside_root = relative_path
+        .components()
+        .all(|component| matches!(component, Component::Normal(_) | Component::CurDir));
+    if !stays_inside_root {
+        return Err(format!(
+            "Model path must be relative to the models directory: {}",
+            relative_path.display()
+        ));
+    }
+
     let owned = owned_root.join(relative_path);
     if owned.exists() {
-        return owned;
+        return Ok(owned);
     }
     if let Some(shared) = shared_root {
         let candidate = shared.join(relative_path);
         if candidate.exists() {
-            return candidate;
+            return Ok(candidate);
         }
     }
-    owned
+    Ok(owned)
 }
 
 pub fn is_branch_owned_model<R: Runtime>(app: &AppHandle<R>, path: &Path) -> Result<bool, String> {
@@ -79,32 +93,57 @@ mod tests {
         std::fs::write(shared.join("model.bin"), b"shared").unwrap();
 
         assert_eq!(
-            resolve_model_for_read(&owned, Some(&shared), "model.bin"),
+            resolve_model_for_read(&owned, Some(&shared), "model.bin").unwrap(),
             shared.join("model.bin")
         );
         assert_eq!(
-            resolve_model_for_read(&owned, Some(&shared), "parakeet/model"),
+            resolve_model_for_read(&owned, Some(&shared), "parakeet/model").unwrap(),
             shared.join("parakeet/model")
         );
         assert_eq!(
-            resolve_model_for_read(&owned, Some(&shared), "missing.bin"),
+            resolve_model_for_read(&owned, Some(&shared), "missing.bin").unwrap(),
             owned.join("missing.bin")
         );
         assert_eq!(
-            resolve_model_for_read(&owned, None, "model.bin"),
+            resolve_model_for_read(&owned, None, "model.bin").unwrap(),
             owned.join("model.bin")
         );
 
         std::fs::write(owned.join("model.bin"), b"owned").unwrap();
         std::fs::create_dir_all(owned.join("parakeet/model")).unwrap();
         assert_eq!(
-            resolve_model_for_read(&owned, Some(&shared), "model.bin"),
+            resolve_model_for_read(&owned, Some(&shared), "model.bin").unwrap(),
             owned.join("model.bin")
         );
         assert_eq!(
-            resolve_model_for_read(&owned, Some(&shared), "parakeet/model"),
+            resolve_model_for_read(&owned, Some(&shared), "parakeet/model").unwrap(),
             owned.join("parakeet/model")
         );
         assert_eq!(std::fs::read(shared.join("model.bin")).unwrap(), b"shared");
+    }
+
+    #[test]
+    fn model_paths_outside_the_models_roots_are_rejected() {
+        let temp = tempfile::tempdir().unwrap();
+        let owned = temp.path().join("branch/models");
+        let shared = temp.path().join("official/models");
+        std::fs::create_dir_all(&owned).unwrap();
+        std::fs::create_dir_all(&shared).unwrap();
+        std::fs::write(shared.join("model.bin"), b"shared").unwrap();
+        // Reachable only by climbing out of the shared models root.
+        let official_settings = temp.path().join("official/settings.bin");
+        std::fs::write(&official_settings, b"official").unwrap();
+
+        // An absolute path replaces the root in `join`, so it must be rejected
+        // even though the file exists and the owned lookup would return it.
+        assert!(resolve_model_for_read(&owned, Some(&shared), &official_settings).is_err());
+        assert!(resolve_model_for_read(&owned, Some(&shared), shared.join("model.bin")).is_err());
+        assert!(resolve_model_for_read(&owned, Some(&shared), "../settings.bin").is_err());
+        assert!(resolve_model_for_read(&owned, None, "../../official/settings.bin").is_err());
+
+        assert_eq!(
+            resolve_model_for_read(&owned, Some(&shared), "./model.bin").unwrap(),
+            shared.join("./model.bin")
+        );
     }
 }

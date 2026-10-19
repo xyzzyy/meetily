@@ -244,7 +244,7 @@ pub fn get_model_path(app_data_dir: &PathBuf, model_name: &str) -> Result<PathBu
         &models_dir,
         shared_models_dir.as_deref(),
         &model.gguf_file,
-    );
+    ).map_err(anyhow::Error::msg)?;
 
     Ok(model_path)
 }

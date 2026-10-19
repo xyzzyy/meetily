@@ -13,17 +13,16 @@ static SHARED_MODELS_DIR: Mutex<Option<PathBuf>> = Mutex::new(None);
 
 /// Initialize the models directory path using app_data_dir
 /// This should be called during app setup before whisper_init
-pub fn set_models_directory<R: Runtime>(app: &AppHandle<R>) {
-    let models_dir = crate::model_storage::owned_models_root(app)
-        .expect("Failed to resolve branch-owned models directory");
-    let shared_models_dir = crate::model_storage::official_models_root(app)
-        .expect("Failed to resolve shared models directory");
+pub fn set_models_directory<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
+    let models_dir = crate::model_storage::owned_models_root(app)?;
+    let shared_models_dir = crate::model_storage::official_models_root(app)?;
     *SHARED_MODELS_DIR.lock().unwrap() = shared_models_dir;
 
     log::info!("Models directory set to: {}", models_dir.display());
 
     let mut guard = MODELS_DIR.lock().unwrap();
     *guard = Some(models_dir);
+    Ok(())
 }
 
 /// Get the configured models directory
@@ -88,7 +87,7 @@ fn discover_models_standalone() -> Result<Vec<ModelInfo>, String> {
             &whisper_dir,
             SHARED_MODELS_DIR.lock().unwrap().as_deref(),
             filename,
-        );
+        )?;
         let status = if model_path.exists() {
             match std::fs::metadata(&model_path) {
                 Ok(metadata) => {

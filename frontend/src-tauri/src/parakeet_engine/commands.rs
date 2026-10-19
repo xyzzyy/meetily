@@ -13,17 +13,16 @@ static SHARED_MODELS_DIR: Mutex<Option<PathBuf>> = Mutex::new(None);
 
 /// Initialize the models directory path using app_data_dir
 /// This should be called during app setup before parakeet_init
-pub fn set_models_directory<R: Runtime>(app: &AppHandle<R>) {
-    let models_dir = crate::model_storage::owned_models_root(app)
-        .expect("Failed to resolve branch-owned models directory");
-    let shared_models_dir = crate::model_storage::official_models_root(app)
-        .expect("Failed to resolve shared models directory");
+pub fn set_models_directory<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
+    let models_dir = crate::model_storage::owned_models_root(app)?;
+    let shared_models_dir = crate::model_storage::official_models_root(app)?;
     *SHARED_MODELS_DIR.lock().unwrap() = shared_models_dir.map(|dir| dir.join("parakeet"));
 
     log::info!("Parakeet models directory set to: {}", models_dir.display());
 
     let mut guard = MODELS_DIR.lock().unwrap();
     *guard = Some(models_dir);
+    Ok(())
 }
 
 /// Get the configured models directory

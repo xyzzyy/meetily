@@ -203,7 +203,7 @@ impl ModelManager {
                 &self.models_dir,
                 self.shared_models_dir.as_deref(),
                 &model_def.gguf_file,
-            );
+            ).map_err(anyhow::Error::msg)?;
             log::debug!(
                 "Checking model '{}' at path: {}",
                 model_def.name,

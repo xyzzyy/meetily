@@ -225,7 +225,7 @@ impl WhisperEngine {
                 &self.models_dir,
                 self.shared_models_dir.as_deref(),
                 filename,
-            );
+            ).map_err(anyhow::Error::msg)?;
             let status = if model_path.exists() {
                 // Check if file size is reasonable (at least 1MB for a valid model)
                 match std::fs::metadata(&model_path) {
