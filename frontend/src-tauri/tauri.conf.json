@@ -61,6 +61,7 @@
                         "core:tray:default",
                         "core:window:allow-set-title",
                         "store:default",
+                        "dialog:allow-message",
                         "notification:default",
                         "notification:allow-is-permission-granted",
                         "process:default",

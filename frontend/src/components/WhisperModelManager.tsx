@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import { invoke } from '@tauri-apps/api/core';
+import { confirm } from '@tauri-apps/plugin-dialog';
 import { motion, AnimatePresence } from 'framer-motion';
 import { toast } from 'sonner';
 import {
@@ -414,10 +415,20 @@ export function ModelManager({
     });
   };
 
-  const deleteModel = async (modelName: string) => {
-    const displayName = getDisplayName(modelName);
+  const deletionPendingRef = useRef(false);
 
+  const deleteModel = async (modelName: string) => {
+    if (deletionPendingRef.current) return;
+    deletionPendingRef.current = true;
+    const displayName = getDisplayName(modelName);
     try {
+      const confirmed = await confirm(
+        `Delete transcription model ${displayName}? This will remove it from disk.`,
+        { title: 'Delete transcription model?', kind: 'warning', okLabel: 'Delete', cancelLabel: 'Cancel' }
+      );
+      if (!confirmed) {
+        return;
+      }
       await WhisperAPI.deleteCorruptedModel(modelName);
 
       // Refresh models list
@@ -439,6 +450,8 @@ export function ModelManager({
         description: err instanceof Error ? err.message : 'Delete failed',
         duration: 4000
       });
+    } finally {
+      deletionPendingRef.current = false;
     }
   };
 
