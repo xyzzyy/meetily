@@ -15,7 +15,7 @@
 
 Meetily records your meetings, transcribes them live, and writes summaries without sending audio or transcripts to the cloud. Transcription models run locally, and summaries can stay local too if you use Ollama or the built-in model.
 
-**This repository is Meetily Branch**, a fork of [Zackriya-Solutions/meetily](https://github.com/Zackriya-Solutions/meetily). You can install it **next to the official Meetily app**. It has its own app identity and data folder, and it is built so it can never write to the official app's data. See [How Meetily Branch differs from upstream](#how-meetily-branch-differs-from-upstream).
+**This repository is Meetily Branch**, a fork of [Zackriya-Solutions/meetily](https://github.com/Zackriya-Solutions/meetily). You can install it **next to the official Meetily app**. It has its own app identity and data folder, so your meetings, recordings, and models stay separate from the official app's. See [How Meetily Branch differs from upstream](#how-meetily-branch-differs-from-upstream).
 
 ## Contents
 
@@ -82,7 +82,7 @@ pnpm install --frozen-lockfile
 ./build-gpu.sh
 ```
 
-On Windows, use `dev-gpu.bat` / `build-gpu.bat` (or the `.ps1` versions) instead.
+On Windows, use `dev-gpu.bat` / `build-gpu.bat` instead. The `.ps1` versions always use Vulkan and don't build the sidecar, so avoid them on a fresh clone.
 
 These scripts pick a GPU backend for your hardware. They also build the `llama-helper` sidecar that runs the built-in summary model and copy it into `src-tauri/binaries/`. Running `pnpm run tauri:build` on its own skips that step, so on a fresh clone the bundle fails because the sidecar binary is missing. Run one of the GPU scripts at least once first.
 
@@ -115,12 +115,7 @@ There are matching `tauri:build:*` scripts for each backend. For details, see [d
 
 ### Logging
 
-```bash
-RUST_LOG=debug ./dev-gpu.sh                  # everything
-RUST_LOG=app_lib::audio=debug ./dev-gpu.sh   # audio pipeline only
-```
-
-`clean_run.sh` sets `RUST_LOG` itself from its first argument (`info`, `debug`, or `trace`), so pass the level as an argument instead: `./clean_run.sh debug`.
+The app logs to the terminal you launched it from. The log level is fixed at `info` in code (`frontend/src-tauri/src/main.rs` and `lib.rs`), so setting `RUST_LOG` has no effect. To get more detailed logs, change the level there and rebuild.
 
 To open DevTools in the app, press `Cmd+Shift+I` on macOS or `Ctrl+Shift+I` on Windows/Linux.
 
@@ -162,7 +157,7 @@ For more detail, see [docs/architecture.md](docs/architecture.md).
 
 ## Where data lives
 
-Meetily Branch stores everything in the app-data directory for its own identifier:
+Meetily Branch keeps meetings, recordings, and models in the app-data directory for its own identifier:
 
 | Platform | Location |
 |---|---|
@@ -171,6 +166,8 @@ Meetily Branch stores everything in the app-data directory for its own identifie
 | Linux | `~/.local/share/com.meetily.ai.branch/` |
 
 Models go in the `models/` subfolder. If official Meetily is installed, its `com.meetily.ai/models/` folder is used only as a read-only fallback.
+
+One exception: notification settings are written to `meetily/notifications.json` in the OS config directory (`~/Library/Application Support/meetily/` on macOS, `%APPDATA%\meetily\` on Windows, `~/.config/meetily/` on Linux). Official Meetily uses the same file, so if both apps are installed they share notification settings.
 
 ## Documentation
 
