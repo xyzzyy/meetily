@@ -155,6 +155,7 @@ for (const currentStatus of ['processing', 'preparing_models', 'rebuilding_windo
     mergingSpeakerId: 'bob', mergeTargetId: 'alice',
   });
   const tree = panel.render();
+  assert.ok(text(tree).includes('Refining speakers locally…'));
   for (const label of ['Rename', 'Remember voice', 'Merge', 'Apply (1)']) {
     const action = button(tree, label);
     assert.equal(action.props.disabled, true, `${label} enabled during ${currentStatus}`);
@@ -202,7 +203,10 @@ for (const currentStatus of ['processing', 'preparing_models', 'rebuilding_windo
 }
 {
   const panel = makePanel({ diarizationSettings: { enabled: true }, diarizationStatus: { currentStatus: 'completed', progress: 100 } });
-  button(panel.render(), 'Run again').props.onClick();
+  const completed = panel.render();
+  assert.equal(text(completed).includes('Speaker recognition complete'), false);
+  assert.equal(text(completed).includes('100% complete'), false);
+  button(completed, 'Run again').props.onClick();
   await settle();
   assert.ok(panel.calls.some(call => call.name === 'retry_final_diarization'));
 }

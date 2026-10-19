@@ -401,8 +401,8 @@ export function TranscriptPanel({
         />
       </div>
 
-      {!isRecording && diarizationStatus && diarizationStatus.currentStatus !== 'none' && (
-        <div className={`border-b px-4 py-3 text-sm ${
+      {!isRecording && diarizationStatus && !['none', 'completed'].includes(diarizationStatus.currentStatus) && (
+        <div className={`border-b px-4 py-2 text-sm ${
           ['fallback_to_live', 'needs_review', 'failed', 'cancelled', 'recovery_required'].includes(diarizationStatus.currentStatus)
             ? 'border-amber-200 bg-amber-50 text-amber-950'
             : 'border-blue-200 bg-blue-50 text-blue-950'
@@ -410,9 +410,7 @@ export function TranscriptPanel({
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div className="min-w-0">
               <p className="font-medium">
-                {diarizationStatus.currentStatus === 'completed'
-                  ? 'Speaker recognition complete'
-                  : ['fallback_to_live', 'needs_review', 'failed', 'cancelled', 'recovery_required'].includes(diarizationStatus.currentStatus)
+                {['fallback_to_live', 'needs_review', 'failed', 'cancelled', 'recovery_required'].includes(diarizationStatus.currentStatus)
                     ? diarizationStatus.currentStatus === 'recovery_required'
                       ? 'Transcript recovery is required'
                       : 'Speaker processing needs attention'
@@ -438,46 +436,42 @@ export function TranscriptPanel({
         </div>
       )}
 
-      {!isRecording && meetingId && meetingFolderPath && diarizationEnabled && (!diarizationStatus || ['none', 'completed'].includes(diarizationStatus.currentStatus)) && (
-        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-blue-200 bg-blue-50 px-4 py-3 text-sm text-blue-950">
-          <div>
-            <p className="font-medium">Identify speakers</p>
-            <p className="text-xs opacity-80">Analyze this meeting locally and update speaker labels. Transcript text stays the same.</p>
-          </div>
-          <Button size="sm" variant="outline" disabled={editsDisabled} onClick={() => void runDiarization(diarizationStatus?.currentStatus === 'completed')}>
-            {isStartingDiarization ? 'Starting…' : diarizationStatus?.currentStatus === 'completed' ? 'Run again' : 'Identify speakers'}
-          </Button>
-        </div>
-      )}
-
-      {!isRecording && meetingId && (speakerSourceCount > 0 || isLoadingSpeakers) && (
-        <div className="px-4 py-3 border-b border-border space-y-3">
-          <div className="flex flex-wrap items-start justify-between gap-3">
+      {!isRecording && meetingId && (speakerSourceCount > 0 || isLoadingSpeakers || (meetingFolderPath && diarizationEnabled)) && (
+        <div className="shrink-0 px-4 py-2 border-b border-border space-y-1.5">
+          <div className="flex flex-wrap items-center justify-between gap-x-2 gap-y-1">
             <div>
               <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
                 Speakers{speakers.length > 0 ? ` (${speakers.length})` : ''}
               </p>
-              <p className="text-xs text-muted-foreground">
-                Names are applied to transcript labels and copied text.
-              </p>
             </div>
-            {isLoadingSpeakers && (
-              <span className="text-xs text-muted-foreground">Loading…</span>
-            )}
-            {!isLoadingSpeakers && speakerSourceCount > 0 && (
-              <Button
-                size="sm"
-                variant="outline"
-                disabled={editsDisabled}
-                onClick={() => {
-                  if (editsDisabled) return;
-                  setCorrectionMode(value => !value);
-                  setSelectedRowIds(new Set());
-                }}
-              >
-                {correctionMode ? 'Done' : 'Correct rows'}
-              </Button>
-            )}
+            <div className="flex items-center gap-1">
+              {isLoadingSpeakers && (
+                <span className="text-xs text-muted-foreground">Loading…</span>
+              )}
+              {meetingFolderPath && diarizationEnabled && (!diarizationStatus || ['none', 'completed'].includes(diarizationStatus.currentStatus)) && (
+                <Button size="sm" variant="ghost" className="h-7 px-2"
+                  title="Analyze this meeting locally and update speaker labels. Transcript text stays the same."
+                  disabled={editsDisabled}
+                  onClick={() => void runDiarization(diarizationStatus?.currentStatus === 'completed')}>
+                  {isStartingDiarization ? 'Starting…' : diarizationStatus?.currentStatus === 'completed' ? 'Run again' : 'Identify speakers'}
+                </Button>
+              )}
+              {!isLoadingSpeakers && speakerSourceCount > 0 && (
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  className="h-7 px-2"
+                  disabled={editsDisabled}
+                  onClick={() => {
+                    if (editsDisabled) return;
+                    setCorrectionMode(value => !value);
+                    setSelectedRowIds(new Set());
+                  }}
+                >
+                  {correctionMode ? 'Done' : 'Correct rows'}
+                </Button>
+              )}
+            </div>
           </div>
 
           {refinementActive && (
@@ -486,20 +480,18 @@ export function TranscriptPanel({
           {!isLoadingSpeakers && speakers.length === 0 && (
             <p className="text-xs text-muted-foreground">No named speakers yet. Use Correct rows to assign a speaker.</p>
           )}
-          <div className="max-h-56 space-y-2 overflow-y-auto pr-1">
+          <div className="max-h-40 divide-y divide-border overflow-y-auto">
             {speakers.map((speaker) => {
               const isEditing = editingSpeakerId === speaker.speakerId;
-              const transcriptSegmentLabel =
-                speaker.segmentCount === 1 ? 'transcript segment' : 'transcript segments';
 
               return (
                 <div
                   key={speaker.speakerId}
-                  className="rounded-md border border-border bg-background/60 px-3 py-2"
+                  className="py-1"
                 >
-                  <div className="flex flex-wrap items-center gap-2">
+                  <div className="flex items-center gap-1">
                     <span
-                      className="h-2.5 w-2.5 rounded-full border border-border shrink-0"
+                      className="h-2 w-2 rounded-full border border-border shrink-0"
                       style={{ backgroundColor: speaker.speakerColor || '#94a3b8' }}
                     />
 
@@ -538,16 +530,17 @@ export function TranscriptPanel({
                       </>
                     ) : (
                       <>
-                        <div className="min-w-[100px] flex-1">
-                          <p className="truncate text-sm font-medium text-foreground">
+                        <div className="flex min-w-0 flex-1 items-baseline gap-1.5" title={`${speaker.speakerLabel} · ${speaker.segmentCount} transcript segments`}>
+                          <span className="truncate text-sm font-medium text-foreground">
                             {speaker.speakerLabel}
-                          </p>
-                          <p className="text-xs text-muted-foreground">
-                            {speaker.segmentCount} {transcriptSegmentLabel}
-                          </p>
+                          </span>
+                          <span className="shrink-0 text-[11px] tabular-nums text-muted-foreground" aria-label={`${speaker.segmentCount} transcript segments`}>
+                            {speaker.segmentCount}
+                          </span>
                         </div>
                         <Button
                           size="sm"
+                          className="h-7 shrink-0 px-1.5 text-[11px]"
                           variant="ghost"
                           onClick={() => startEditingSpeaker(speaker)}
                           disabled={editsDisabled}
@@ -557,6 +550,7 @@ export function TranscriptPanel({
                         {speakers.length > 1 && mergingSpeakerId !== speaker.speakerId && (
                           <Button
                             size="sm"
+                            className="h-7 shrink-0 px-1.5 text-[11px]"
                             variant="ghost"
                             disabled={editsDisabled}
                             onClick={() => {
@@ -568,20 +562,17 @@ export function TranscriptPanel({
                             Merge
                           </Button>
                         )}
+                        <Button size="sm" variant="ghost"
+                          className="h-7 shrink-0 px-1.5 text-[11px]"
+                          title="Save this voice and name for future meetings."
+                          disabled={editsDisabled || rememberedSpeakerIds.has(speaker.speakerId)}
+                          onClick={() => void rememberSpeaker(speaker)}>
+                          {rememberingSpeakerId === speaker.speakerId ? 'Remembering…'
+                            : rememberedSpeakerIds.has(speaker.speakerId) ? 'Voice remembered' : 'Remember voice'}
+                        </Button>
                       </>
                     )}
                   </div>
-                  {!isEditing && (
-                    <div className="mt-2 flex flex-wrap items-center gap-2">
-                      <Button size="sm" variant="outline"
-                        disabled={editsDisabled || rememberedSpeakerIds.has(speaker.speakerId)}
-                        onClick={() => void rememberSpeaker(speaker)}>
-                        {rememberingSpeakerId === speaker.speakerId ? 'Remembering…'
-                          : rememberedSpeakerIds.has(speaker.speakerId) ? 'Voice remembered' : 'Remember voice'}
-                      </Button>
-                      <span className="text-xs text-muted-foreground">Use this name in future meetings.</span>
-                    </div>
-                  )}
                   {mergingSpeakerId === speaker.speakerId && (
                     <div className="mt-2 flex flex-wrap items-center gap-2">
                       <select
