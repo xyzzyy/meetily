@@ -86,7 +86,7 @@ On Windows, use `dev-gpu.bat` / `build-gpu.bat` instead. The `.ps1` versions alw
 
 These scripts pick a GPU backend for your hardware. They also build the `llama-helper` sidecar that runs the built-in summary model and copy it into `src-tauri/binaries/`. Running `pnpm run tauri:build` on its own skips that step, so on a fresh clone the bundle fails because the sidecar binary is missing. Run one of the GPU scripts at least once first.
 
-> **AMD ROCm or OpenBLAS-only systems:** auto-detection picks `hipblas` or `openblas`, but the sidecar only supports `metal`, `cuda`, and `vulkan`, so its build fails. To work around this, set the backend yourself: `TAURI_GPU_FEATURE=vulkan ./build-gpu.sh` (needs the Vulkan SDK) or `TAURI_GPU_FEATURE=none ./build-gpu.sh` (CPU only). The same works with `dev-gpu.sh`, and with `set TAURI_GPU_FEATURE=...` before the `.bat` scripts.
+> **AMD ROCm or OpenBLAS-only systems:** auto-detection picks `hipblas` or `openblas`, but the sidecar only supports `metal`, `cuda`, and `vulkan`, so its build fails before Tauri starts. Force a supported backend instead with `TAURI_GPU_FEATURE=vulkan ./build-gpu.sh` (needs the Vulkan SDK); `TAURI_GPU_FEATURE=metal` or `cuda` work the same way on hardware that supports them. `none` is not a sidecar feature, so it can't be used to force a CPU-only build. The Windows `.bat` scripts always re-run detection and overwrite a pre-set value, so this workaround applies to the shell scripts.
 
 The repository root is a Cargo workspace, so the finished bundle is written to `target/release/bundle/` at the **repository root**, not under `frontend/`.
 
@@ -169,7 +169,7 @@ Meetily Branch keeps its meeting database, settings, and models in the app-data 
 
 Models go in the `models/` subfolder. If official Meetily is installed, its `com.meetily.ai/models/` folder is used only as a read-only fallback.
 
-By default, audio recordings are saved outside app-data in a `meetily-branch-recordings` folder. Official Meetily uses `meetily-recordings`, so the two apps keep separate recordings. You can change the location in the app's recording settings.
+Audio recordings are saved outside app-data in a `meetily-branch-recordings` folder. Official Meetily uses `meetily-recordings`, so the two apps keep separate recordings. The recording settings show this path and an **Open Folder** button; the location itself is fixed.
 
 | Platform | Default recordings folder |
 |---|---|
