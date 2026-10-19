@@ -1,6 +1,6 @@
 use log::{info, warn};
 use serde::{Deserialize, Serialize};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use tauri::{AppHandle, Runtime};
 use tauri_plugin_store::StoreExt;
 
@@ -74,8 +74,14 @@ pub fn get_default_recordings_folder() -> PathBuf {
 /// saved, so a stored `meetily-recordings` path was never chosen by the user. Left
 /// in place, "Open Folder" and the displayed save location would point at
 /// official Meetily's recordings while new recordings are written elsewhere.
-fn migrate_legacy_save_folder(preferences: &mut RecordingPreferences, legacy_folder: &Path) {
-    if preferences.save_folder == legacy_folder {
+///
+/// Matches on the folder name rather than a recomputed path, because the old
+/// default may have come from the Documents fallback or a since-moved media
+/// folder.
+fn migrate_legacy_save_folder(preferences: &mut RecordingPreferences) {
+    if preferences.save_folder.file_name().and_then(|name| name.to_str())
+        == Some(LEGACY_RECORDINGS_FOLDER_NAME)
+    {
         let default_folder = get_default_recordings_folder();
         info!(
             "Moving recordings save folder from the shared default {:?} to {:?}",
@@ -119,10 +125,7 @@ pub async fn load_recording_preferences<R: Runtime>(
         match serde_json::from_value::<RecordingPreferences>(value.clone()) {
             Ok(mut p) => {
                 info!("Loaded recording preferences from store");
-                migrate_legacy_save_folder(
-                    &mut p,
-                    &recordings_parent_folder().join(LEGACY_RECORDINGS_FOLDER_NAME),
-                );
+                migrate_legacy_save_folder(&mut p);
                 // Update macOS backend to current value if needed
                 #[cfg(target_os = "macos")]
                 {
@@ -415,24 +418,33 @@ mod tests {
 
     #[test]
     fn stored_legacy_default_moves_to_branch_folder() {
-        let legacy = recordings_parent_folder().join(LEGACY_RECORDINGS_FOLDER_NAME);
-        let mut preferences = RecordingPreferences {
-            save_folder: legacy.clone(),
-            ..RecordingPreferences::default()
-        };
-        migrate_legacy_save_folder(&mut preferences, &legacy);
-        assert_eq!(preferences.save_folder, get_default_recordings_folder());
+        // The old default may have come from the Documents fallback or a media
+        // folder that has since moved, so any parent must be migrated.
+        for legacy in [
+            recordings_parent_folder().join(LEGACY_RECORDINGS_FOLDER_NAME),
+            PathBuf::from("/Users/someone/Documents").join(LEGACY_RECORDINGS_FOLDER_NAME),
+        ] {
+            let mut preferences = RecordingPreferences {
+                save_folder: legacy,
+                ..RecordingPreferences::default()
+            };
+            migrate_legacy_save_folder(&mut preferences);
+            assert_eq!(preferences.save_folder, get_default_recordings_folder());
+        }
     }
 
     #[test]
     fn other_stored_folders_are_left_alone() {
-        let legacy = recordings_parent_folder().join(LEGACY_RECORDINGS_FOLDER_NAME);
-        let custom = PathBuf::from("/Volumes/Archive/meetings");
-        let mut preferences = RecordingPreferences {
-            save_folder: custom.clone(),
-            ..RecordingPreferences::default()
-        };
-        migrate_legacy_save_folder(&mut preferences, &legacy);
-        assert_eq!(preferences.save_folder, custom);
+        for custom in [
+            PathBuf::from("/Volumes/Archive/meetings"),
+            get_default_recordings_folder(),
+        ] {
+            let mut preferences = RecordingPreferences {
+                save_folder: custom.clone(),
+                ..RecordingPreferences::default()
+            };
+            migrate_legacy_save_folder(&mut preferences);
+            assert_eq!(preferences.save_folder, custom);
+        }
     }
 }
