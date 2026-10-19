@@ -752,40 +752,91 @@ fn stabilize_speaker_ids(
     windows: &mut [FinalWindow],
     live: &[crate::database::repositories::diarization::TranscriptSpeakerMetadata],
 ) {
-    let mut mapping: HashMap<String, (String, f64)> = HashMap::new();
-    for window in windows.iter() {
+    // Reuse each old ID at most once. A previous run can have merged several
+    // voices; mapping every new voice to its best old row repeats that merge.
+    let mut weights: HashMap<(String, String), f64> = HashMap::new();
+    let final_ids: BTreeSet<String> = windows
+        .iter()
+        .flat_map(|window| {
+            window
+                .speaker_id
+                .iter()
+                .chain(&window.candidate_speaker_ids)
+        })
+        .cloned()
+        .collect();
+    let mut reserved = final_ids.clone();
+    reserved.extend(live.iter().filter_map(|row| row.speaker_id.clone()));
+    for window in windows.iter().filter(|window| !window.is_overlap) {
         let Some(final_id) = &window.speaker_id else {
             continue;
         };
         if final_id == "local-you" {
             continue;
         }
-        for transcript in live {
+        for transcript in live.iter().filter(|row| row.is_overlap == 0) {
             let Some(provisional_id) = transcript.speaker_id.as_ref() else {
                 continue;
             };
             if matches!(
                 provisional_id.as_str(),
-                "multiple-speakers" | "unknown-speaker"
+                "local-you" | "multiple-speakers" | "unknown-speaker"
             ) {
                 continue;
             }
             let start = transcript.audio_start_time.unwrap_or(0.0).max(window.start);
             let end = transcript.audio_end_time.unwrap_or(start).min(window.end);
             let overlap = (end - start).max(0.0);
-            if overlap > mapping.get(final_id).map(|entry| entry.1).unwrap_or(0.0) {
-                mapping.insert(final_id.clone(), (provisional_id.clone(), overlap));
+            if overlap > 0.0 {
+                *weights
+                    .entry((final_id.clone(), provisional_id.clone()))
+                    .or_default() += overlap;
             }
         }
     }
+    // Use the strongest total time match first, with a stable tie break.
+    let mut ranked = weights.into_iter().collect::<Vec<_>>();
+    ranked.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
+    let mut mapping = HashMap::new();
+    let mut used = BTreeSet::from(["local-you".to_string()]);
+    for ((final_id, old_id), _) in ranked {
+        if !mapping.contains_key(&final_id) && used.insert(old_id.clone()) {
+            mapping.insert(final_id, old_id);
+        }
+    }
+    // Unmatched voices need distinct IDs too: their raw ID can already be the
+    // target of another match or belong to an old, incorrectly merged voice.
+    let old_ids: BTreeSet<_> = live
+        .iter()
+        .filter_map(|row| row.speaker_id.as_ref())
+        .collect();
+    let mut next = 1;
+    for id in final_ids {
+        if id == "local-you" || mapping.contains_key(&id) {
+            continue;
+        }
+        let target = if !used.contains(&id) && !old_ids.contains(&id) {
+            id.clone()
+        } else {
+            loop {
+                let candidate = format!("final-speaker-{next}");
+                next += 1;
+                if reserved.insert(candidate.clone()) {
+                    break candidate;
+                }
+            }
+        };
+        used.insert(target.clone());
+        mapping.insert(id, target);
+    }
     for window in windows {
         if let Some(id) = &window.speaker_id {
-            if let Some((stable, _)) = mapping.get(id) {
+            if let Some(stable) = mapping.get(id) {
                 window.speaker_id = Some(stable.clone());
             }
         }
         for candidate in &mut window.candidate_speaker_ids {
-            if let Some((stable, _)) = mapping.get(candidate) {
+            if let Some(stable) = mapping.get(candidate) {
                 *candidate = stable.clone();
             }
         }
@@ -809,13 +860,16 @@ fn speaker_labels(
             }
         }
     }
+    let mut used_labels: BTreeSet<String> = labels.values().cloned().collect();
     let mut next = 1;
     for window in windows {
         if let Some(id) = &window.speaker_id {
-            labels.entry(id.clone()).or_insert_with(|| {
+            labels.entry(id.clone()).or_insert_with(|| loop {
                 let label = format!("Speaker {next}");
                 next += 1;
-                label
+                if used_labels.insert(label.clone()) {
+                    break label;
+                }
             });
         }
     }
@@ -1459,6 +1513,155 @@ fn quality_flags_from_json(value: Option<&str>) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn speaker_row(
+        id: &str,
+        label: &str,
+        start: f64,
+        end: f64,
+    ) -> crate::database::repositories::diarization::TranscriptSpeakerMetadata {
+        crate::database::repositories::diarization::TranscriptSpeakerMetadata {
+            transcript_id: format!("row-{start}"),
+            meeting_id: "m1".into(),
+            audio_start_time: Some(start),
+            audio_end_time: Some(end),
+            speaker_id: Some(id.into()),
+            speaker_label: Some(label.into()),
+            speaker_profile_id: None,
+            speaker_source: Some("mixed".into()),
+            speaker_color: None,
+            is_overlap: 0,
+            candidate_speaker_ids: None,
+            diarization_status: "final".into(),
+            diarization_method: None,
+            diarization_confidence: Some(0.9),
+        }
+    }
+
+    fn speaker_window(id: &str, start: f64, end: f64) -> FinalWindow {
+        FinalWindow {
+            source: "mixed".into(),
+            start,
+            end,
+            speaker_id: Some(id.into()),
+            speaker_profile_id: None,
+            candidate_speaker_ids: vec![id.into()],
+            confidence: 0.9,
+            is_overlap: false,
+        }
+    }
+
+    #[test]
+    fn rerun_keeps_nine_voices_when_old_result_has_two() {
+        let mut windows = (0..9)
+            .map(|i| {
+                speaker_window(
+                    &format!("mixed-S{i}"),
+                    i as f64 * 10.0,
+                    (i + 1) as f64 * 10.0,
+                )
+            })
+            .collect::<Vec<_>>();
+        let live = vec![
+            speaker_row("old-a", "Speaker 1", 0.0, 80.0),
+            speaker_row("old-b", "Speaker 2", 80.0, 90.0),
+        ];
+        stabilize_speaker_ids(&mut windows, &live);
+        let ids: BTreeSet<_> = windows
+            .iter()
+            .filter_map(|w| w.speaker_id.as_ref())
+            .collect();
+        assert_eq!(ids.len(), 9);
+        let labels = speaker_labels(&windows, &live, &HashMap::new());
+        let displayed: BTreeSet<_> = ids.iter().map(|id| &labels[*id]).collect();
+        assert_eq!(displayed.len(), 9);
+        let rows = (0..9)
+            .map(|i| live_row(&format!("t{i}"), i as f64 * 10.0, (i + 1) as f64 * 10.0))
+            .collect::<Vec<_>>();
+        let published = label_existing_transcripts(&rows, &windows, &labels);
+        assert_eq!(
+            published
+                .iter()
+                .filter_map(|row| row.speaker_id.as_ref())
+                .collect::<BTreeSet<_>>()
+                .len(),
+            9
+        );
+        assert_eq!(
+            published
+                .iter()
+                .map(|row| &row.speaker_label)
+                .collect::<BTreeSet<_>>()
+                .len(),
+            9
+        );
+        for (old, new) in rows.iter().zip(&published) {
+            assert_eq!(old.id, new.id);
+            assert_eq!(old.transcript, new.text);
+        }
+        for window in &windows {
+            assert_eq!(
+                window.candidate_speaker_ids,
+                vec![window.speaker_id.clone().unwrap()]
+            );
+        }
+    }
+
+    #[test]
+    fn stabilization_uses_total_time_and_does_not_collide_with_raw_ids() {
+        let mut windows = vec![
+            speaker_window("new-a", 0.0, 6.0),
+            speaker_window("new-a", 10.0, 16.0),
+            speaker_window("new-b", 20.0, 30.0),
+            speaker_window("old-a", 40.0, 45.0),
+        ];
+        let live = vec![
+            speaker_row("old-a", "Alice", 0.0, 6.0),
+            speaker_row("old-a", "Alice", 10.0, 16.0),
+            speaker_row("old-a", "Alice", 20.0, 30.0),
+        ];
+        stabilize_speaker_ids(&mut windows, &live);
+        assert_eq!(windows[0].speaker_id.as_deref(), Some("old-a"));
+        assert_eq!(windows[1].speaker_id, windows[0].speaker_id);
+        assert_ne!(windows[2].speaker_id, windows[0].speaker_id);
+        assert_ne!(windows[3].speaker_id, windows[0].speaker_id);
+        assert_ne!(windows[3].speaker_id, windows[2].speaker_id);
+    }
+
+    #[test]
+    fn stabilization_keeps_you_and_existing_names_on_repeat_runs() {
+        let live = vec![
+            speaker_row("old-a", "Alice", 0.0, 10.0),
+            speaker_row("old-b", "Bob", 10.0, 20.0),
+            speaker_row("local-you", "You", 20.0, 40.0),
+        ];
+        let mut windows = vec![
+            speaker_window("new-b", 0.0, 10.0),
+            speaker_window("new-a", 10.0, 20.0),
+            speaker_window("local-you", 20.0, 30.0),
+            speaker_window("new-c", 30.0, 40.0),
+        ];
+        stabilize_speaker_ids(&mut windows, &live);
+        assert_eq!(windows[0].speaker_id.as_deref(), Some("old-a"));
+        assert_eq!(windows[1].speaker_id.as_deref(), Some("old-b"));
+        assert_eq!(windows[2].speaker_id.as_deref(), Some("local-you"));
+        assert_ne!(windows[3].speaker_id.as_deref(), Some("local-you"));
+        let labels = speaker_labels(&windows, &live, &HashMap::new());
+        assert_eq!(labels["old-a"], "Alice");
+        assert_eq!(labels["old-b"], "Bob");
+        let ids = windows
+            .iter()
+            .map(|w| w.speaker_id.clone())
+            .collect::<Vec<_>>();
+        stabilize_speaker_ids(&mut windows, &live);
+        assert_eq!(
+            windows
+                .iter()
+                .map(|w| w.speaker_id.clone())
+                .collect::<Vec<_>>(),
+            ids
+        );
+    }
 
     #[test]
     fn rebuilds_remote_overlap_as_multiple_speakers() {
