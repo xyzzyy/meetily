@@ -16,3 +16,8 @@ anyhow = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 tokio = { version = "1.32.0", features = ["full"] }
+
+# macOS 27 rejects stripped compiler plug-ins with misaligned LINKEDIT data.
+# Build dependencies are not shipped in the app bundle.
+[profile.release.build-override]
+strip = "none"
