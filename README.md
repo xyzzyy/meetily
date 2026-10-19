@@ -50,9 +50,9 @@ Meetily records your meetings, transcribes them live, and writes summaries witho
 Meetily Branch tracks upstream Meetily 0.4.1. It adds a few protections so you can run it on the same machine as the official app without risk to the official app's data:
 
 - **Separate identity.** The app is named `Meetily Branch` and uses the bundle identifier `com.meetily.ai.branch`, so the operating system treats it as a different application from `com.meetily.ai`.
-- **Startup identity check.** Before it opens any database or app-data file, the binary checks the identity it was compiled with. If a build carries the official `com.meetily.ai` identity, or any identity other than the branch one, it refuses to start.
 - **Read-only model sharing.** If official Meetily has already downloaded models, Branch can **read** them so you don't download them twice. Downloads and deletions only happen in Branch's own models folder. Paths that are absolute, contain `..`, or point to symlinked storage are rejected.
-- **No auto-updater.** Update checks are turned off on purpose, because an official Meetily update installed over Branch would bring back the official identity and storage paths. To update, rebuild from source.
+
+More updates coming soon.
 
 ## Getting started
 
