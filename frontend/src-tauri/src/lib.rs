@@ -791,6 +791,8 @@ pub fn run() {
             diarization::commands::merge_speakers,
             diarization::commands::reassign_transcripts,
             diarization::commands::attribute_speaker,
+            diarization::commands::list_speaker_profile_samples,
+            diarization::commands::remove_speaker_profile_sample,
             diarization::commands::list_speaker_profiles,
             diarization::commands::update_speaker_profile,
             diarization::commands::delete_speaker_profile,

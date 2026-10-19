@@ -9,7 +9,7 @@ use crate::{
             diarization_status_to_database_value, DiarizationRepository, MeetingSpeaker,
             TranscriptCorrectionWindow, TranscriptSpeakerMetadata,
         },
-        repositories::speaker_profile::{SampleSource, SpeakerProfilesRepository},
+        repositories::speaker_profile::{SampleRemoval, SampleSource, SpeakerProfilesRepository},
     },
     diarization::{
         alignment::assign_speaker_to_transcript,
@@ -430,6 +430,98 @@ pub async fn list_speaker_profiles(
                 .collect()
         })
         .map_err(|error| error.to_string())
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SpeakerProfileSampleDto {
+    pub meeting_id: String,
+    pub speaker_id: String,
+    /// None when the meeting has since been deleted.
+    pub meeting_title: Option<String>,
+    pub meeting_created_at: Option<String>,
+    /// The speaker's name in that meeting.
+    pub speaker_label: Option<String>,
+    pub speech_seconds: f64,
+    /// False for contributions that can't be separated from the blend.
+    pub removable: bool,
+}
+
+/// List the meeting speakers that make up a remembered voice.
+#[tauri::command]
+pub async fn list_speaker_profile_samples(
+    state: State<'_, AppState>,
+    profile_id: String,
+) -> Result<Vec<SpeakerProfileSampleDto>, String> {
+    let samples = SpeakerProfilesRepository::list_samples(state.speaker_store.pool(), &profile_id)
+        .await
+        .map_err(|error| error.to_string())?;
+    let mut result = Vec::with_capacity(samples.len());
+    for sample in samples {
+        let meeting: Option<(String, String)> =
+            sqlx::query_as("SELECT title, created_at FROM meetings WHERE id = ?")
+                .bind(&sample.meeting_id)
+                .fetch_optional(state.db_manager.pool())
+                .await
+                .map_err(|error| error.to_string())?;
+        let speaker_label: Option<String> = sqlx::query_scalar(
+            "SELECT speaker_label FROM transcript_speakers
+             WHERE meeting_id = ? AND speaker_id = ? AND speaker_label IS NOT NULL LIMIT 1",
+        )
+        .bind(&sample.meeting_id)
+        .bind(&sample.speaker_id)
+        .fetch_optional(state.speaker_store.pool())
+        .await
+        .map_err(|error| error.to_string())?;
+        let (meeting_title, meeting_created_at) = meeting.unzip();
+        result.push(SpeakerProfileSampleDto {
+            meeting_id: sample.meeting_id,
+            speaker_id: sample.speaker_id,
+            meeting_title,
+            meeting_created_at,
+            speaker_label,
+            speech_seconds: sample.speech_seconds,
+            removable: sample.removable,
+        });
+    }
+    Ok(result)
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoveSpeakerProfileSampleRequest {
+    pub profile_id: String,
+    pub meeting_id: String,
+    pub speaker_id: String,
+}
+
+/// Remove one meeting's speech from a remembered voice. The voice is rebuilt
+/// from its other samples, or forgotten if none remain. Returns
+/// `"recalculated"` or `"forgotten"`.
+#[tauri::command]
+pub async fn remove_speaker_profile_sample(
+    state: State<'_, AppState>,
+    request: RemoveSpeakerProfileSampleRequest,
+) -> Result<String, String> {
+    let _edit = super::operations::try_meeting_edit(&request.meeting_id)?;
+    let outcome = SpeakerProfilesRepository::remove_sample(
+        state.speaker_store.pool(),
+        &request.profile_id,
+        SampleSource {
+            meeting_id: &request.meeting_id,
+            speaker_id: &request.speaker_id,
+        },
+    )
+    .await
+    .map_err(|error| match error {
+        sqlx::Error::RowNotFound => "That recording is no longer part of this voice".to_string(),
+        other => other.to_string(),
+    })?;
+    Ok(match outcome {
+        SampleRemoval::Recalculated => "recalculated",
+        SampleRemoval::Forgotten => "forgotten",
+    }
+    .to_string())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

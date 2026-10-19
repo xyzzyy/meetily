@@ -68,6 +68,25 @@ pub struct SampleSource<'a> {
     pub speaker_id: &'a str,
 }
 
+/// One meeting speaker's contribution to a remembered voice.
+#[derive(Debug, Clone, FromRow)]
+pub struct ProfileSample {
+    pub meeting_id: String,
+    pub speaker_id: String,
+    pub speech_seconds: f64,
+    /// False for contributions that can't be separated from the blend.
+    pub removable: bool,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SampleRemoval {
+    /// The voiceprint was rebuilt from the remaining samples.
+    Recalculated,
+    /// No samples remained, so the remembered voice was forgotten.
+    Forgotten,
+}
+
 pub struct SpeakerProfilesRepository;
 
 impl SpeakerProfilesRepository {
@@ -121,7 +140,7 @@ impl SpeakerProfilesRepository {
         .bind(now)
         .execute(&mut *transaction)
         .await?;
-        Self::record_sample(&mut transaction, &id, &source, speech_seconds).await?;
+        Self::record_sample(&mut transaction, &id, &source, embedding, sample_count, speech_seconds).await?;
         transaction.commit().await?;
         Ok(id)
     }
@@ -185,7 +204,7 @@ impl SpeakerProfilesRepository {
         .bind(profile_id)
         .execute(&mut *transaction)
         .await?;
-        Self::record_sample(&mut transaction, profile_id, &source, speech_seconds).await?;
+        Self::record_sample(&mut transaction, profile_id, &source, embedding, sample_count, speech_seconds).await?;
         transaction.commit().await?;
         Ok(true)
     }
@@ -194,19 +213,125 @@ impl SpeakerProfilesRepository {
         transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
         profile_id: &str,
         source: &SampleSource<'_>,
+        embedding: &[f32],
+        sample_count: i64,
         speech_seconds: f64,
     ) -> Result<(), SqlxError> {
         sqlx::query(
-            "INSERT INTO speaker_profile_samples (profile_id, meeting_id, speaker_id, speech_seconds)
-             VALUES (?, ?, ?, ?)",
+            "INSERT INTO speaker_profile_samples (
+                profile_id, meeting_id, speaker_id, embedding, sample_count, speech_seconds
+             ) VALUES (?, ?, ?, ?, ?, ?)",
         )
         .bind(profile_id)
         .bind(source.meeting_id)
         .bind(source.speaker_id)
+        .bind(embedding_to_blob(embedding))
+        .bind(sample_count)
         .bind(speech_seconds)
         .execute(&mut **transaction)
         .await?;
         Ok(())
+    }
+
+    /// The meeting speakers that contributed to a remembered voice, newest first.
+    pub async fn list_samples(
+        pool: &SqlitePool,
+        profile_id: &str,
+    ) -> Result<Vec<ProfileSample>, SqlxError> {
+        sqlx::query_as::<_, ProfileSample>(
+            "SELECT meeting_id, speaker_id, speech_seconds, embedding IS NOT NULL AS removable,
+                    created_at
+             FROM speaker_profile_samples WHERE profile_id = ?
+             ORDER BY created_at DESC, meeting_id, speaker_id",
+        )
+        .bind(profile_id)
+        .fetch_all(pool)
+        .await
+    }
+
+    /// Remove one meeting speaker's contribution from a remembered voice and
+    /// rebuild the blended voiceprint from the samples that remain.
+    ///
+    /// Removing the last sample with a voiceprint forgets the voice. The meeting
+    /// speaker keeps its name but is no longer linked to the remembered voice.
+    pub async fn remove_sample(
+        pool: &SqlitePool,
+        profile_id: &str,
+        source: SampleSource<'_>,
+    ) -> Result<SampleRemoval, SqlxError> {
+        let mut transaction = pool.begin().await?;
+        let removed = sqlx::query(
+            "DELETE FROM speaker_profile_samples
+             WHERE profile_id = ? AND meeting_id = ? AND speaker_id = ?",
+        )
+        .bind(profile_id)
+        .bind(source.meeting_id)
+        .bind(source.speaker_id)
+        .execute(&mut *transaction)
+        .await?
+        .rows_affected();
+        if removed == 0 {
+            return Err(SqlxError::RowNotFound);
+        }
+        for table in ["transcript_speakers", "speaker_segments"] {
+            sqlx::query(&format!(
+                "UPDATE {table} SET speaker_profile_id = NULL
+                 WHERE speaker_profile_id = ? AND meeting_id = ? AND speaker_id = ?"
+            ))
+            .bind(profile_id)
+            .bind(source.meeting_id)
+            .bind(source.speaker_id)
+            .execute(&mut *transaction)
+            .await?;
+        }
+
+        let remaining: Vec<(Vec<u8>, i64, f64)> = sqlx::query_as(
+            "SELECT embedding, sample_count, speech_seconds FROM speaker_profile_samples
+             WHERE profile_id = ? AND embedding IS NOT NULL",
+        )
+        .bind(profile_id)
+        .fetch_all(&mut *transaction)
+        .await?;
+        let outcome = if remaining.is_empty() {
+            for statement in [
+                "DELETE FROM speaker_profile_samples WHERE profile_id = ?",
+                "UPDATE transcript_speakers SET speaker_profile_id = NULL WHERE speaker_profile_id = ?",
+                "UPDATE speaker_segments SET speaker_profile_id = NULL WHERE speaker_profile_id = ?",
+                "DELETE FROM speaker_profiles WHERE id = ?",
+            ] {
+                sqlx::query(statement).bind(profile_id).execute(&mut *transaction).await?;
+            }
+            SampleRemoval::Forgotten
+        } else {
+            let mut embedding: Vec<f32> = Vec::new();
+            let mut seconds = 0.0;
+            let mut samples = 0;
+            for (blob, sample_count, sample_seconds) in &remaining {
+                let sample = blob_to_embedding(blob);
+                embedding = if embedding.is_empty() {
+                    sample
+                } else {
+                    blend_embeddings(&embedding, seconds, &sample, *sample_seconds)
+                };
+                seconds += sample_seconds;
+                samples += sample_count;
+            }
+            sqlx::query(
+                "UPDATE speaker_profiles
+                 SET embedding = ?, sample_count = ?, speech_seconds = ?, updated_at = ?
+                 WHERE id = ?",
+            )
+            .bind(embedding_to_blob(&embedding))
+            .bind(samples)
+            .bind(seconds)
+            .bind(Utc::now())
+            .bind(profile_id)
+            .execute(&mut *transaction)
+            .await?;
+            SampleRemoval::Recalculated
+        };
+        transaction.commit().await?;
+        Ok(outcome)
     }
 
     /// Find a remembered voice by name, ignoring case and surrounding spaces.
@@ -474,5 +599,146 @@ mod tests {
 
         // Running it again changes nothing.
         assert_eq!(SpeakerProfilesRepository::merge_duplicate_names(&pool).await.unwrap(), 0);
+    }
+
+    async fn link(pool: &SqlitePool, transcript: &str, meeting: &str, speaker: &str, profile: &str) {
+        sqlx::query(
+            "INSERT INTO transcript_speakers (transcript_id, meeting_id, speaker_id, speaker_label, speaker_profile_id)
+             VALUES (?, ?, ?, 'Alice', ?)",
+        )
+        .bind(transcript)
+        .bind(meeting)
+        .bind(speaker)
+        .bind(profile)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    async fn linked_profile(pool: &SqlitePool, transcript: &str) -> Option<String> {
+        sqlx::query_scalar("SELECT speaker_profile_id FROM transcript_speakers WHERE transcript_id = ?")
+            .bind(transcript)
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn removing_a_sample_rebuilds_the_voice_from_the_rest() {
+        let pool = speaker_store().await;
+        let id = SpeakerProfilesRepository::create_from_sample(
+            &pool, "Alice", &[1.0, 0.0], "v1", 2, 20.0,
+            SampleSource { meeting_id: "m1", speaker_id: "S1" },
+        )
+        .await
+        .unwrap();
+        SpeakerProfilesRepository::add_sample(
+            &pool, &id, &[0.0, 1.0], "v1", 3, 10.0,
+            SampleSource { meeting_id: "m2", speaker_id: "S2" },
+        )
+        .await
+        .unwrap();
+        link(&pool, "t1", "m1", "S1", &id).await;
+        link(&pool, "t2", "m2", "S2", &id).await;
+
+        let samples = SpeakerProfilesRepository::list_samples(&pool, &id).await.unwrap();
+        assert_eq!(samples.len(), 2);
+        assert!(samples.iter().all(|sample| sample.removable));
+
+        let outcome = SpeakerProfilesRepository::remove_sample(
+            &pool, &id, SampleSource { meeting_id: "m2", speaker_id: "S2" },
+        )
+        .await
+        .unwrap();
+        assert_eq!(outcome, SampleRemoval::Recalculated);
+        let rebuilt = SpeakerProfilesRepository::get(&pool, &id).await.unwrap().unwrap();
+        assert_eq!(rebuilt.embedding, vec![1.0, 0.0]);
+        assert_eq!((rebuilt.sample_count, rebuilt.speech_seconds), (2, 20.0));
+        assert_eq!(linked_profile(&pool, "t1").await.as_deref(), Some(id.as_str()));
+        assert_eq!(linked_profile(&pool, "t2").await, None);
+
+        // The removed meeting speaker can be added back afterwards.
+        assert!(SpeakerProfilesRepository::add_sample(
+            &pool, &id, &[0.0, 1.0], "v1", 3, 10.0,
+            SampleSource { meeting_id: "m2", speaker_id: "S2" },
+        )
+        .await
+        .unwrap());
+    }
+
+    #[tokio::test]
+    async fn removing_the_last_sample_forgets_the_voice() {
+        let pool = speaker_store().await;
+        let id = SpeakerProfilesRepository::create_from_sample(
+            &pool, "Alice", &[1.0, 0.0], "v1", 2, 20.0,
+            SampleSource { meeting_id: "m1", speaker_id: "S1" },
+        )
+        .await
+        .unwrap();
+        link(&pool, "t1", "m1", "S1", &id).await;
+        let outcome = SpeakerProfilesRepository::remove_sample(
+            &pool, &id, SampleSource { meeting_id: "m1", speaker_id: "S1" },
+        )
+        .await
+        .unwrap();
+        assert_eq!(outcome, SampleRemoval::Forgotten);
+        assert!(SpeakerProfilesRepository::get(&pool, &id).await.unwrap().is_none());
+        assert_eq!(linked_profile(&pool, "t1").await, None);
+        let label: String = sqlx::query_scalar("SELECT speaker_label FROM transcript_speakers WHERE transcript_id = 't1'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(label, "Alice", "the meeting keeps its speaker name");
+    }
+
+    #[tokio::test]
+    async fn voices_remembered_before_samples_existed_are_backfilled_with_their_voiceprint() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::query(include_str!("../../../speaker-migrations/20260715000000_initial_speaker_feature.sql"))
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO speaker_profiles (id, name, embedding, model_version, sample_count, speech_seconds)
+             VALUES ('p1', 'Madior', ?, 'v1', 7, 30.0)",
+        )
+        .bind(embedding_to_blob(&[0.6, 0.8]))
+        .execute(&pool)
+        .await
+        .unwrap();
+        for (transcript, speaker) in [("t1", "S1"), ("t2", "S1"), ("t3", "S9")] {
+            sqlx::query(
+                "INSERT INTO transcript_speakers (transcript_id, meeting_id, speaker_id, speaker_profile_id, diarization_method)
+                 VALUES (?, 'm1', ?, 'p1', 'manual')",
+            )
+            .bind(transcript)
+            .bind(speaker)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+        sqlx::query(include_str!("../../../speaker-migrations/20261020000000_speaker_profile_samples.sql"))
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let samples = SpeakerProfilesRepository::list_samples(&pool, "p1").await.unwrap();
+        let main = samples.iter().find(|sample| sample.speaker_id == "S1").unwrap();
+        assert!(main.removable);
+        assert_eq!(main.speech_seconds, 30.0);
+        let extra = samples.iter().find(|sample| sample.speaker_id == "S9").unwrap();
+        assert!(!extra.removable, "a second manual speaker can't be separated from the blend");
+
+        // Removing the backfilled sample leaves only the inseparable one, so the voice is forgotten.
+        assert_eq!(
+            SpeakerProfilesRepository::remove_sample(&pool, "p1", SampleSource { meeting_id: "m1", speaker_id: "S1" })
+                .await
+                .unwrap(),
+            SampleRemoval::Forgotten
+        );
     }
 }

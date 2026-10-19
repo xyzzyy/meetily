@@ -180,6 +180,20 @@ export interface MeetingSpeaker {
   segmentCount: number;
 }
 
+/** One meeting speaker whose speech is part of a remembered voice. */
+export interface SpeakerProfileSample {
+  meetingId: string;
+  speakerId: string;
+  /** Null when the meeting has since been deleted. */
+  meetingTitle: string | null;
+  meetingCreatedAt: string | null;
+  /** The speaker's name in that meeting. */
+  speakerLabel: string | null;
+  speechSeconds: number;
+  /** False for contributions that can't be separated from the blended voice. */
+  removable: boolean;
+}
+
 /** A voice remembered locally for recognizing a person in future meetings. */
 export interface SpeakerProfile {
   id: string;
