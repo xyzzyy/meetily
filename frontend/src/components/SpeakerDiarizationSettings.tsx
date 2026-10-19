@@ -112,12 +112,12 @@ export function SpeakerDiarizationSettings() {
   return (
     <SettingsSection
       title="Speaker labels"
-      description="Label who spoke in the transcript. Live labels are provisional; final labels are applied after the meeting."
+      description="Identify who spoke. You can correct speaker labels after the meeting."
       badge={<SettingsStatusBadge tone="beta">Beta</SettingsStatusBadge>}
     >
       <SettingsRow
         title="Local speaker model"
-        description={modelInstalled ? 'Installed locally (28 MB).' : 'Required for live speaker recognition and remembered voices.'}
+        description={modelInstalled ? 'Installed locally.' : 'Required to identify speakers and remember voices.'}
         control={modelInstalled ? (
           <div className="flex items-center gap-2">
             <SettingsStatusBadge tone="local">Installed</SettingsStatusBadge>
@@ -131,12 +131,12 @@ export function SpeakerDiarizationSettings() {
       />
 
       <SettingsRow
-        title="Enable speaker diarization"
-        description="Add speaker labels to transcripts without identifying people by voice."
+        title="Enable speaker labels"
+        description="Separate speakers in the transcript. Remembered voices can use names from earlier meetings."
         control={
           <Switch
             checked={diarizationSettings.enabled}
-            disabled={isLoadingDiarizationSettings || !modelInstalled}
+            disabled={isLoadingDiarizationSettings || (!modelInstalled && !diarizationSettings.enabled)}
             onCheckedChange={handleEnabledChange}
           />
         }
@@ -144,7 +144,7 @@ export function SpeakerDiarizationSettings() {
 
       <SettingsRow
         title="Mode"
-        description="Recommended: show provisional labels during the call, then refine after recording stops."
+        description="Choose when to identify speakers. Post-call only adds no speaker labels during recording."
         control={
           <Select
             value={diarizationSettings.mode}
@@ -155,8 +155,8 @@ export function SpeakerDiarizationSettings() {
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
-              <SelectItem value="live_plus_post_call">Live + post-call refinement</SelectItem>
-              <SelectItem value="post_call_only">Post-call only</SelectItem>
+              <SelectItem value="live_plus_post_call">During and after the meeting</SelectItem>
+              <SelectItem value="post_call_only">After the meeting only</SelectItem>
               <SelectItem value="off">Off</SelectItem>
             </SelectContent>
           </Select>
@@ -165,8 +165,8 @@ export function SpeakerDiarizationSettings() {
 
       <SettingsRow
         title="Show provisional labels during call"
-        description="Display live Speaker 1 / Speaker 2 labels with a provisional badge."
-        disabledReason={!liveModeEnabled ? 'Available only in Live + post-call refinement mode.' : undefined}
+        description="Show temporary labels during recording. Turn this off to hide all live speaker labels."
+        disabledReason={!liveModeEnabled ? 'Available only in During and after the meeting mode.' : undefined}
         control={
           <Switch
             checked={diarizationSettings.showProvisionalLabels}
@@ -178,7 +178,7 @@ export function SpeakerDiarizationSettings() {
 
       <SettingsRow
         title="Run post-call refinement automatically"
-        description="After the meeting, analyze the full audio and replace provisional labels when quality is good."
+        description="Identify speakers when recording stops. If this is off, use Identify speakers in the meeting transcript."
         control={
           <Switch
             checked={diarizationSettings.postCallRefinementEnabled}
@@ -194,17 +194,11 @@ export function SpeakerDiarizationSettings() {
         control={<SettingsStatusBadge tone="local">Multiple speakers</SettingsStatusBadge>}
       />
 
-      <SettingsRow
-        title="Speaker review"
-        description="Allow rename, merge, split, and overlap fixes after post-call processing."
-        control={
-          <Switch
-            checked={diarizationSettings.speakerReviewEnabled}
-            disabled={!diarizationSettings.enabled || isLoadingDiarizationSettings}
-            onCheckedChange={(speakerReviewEnabled) => update({ speakerReviewEnabled })}
-          />
-        }
-      />
+      <p className="text-sm text-muted-foreground">
+        After processing, use Correct rows to change speaker labels or mark multiple speakers.
+        Use Rename or Merge to change a speaker across the meeting.
+        Remember voice saves a local voice profile for future meetings.
+      </p>
 
       {profiles.map(profile => (
         <SettingsRow

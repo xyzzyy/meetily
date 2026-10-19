@@ -8,8 +8,9 @@ import { Input } from '@/components/ui/input';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { confirm } from '@tauri-apps/plugin-dialog';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { toast } from 'sonner';
+import { useConfig } from '@/contexts/ConfigContext';
 
 interface TranscriptPanelProps {
   transcripts: Transcript[];
@@ -42,11 +43,6 @@ interface DiarizationStatus {
   method?: string | null;
   failureReason?: string | null;
   qualityFlags?: string | null;
-}
-
-interface DiarizationSettings {
-  enabled: boolean;
-  postCallRefinementEnabled: boolean;
 }
 
 export function TranscriptPanel({
@@ -95,7 +91,12 @@ export function TranscriptPanel({
   const [editingSpeakerId, setEditingSpeakerId] = useState<string | null>(null);
   const [draftSpeakerLabel, setDraftSpeakerLabel] = useState('');
   const [savingSpeakerId, setSavingSpeakerId] = useState<string | null>(null);
-  const [rememberVoice, setRememberVoice] = useState(false);
+  const [rememberingSpeakerId, setRememberingSpeakerId] = useState<string | null>(null);
+  const [rememberedSpeakerIds, setRememberedSpeakerIds] = useState<Set<string>>(new Set());
+  const [isApplyingCorrection, setIsApplyingCorrection] = useState(false);
+  const [isMerging, setIsMerging] = useState(false);
+  const [isStartingDiarization, setIsStartingDiarization] = useState(false);
+  const mutationInFlight = useRef(false);
   const [mergingSpeakerId, setMergingSpeakerId] = useState<string | null>(null);
   const [mergeTargetId, setMergeTargetId] = useState('');
   const [correctionMode, setCorrectionMode] = useState(false);
@@ -104,11 +105,37 @@ export function TranscriptPanel({
   const [newSpeakerLabel, setNewSpeakerLabel] = useState('');
   const [assignmentOverlap, setAssignmentOverlap] = useState(false);
   const [diarizationStatus, setDiarizationStatus] = useState<DiarizationStatus | null>(null);
-  const [diarizationEnabled, setDiarizationEnabled] = useState(false);
+  const { diarizationSettings, isLoadingDiarizationSettings } = useConfig();
+  const diarizationEnabled = !isLoadingDiarizationSettings
+    && diarizationSettings.enabled && diarizationSettings.mode !== 'off';
 
   const speakerSourceCount = usePagination
     ? totalCount ?? convertedSegments.length
     : transcripts.length;
+
+  const refinementActive = isStartingDiarization || [
+    'processing', 'preparing_models', 'rebuilding_windows', 'transcribing_windows', 'saving',
+  ].includes(diarizationStatus?.currentStatus || '');
+  const recoveryRequired = diarizationStatus?.currentStatus === 'recovery_required';
+  const editsDisabled = refinementActive || recoveryRequired || savingSpeakerId !== null
+    || rememberingSpeakerId !== null || isApplyingCorrection || isMerging;
+  const beginEdit = () => {
+    if (editsDisabled || mutationInFlight.current) return false;
+    mutationInFlight.current = true;
+    return true;
+  };
+
+  useEffect(() => {
+    setEditingSpeakerId(null);
+    setMergingSpeakerId(null);
+    setCorrectionMode(false);
+    setSelectedRowIds(new Set());
+    setRememberedSpeakerIds(new Set());
+    setAssignmentTargetId('');
+    setAssignmentOverlap(false);
+    setNewSpeakerLabel('');
+    setDiarizationStatus(null);
+  }, [meetingId]);
 
   const loadSpeakers = useCallback(async () => {
     if (!meetingId || speakerSourceCount === 0) {
@@ -148,6 +175,7 @@ export function TranscriptPanel({
       .catch(error => console.warn('Failed to load speaker refinement status:', error));
 
     let unlisten: (() => void) | undefined;
+    let disposed = false;
     void listen<{ meetingId: string; status: string; progress: number; error?: string }>(
       'diarization-progress',
       event => {
@@ -165,57 +193,41 @@ export function TranscriptPanel({
           void loadSpeakers();
         }
       }
-    ).then(cleanup => { unlisten = cleanup; });
-    return () => unlisten?.();
+    ).then(cleanup => { if (disposed) cleanup(); else unlisten = cleanup; });
+    return () => { disposed = true; unlisten?.(); };
   }, [isRecording, loadSpeakers, meetingId, onRefetchTranscripts]);
 
-  useEffect(() => {
-    if (isRecording) return;
-    void invoke<DiarizationSettings>('get_diarization_settings')
-      .then(settings => setDiarizationEnabled(
-        settings.enabled && settings.postCallRefinementEnabled
-      ))
-      .catch(() => setDiarizationEnabled(false));
-  }, [isRecording]);
-
-  const startDiarization = useCallback(async () => {
-    if (!meetingId) return;
+  const runDiarization = async (retry: boolean) => {
+    if (!meetingId || !diarizationEnabled || !beginEdit()) return;
+    setIsStartingDiarization(true);
+    const command = retry ? 'retry_final_diarization' : 'start_final_diarization';
     try {
-      await invoke('start_final_diarization', {
-        request: { meetingId, overwriteManualEdits: false }
-      });
-    } catch (error) {
-      toast.error('Speaker recognition could not finish', { description: String(error) });
-    }
-  }, [meetingId]);
-
-  const retryDiarization = useCallback(async () => {
-    if (!meetingId) return;
-    try {
-      await invoke('retry_final_diarization', {
-        request: { meetingId, overwriteManualEdits: false }
-      });
-    } catch (error) {
-      if (String(error).includes('manual speaker edits')) {
+      try {
+        await invoke(command, { request: { meetingId, overwriteManualEdits: false } });
+      } catch (error) {
+        if (!String(error).includes('manual speaker edits')) throw error;
         const overwrite = await confirm(
-          'This rerun will replace your manual speaker corrections. Continue?',
+          'This run will replace your manual speaker corrections. Continue?',
           { title: 'Replace manual speaker edits?', kind: 'warning' }
         );
-        if (overwrite) {
-          await invoke('retry_final_diarization', {
-            request: { meetingId, overwriteManualEdits: true }
-          });
-          return;
-        }
+        if (!overwrite) return;
+        await invoke(command, { request: { meetingId, overwriteManualEdits: true } });
       }
-      toast.error('Speaker refinement could not finish', { description: String(error) });
+      await onRefetchTranscripts?.();
+      await loadSpeakers();
+    } catch (error) {
+      toast.error('Speaker processing could not finish', { description: String(error) });
+    } finally {
+      setIsStartingDiarization(false);
+      mutationInFlight.current = false;
     }
-  }, [meetingId]);
+  };
 
-  const mergeSpeaker = useCallback(async () => {
-    if (!meetingId || !mergingSpeakerId || !mergeTargetId) return;
+  const mergeSpeaker = async () => {
+    if (!meetingId || !mergingSpeakerId || !mergeTargetId || editsDisabled) return;
     const target = speakers.find(speaker => speaker.speakerId === mergeTargetId);
-    if (!target) return;
+    if (!target || !beginEdit()) return;
+    setIsMerging(true);
     try {
       await invoke('merge_speakers', {
         request: {
@@ -232,19 +244,23 @@ export function TranscriptPanel({
       toast.success('Speakers merged');
     } catch (error) {
       toast.error('Could not merge speakers', { description: String(error) });
+    } finally {
+      setIsMerging(false);
+      mutationInFlight.current = false;
     }
-  }, [loadSpeakers, meetingId, mergeTargetId, mergingSpeakerId, onRefetchTranscripts, speakers]);
+  };
 
-  const toggleSelectedRow = useCallback((id: string) => {
+  const toggleSelectedRow = (id: string) => {
+    if (editsDisabled) return;
     setSelectedRowIds(current => {
       const next = new Set(current);
       if (next.has(id)) next.delete(id); else next.add(id);
       return next;
     });
-  }, []);
+  };
 
-  const applyRowCorrection = useCallback(async () => {
-    if (!meetingId || selectedRowIds.size === 0) return;
+  const applyRowCorrection = async () => {
+    if (!meetingId || selectedRowIds.size === 0 || editsDisabled) return;
     const target = speakers.find(speaker => speaker.speakerId === assignmentTargetId);
     const creating = assignmentTargetId === '__new';
     const label = creating ? newSpeakerLabel.trim() : target?.speakerLabel;
@@ -257,6 +273,8 @@ export function TranscriptPanel({
       : creating
         ? `manual-${Date.now()}`
         : target?.speakerId;
+    if (!beginEdit()) return;
+    setIsApplyingCorrection(true);
     try {
       await invoke('reassign_transcripts', {
         request: {
@@ -272,27 +290,31 @@ export function TranscriptPanel({
       setCorrectionMode(false);
       setAssignmentTargetId('');
       setNewSpeakerLabel('');
+      setAssignmentOverlap(false);
       await onRefetchTranscripts?.();
       await loadSpeakers();
       toast.success('Transcript rows updated');
     } catch (error) {
       toast.error('Could not update transcript rows', { description: String(error) });
+    } finally {
+      setIsApplyingCorrection(false);
+      mutationInFlight.current = false;
     }
-  }, [assignmentOverlap, assignmentTargetId, loadSpeakers, meetingId, newSpeakerLabel, onRefetchTranscripts, selectedRowIds, speakers]);
+  };
 
-  const startEditingSpeaker = useCallback((speaker: MeetingSpeaker) => {
+  const startEditingSpeaker = (speaker: MeetingSpeaker) => {
+    if (editsDisabled) return;
     setEditingSpeakerId(speaker.speakerId);
     setDraftSpeakerLabel(speaker.speakerLabel);
-    setRememberVoice(false);
-  }, []);
+  };
 
   const cancelEditingSpeaker = useCallback(() => {
     setEditingSpeakerId(null);
     setDraftSpeakerLabel('');
   }, []);
 
-  const saveSpeakerLabel = useCallback(async (speaker: MeetingSpeaker) => {
-    if (!meetingId) {
+  const saveSpeakerLabel = async (speaker: MeetingSpeaker) => {
+    if (!meetingId || editsDisabled) {
       return;
     }
 
@@ -307,9 +329,9 @@ export function TranscriptPanel({
       return;
     }
 
+    if (!beginEdit()) return;
     setSavingSpeakerId(speaker.speakerId);
     try {
-      let voiceRemembered = false;
       await invoke('rename_speaker', {
         request: {
           meetingId,
@@ -317,20 +339,6 @@ export function TranscriptPanel({
           label,
         },
       });
-      if (rememberVoice) {
-        try {
-          await invoke('remember_speaker', {
-            request: { meetingId, speakerId: speaker.speakerId, name: label }
-          });
-          voiceRemembered = true;
-        } catch (error) {
-          toast.warning('Speaker renamed, but voice was not remembered', {
-            description: String(error),
-          });
-          setRememberVoice(false);
-        }
-      }
-
       setSpeakers(previousSpeakers =>
         previousSpeakers.map(previousSpeaker =>
           previousSpeaker.speakerId === speaker.speakerId
@@ -339,13 +347,18 @@ export function TranscriptPanel({
         )
       );
       cancelEditingSpeaker();
+      setRememberedSpeakerIds(current => {
+        const next = new Set(current);
+        next.delete(speaker.speakerId);
+        return next;
+      });
 
       if (onRefetchTranscripts) {
         await onRefetchTranscripts();
       }
       await loadSpeakers();
 
-      toast.success(voiceRemembered ? 'Speaker renamed and voice remembered' : 'Speaker renamed');
+      toast.success('Speaker renamed');
     } catch (error) {
       console.error('Failed to rename speaker:', error);
       toast.error('Failed to rename speaker', {
@@ -353,8 +366,26 @@ export function TranscriptPanel({
       });
     } finally {
       setSavingSpeakerId(null);
+      mutationInFlight.current = false;
     }
-  }, [cancelEditingSpeaker, draftSpeakerLabel, loadSpeakers, meetingId, onRefetchTranscripts, rememberVoice]);
+  };
+
+  const rememberSpeaker = async (speaker: MeetingSpeaker) => {
+    if (!meetingId || !beginEdit()) return;
+    setRememberingSpeakerId(speaker.speakerId);
+    try {
+      await invoke('remember_speaker', {
+        request: { meetingId, speakerId: speaker.speakerId, name: speaker.speakerLabel },
+      });
+      setRememberedSpeakerIds(current => new Set(current).add(speaker.speakerId));
+      toast.success(`Voice remembered for ${speaker.speakerLabel}`);
+    } catch (error) {
+      toast.error('Could not remember voice', { description: String(error) });
+    } finally {
+      setRememberingSpeakerId(null);
+      mutationInFlight.current = false;
+    }
+  };
 
   return (
     <div className="flex h-full min-w-0 w-full bg-white flex-col relative @container">
@@ -372,51 +403,56 @@ export function TranscriptPanel({
 
       {!isRecording && diarizationStatus && diarizationStatus.currentStatus !== 'none' && (
         <div className={`border-b px-4 py-3 text-sm ${
-          ['fallback_to_live', 'needs_review', 'failed', 'cancelled'].includes(diarizationStatus.currentStatus)
+          ['fallback_to_live', 'needs_review', 'failed', 'cancelled', 'recovery_required'].includes(diarizationStatus.currentStatus)
             ? 'border-amber-200 bg-amber-50 text-amber-950'
             : 'border-blue-200 bg-blue-50 text-blue-950'
         }`}>
-          <div className="flex items-center justify-between gap-3">
+          <div className="flex flex-wrap items-center justify-between gap-3">
             <div className="min-w-0">
               <p className="font-medium">
                 {diarizationStatus.currentStatus === 'completed'
                   ? 'Speaker recognition complete'
-                  : ['fallback_to_live', 'needs_review', 'failed', 'cancelled'].includes(diarizationStatus.currentStatus)
-                    ? 'Using the live transcript'
+                  : ['fallback_to_live', 'needs_review', 'failed', 'cancelled', 'recovery_required'].includes(diarizationStatus.currentStatus)
+                    ? diarizationStatus.currentStatus === 'recovery_required'
+                      ? 'Transcript recovery is required'
+                      : 'Speaker processing needs attention'
                     : 'Refining speakers locally…'}
               </p>
-              <p className="truncate text-xs opacity-80">
+              <p className="break-words text-xs opacity-80">
                 {diarizationStatus.failureReason || `${diarizationStatus.progress}% complete`}
               </p>
             </div>
-            {['processing', 'preparing_models', 'rebuilding_windows', 'transcribing_windows', 'saving'].includes(diarizationStatus.currentStatus) ? (
+            {refinementActive ? (
               <Button size="sm" variant="ghost" onClick={() => void invoke('cancel_final_diarization')}>
                 Cancel
               </Button>
             ) : ['fallback_to_live', 'needs_review', 'failed', 'cancelled'].includes(diarizationStatus.currentStatus) ? (
-              <Button size="sm" variant="outline" onClick={() => void retryDiarization()}>
+              <Button size="sm" variant="outline" disabled={editsDisabled || !diarizationEnabled} onClick={() => void runDiarization(true)}>
                 Retry
               </Button>
             ) : null}
           </div>
+          {recoveryRequired && (
+            <p className="mt-2 text-xs">Close and reopen the app to retry transcript recovery. Speaker changes are unavailable until recovery finishes.</p>
+          )}
         </div>
       )}
 
-      {!isRecording && meetingId && meetingFolderPath && diarizationEnabled && !diarizationStatus && (
-        <div className="flex items-center justify-between gap-3 border-b border-blue-200 bg-blue-50 px-4 py-3 text-sm text-blue-950">
+      {!isRecording && meetingId && meetingFolderPath && diarizationEnabled && (!diarizationStatus || ['none', 'completed'].includes(diarizationStatus.currentStatus)) && (
+        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-blue-200 bg-blue-50 px-4 py-3 text-sm text-blue-950">
           <div>
-            <p className="font-medium">Speaker recognition is available</p>
-            <p className="text-xs opacity-80">Process this meeting locally and rebuild the transcript by speaker.</p>
+            <p className="font-medium">Identify speakers</p>
+            <p className="text-xs opacity-80">Analyze this meeting locally and update speaker labels. Transcript text stays the same.</p>
           </div>
-          <Button size="sm" variant="outline" onClick={() => void startDiarization()}>
-            Run
+          <Button size="sm" variant="outline" disabled={editsDisabled} onClick={() => void runDiarization(diarizationStatus?.currentStatus === 'completed')}>
+            {isStartingDiarization ? 'Starting…' : diarizationStatus?.currentStatus === 'completed' ? 'Run again' : 'Identify speakers'}
           </Button>
         </div>
       )}
 
-      {!isRecording && meetingId && (speakers.length > 0 || isLoadingSpeakers) && (
+      {!isRecording && meetingId && (speakerSourceCount > 0 || isLoadingSpeakers) && (
         <div className="px-4 py-3 border-b border-border space-y-3">
-          <div className="flex items-start justify-between gap-3">
+          <div className="flex flex-wrap items-start justify-between gap-3">
             <div>
               <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
                 Speakers{speakers.length > 0 ? ` (${speakers.length})` : ''}
@@ -428,11 +464,13 @@ export function TranscriptPanel({
             {isLoadingSpeakers && (
               <span className="text-xs text-muted-foreground">Loading…</span>
             )}
-            {!isLoadingSpeakers && speakers.length > 0 && (
+            {!isLoadingSpeakers && speakerSourceCount > 0 && (
               <Button
                 size="sm"
                 variant="outline"
+                disabled={editsDisabled}
                 onClick={() => {
+                  if (editsDisabled) return;
                   setCorrectionMode(value => !value);
                   setSelectedRowIds(new Set());
                 }}
@@ -442,10 +480,15 @@ export function TranscriptPanel({
             )}
           </div>
 
+          {refinementActive && (
+            <p className="text-xs text-muted-foreground">Wait for speaker processing to finish before you change speakers.</p>
+          )}
+          {!isLoadingSpeakers && speakers.length === 0 && (
+            <p className="text-xs text-muted-foreground">No named speakers yet. Use Correct rows to assign a speaker.</p>
+          )}
           <div className="max-h-56 space-y-2 overflow-y-auto pr-1">
             {speakers.map((speaker) => {
               const isEditing = editingSpeakerId === speaker.speakerId;
-              const isSaving = savingSpeakerId === speaker.speakerId;
               const transcriptSegmentLabel =
                 speaker.segmentCount === 1 ? 'transcript segment' : 'transcript segments';
 
@@ -454,7 +497,7 @@ export function TranscriptPanel({
                   key={speaker.speakerId}
                   className="rounded-md border border-border bg-background/60 px-3 py-2"
                 >
-                  <div className="flex items-center gap-2">
+                  <div className="flex flex-wrap items-center gap-2">
                     <span
                       className="h-2.5 w-2.5 rounded-full border border-border shrink-0"
                       style={{ backgroundColor: speaker.speakerColor || '#94a3b8' }}
@@ -464,9 +507,9 @@ export function TranscriptPanel({
                       <>
                         <Input
                           aria-label="Speaker name"
-                          className="h-8 min-w-0 flex-1"
+                          className="h-8 min-w-[120px] flex-1"
                           value={draftSpeakerLabel}
-                          disabled={isSaving}
+                          disabled={editsDisabled}
                           onChange={(event) => setDraftSpeakerLabel(event.target.value)}
                           onKeyDown={(event) => {
                             if (event.key === 'Enter') {
@@ -477,19 +520,10 @@ export function TranscriptPanel({
                             }
                           }}
                         />
-                        <label className="flex items-center gap-1 text-xs text-muted-foreground">
-                          <input
-                            type="checkbox"
-                            checked={rememberVoice}
-                            disabled={isSaving}
-                            onChange={event => setRememberVoice(event.target.checked)}
-                          />
-                          Remember voice
-                        </label>
                         <Button
                           size="sm"
                           onClick={() => void saveSpeakerLabel(speaker)}
-                          disabled={isSaving}
+                          disabled={editsDisabled}
                         >
                           Save
                         </Button>
@@ -497,14 +531,14 @@ export function TranscriptPanel({
                           size="sm"
                           variant="ghost"
                           onClick={cancelEditingSpeaker}
-                          disabled={isSaving}
+                          disabled={editsDisabled}
                         >
                           Cancel
                         </Button>
                       </>
                     ) : (
                       <>
-                        <div className="min-w-0 flex-1">
+                        <div className="min-w-[100px] flex-1">
                           <p className="truncate text-sm font-medium text-foreground">
                             {speaker.speakerLabel}
                           </p>
@@ -516,7 +550,7 @@ export function TranscriptPanel({
                           size="sm"
                           variant="ghost"
                           onClick={() => startEditingSpeaker(speaker)}
-                          disabled={savingSpeakerId !== null}
+                          disabled={editsDisabled}
                         >
                           Rename
                         </Button>
@@ -524,7 +558,9 @@ export function TranscriptPanel({
                           <Button
                             size="sm"
                             variant="ghost"
+                            disabled={editsDisabled}
                             onClick={() => {
+                              if (editsDisabled) return;
                               setMergingSpeakerId(speaker.speakerId);
                               setMergeTargetId('');
                             }}
@@ -535,11 +571,23 @@ export function TranscriptPanel({
                       </>
                     )}
                   </div>
+                  {!isEditing && (
+                    <div className="mt-2 flex flex-wrap items-center gap-2">
+                      <Button size="sm" variant="outline"
+                        disabled={editsDisabled || rememberedSpeakerIds.has(speaker.speakerId)}
+                        onClick={() => void rememberSpeaker(speaker)}>
+                        {rememberingSpeakerId === speaker.speakerId ? 'Remembering…'
+                          : rememberedSpeakerIds.has(speaker.speakerId) ? 'Voice remembered' : 'Remember voice'}
+                      </Button>
+                      <span className="text-xs text-muted-foreground">Use this name in future meetings.</span>
+                    </div>
+                  )}
                   {mergingSpeakerId === speaker.speakerId && (
-                    <div className="mt-2 flex items-center gap-2">
+                    <div className="mt-2 flex flex-wrap items-center gap-2">
                       <select
                         aria-label="Merge into speaker"
                         className="h-8 min-w-0 flex-1 rounded-md border border-border bg-background px-2 text-xs"
+                        disabled={editsDisabled}
                         value={mergeTargetId}
                         onChange={event => setMergeTargetId(event.target.value)}
                       >
@@ -548,8 +596,8 @@ export function TranscriptPanel({
                           <option key={target.speakerId} value={target.speakerId}>{target.speakerLabel}</option>
                         ))}
                       </select>
-                      <Button size="sm" disabled={!mergeTargetId} onClick={() => void mergeSpeaker()}>Merge</Button>
-                      <Button size="sm" variant="ghost" onClick={() => setMergingSpeakerId(null)}>Cancel</Button>
+                      <Button size="sm" disabled={!mergeTargetId || editsDisabled} onClick={() => void mergeSpeaker()}>Merge</Button>
+                      <Button size="sm" variant="ghost" disabled={editsDisabled} onClick={() => setMergingSpeakerId(null)}>Cancel</Button>
                     </div>
                   )}
                 </div>
@@ -565,8 +613,9 @@ export function TranscriptPanel({
               <div className="flex flex-wrap items-center gap-2">
                 <select
                   className="h-8 min-w-0 flex-1 rounded-md border border-border bg-background px-2 text-xs"
+                  aria-label="Assign selected rows to speaker"
                   value={assignmentTargetId}
-                  disabled={assignmentOverlap}
+                  disabled={assignmentOverlap || editsDisabled}
                   onChange={event => setAssignmentTargetId(event.target.value)}
                 >
                   <option value="">Assign to…</option>
@@ -578,6 +627,7 @@ export function TranscriptPanel({
                 {assignmentTargetId === '__new' && !assignmentOverlap && (
                   <Input
                     className="h-8"
+                    disabled={editsDisabled}
                     placeholder="New speaker name"
                     value={newSpeakerLabel}
                     onChange={event => setNewSpeakerLabel(event.target.value)}
@@ -586,12 +636,13 @@ export function TranscriptPanel({
                 <label className="flex items-center gap-1 text-xs">
                   <input
                     type="checkbox"
+                    disabled={editsDisabled}
                     checked={assignmentOverlap}
                     onChange={event => setAssignmentOverlap(event.target.checked)}
                   />
                   Multiple speakers
                 </label>
-                <Button size="sm" disabled={selectedRowIds.size === 0} onClick={() => void applyRowCorrection()}>
+                <Button size="sm" disabled={selectedRowIds.size === 0 || editsDisabled} onClick={() => void applyRowCorrection()}>
                   Apply ({selectedRowIds.size})
                 </Button>
               </div>
@@ -616,8 +667,8 @@ export function TranscriptPanel({
           totalCount={totalCount}
           loadedCount={loadedCount}
           onLoadMore={onLoadMore}
-          selectedSegmentIds={correctionMode ? selectedRowIds : undefined}
-          onToggleSegment={correctionMode ? toggleSelectedRow : undefined}
+          selectedSegmentIds={correctionMode && !editsDisabled ? selectedRowIds : undefined}
+          onToggleSegment={correctionMode && !editsDisabled ? toggleSelectedRow : undefined}
         />
       </div>
 
