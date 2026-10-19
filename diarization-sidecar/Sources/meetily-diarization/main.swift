@@ -15,16 +15,6 @@ private struct AudioSource: Codable {
     let forcedSpeakerId: String?
 }
 
-private struct Interval: Codable {
-    var speakerId: String
-    var source: String
-    var start: Double
-    var end: Double
-    var confidence: Double
-    var isOverlap: Bool
-    var candidateSpeakerIds: [String]
-}
-
 private struct Response: Codable {
     let ok: Bool
     let meetingId: String?
@@ -77,8 +67,7 @@ private enum MeetilyDiarizationSidecar {
                 }
             }
 
-            intervals = normalize(intervals)
-            markOverlaps(&intervals)
+            intervals = IntervalProcessing.prepare(intervals)
             let response = Response(
                 ok: true,
                 meetingId: request.meetingId,
@@ -99,42 +88,6 @@ private enum MeetilyDiarizationSidecar {
             )
             try? emit(response)
             Foundation.exit(1)
-        }
-    }
-
-    private static func normalize(_ input: [Interval]) -> [Interval] {
-        let sorted = input
-            .filter { $0.end - $0.start >= 0.25 }
-            .sorted { ($0.start, $0.end) < ($1.start, $1.end) }
-        var output: [Interval] = []
-        for interval in sorted {
-            if let last = output.last,
-               last.speakerId == interval.speakerId,
-               last.source == interval.source,
-               interval.start - last.end <= 0.3
-            {
-                output[output.count - 1].end = max(last.end, interval.end)
-                output[output.count - 1].confidence = max(last.confidence, interval.confidence)
-            } else {
-                output.append(interval)
-            }
-        }
-        return output
-    }
-
-    private static func markOverlaps(_ intervals: inout [Interval]) {
-        for first in intervals.indices {
-            var candidates = Set<String>()
-            for second in intervals.indices where first != second {
-                guard intervals[first].speakerId != intervals[second].speakerId else { continue }
-                let overlap = min(intervals[first].end, intervals[second].end)
-                    - max(intervals[first].start, intervals[second].start)
-                if overlap > 0.0 {
-                    candidates.insert(intervals[second].speakerId)
-                }
-            }
-            intervals[first].isOverlap = !candidates.isEmpty
-            intervals[first].candidateSpeakerIds = candidates.sorted()
         }
     }
 
