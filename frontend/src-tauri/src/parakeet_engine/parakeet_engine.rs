@@ -262,6 +262,7 @@ impl From<std::io::Error> for ParakeetEngineError {
 
 pub struct ParakeetEngine {
     models_dir: PathBuf,
+    shared_models_dir: Option<PathBuf>,
     current_model: Arc<RwLock<Option<ParakeetModel>>>,
     current_model_name: Arc<RwLock<Option<String>>>,
     model_lifecycle_lock: Mutex<()>,
@@ -306,6 +307,7 @@ impl ParakeetEngine {
 
         Ok(Self {
             models_dir,
+            shared_models_dir: None,
             current_model: Arc::new(RwLock::new(None)),
             current_model_name: Arc::new(RwLock::new(None)),
             model_lifecycle_lock: Mutex::new(()),
@@ -316,6 +318,12 @@ impl ParakeetEngine {
             #[cfg(test)]
             model_lifecycle_test_hook: Mutex::new(None),
         })
+    }
+
+    /// Add an optional shared directory used only for model reads.
+    pub fn with_shared_models_dir(mut self, shared_models_dir: Option<PathBuf>) -> Self {
+        self.shared_models_dir = shared_models_dir;
+        self
     }
 
     #[cfg(test)]
@@ -340,7 +348,11 @@ impl ParakeetEngine {
             let mut validation_errors = Vec::new();
 
             for spec in specs {
-                let model_path = self.models_dir.join(spec.name);
+                let model_path = crate::model_storage::resolve_model_for_read(
+                    &self.models_dir,
+                    self.shared_models_dir.as_deref(),
+                    spec.name,
+                );
                 let status = if model_path.exists() {
                     match Self::validate_model_directory(&model_path, spec.artifacts) {
                         Ok(()) => ModelStatus::Available,
@@ -580,6 +592,10 @@ impl ParakeetEngine {
 
         let model_info = model_info.ok_or_else(|| anyhow!("Parakeet model '{}' not found", model_name))?;
 
+        if !model_info.path.starts_with(&self.models_dir) {
+            return Err(anyhow!("Shared models are read-only and cannot be deleted"));
+        }
+
         log::info!("Parakeet model '{}' has status: {:?}", model_name, model_info.status);
 
         // Allow deletion of corrupted or available models
@@ -633,19 +649,15 @@ impl ParakeetEngine {
         model_name: &str,
         progress_callback: Option<Box<dyn Fn(DownloadProgress) + Send>>,
     ) -> Result<()> {
-        let model_info = self
-            .available_models
-            .read()
-            .await
-            .get(model_name)
-            .cloned()
-            .ok_or_else(|| anyhow!("Model {} not found", model_name))?;
+        if !self.available_models.read().await.contains_key(model_name) {
+            return Err(anyhow!("Model {} not found", model_name));
+        }
         let spec = find_model_spec(model_name)
             .ok_or_else(|| anyhow!("Unsupported Parakeet model: {}", model_name))?;
 
         self.download_model_detailed_from_source(
             model_name,
-            &model_info.path,
+            &self.models_dir.join(spec.name),
             spec.source_base_url,
             spec.artifacts,
             progress_callback,
@@ -1253,6 +1265,47 @@ mod tests {
         source_base_url: "",
         artifacts: SMALL_ARTIFACTS,
     }];
+
+    #[tokio::test]
+    async fn shared_model_discovery_prefers_owned_and_protects_shared_deletion() {
+        let dir = tempdir().unwrap();
+        let shared = dir.path().join("shared");
+        let shared_model = shared.join(TEST_MODEL_NAME);
+        std::fs::create_dir_all(&shared_model).unwrap();
+        for artifact in SMALL_ARTIFACTS {
+            std::fs::File::create(shared_model.join(artifact.filename))
+                .unwrap()
+                .set_len(artifact.exact_bytes)
+                .unwrap();
+        }
+        let engine = ParakeetEngine::new_with_models_dir(Some(dir.path().join("owned")))
+            .unwrap()
+            .with_shared_models_dir(Some(shared));
+        let models = engine
+            .discover_models_from_specs(SMALL_MODEL_SPECS)
+            .await
+            .unwrap();
+        assert_eq!(models[0].path, shared_model);
+        assert!(matches!(models[0].status, ModelStatus::Available));
+        assert!(engine
+            .delete_model(TEST_MODEL_NAME)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("read-only"));
+
+        let owned_model = engine.models_dir.join(TEST_MODEL_NAME);
+        std::fs::create_dir_all(&owned_model).unwrap();
+        let models = engine
+            .discover_models_from_specs(SMALL_MODEL_SPECS)
+            .await
+            .unwrap();
+        assert_eq!(models[0].path, owned_model);
+        assert!(matches!(models[0].status, ModelStatus::Corrupted { .. }));
+        engine.delete_model(TEST_MODEL_NAME).await.unwrap();
+        assert!(!owned_model.exists());
+        ParakeetEngine::validate_model_directory(&shared_model, SMALL_ARTIFACTS).unwrap();
+    }
 
     struct ExpectedResponse {
         filename: &'static str,

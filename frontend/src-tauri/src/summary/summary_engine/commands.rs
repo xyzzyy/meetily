@@ -50,9 +50,15 @@ pub struct ModelManagerState(pub Arc<Mutex<Option<Arc<ModelManager>>>>);
 
 /// Initialize the model manager
 pub async fn init_model_manager<R: Runtime>(app: &AppHandle<R>) -> anyhow::Result<()> {
-    let models_dir = app.path().app_data_dir()?.join("models").join("summary");
+    let models_dir = crate::model_storage::owned_models_root(app)
+        .map_err(anyhow::Error::msg)?
+        .join("summary");
+    let shared_models_dir = crate::model_storage::official_models_root(app)
+        .map_err(anyhow::Error::msg)?
+        .map(|dir| dir.join("summary"));
 
-    let manager = ModelManager::new_with_models_dir(Some(models_dir))?;
+    let manager = ModelManager::new_with_models_dir(Some(models_dir))?
+        .with_shared_models_dir(shared_models_dir);
     manager.init().await?;
 
     let state: State<ModelManagerState> = app.state();
@@ -358,15 +364,13 @@ pub async fn builtin_ai_get_available_summary_model<R: Runtime>(
 pub async fn init_model_manager_at_startup<R: Runtime>(
     app: &AppHandle<R>,
 ) -> Result<(), String> {
-    let models_dir = app
-        .path()
-        .app_data_dir()
-        .map_err(|e| format!("Failed to get app data dir: {}", e))?
-        .join("models")
-        .join("summary");
+    let models_dir = crate::model_storage::owned_models_root(app)?.join("summary");
+    let shared_models_dir = crate::model_storage::official_models_root(app)?
+        .map(|dir| dir.join("summary"));
 
     let manager = ModelManager::new_with_models_dir(Some(models_dir))
-        .map_err(|e| format!("Failed to create ModelManager: {}", e))?;
+        .map_err(|e| format!("Failed to create ModelManager: {}", e))?
+        .with_shared_models_dir(shared_models_dir);
 
     manager
         .init()

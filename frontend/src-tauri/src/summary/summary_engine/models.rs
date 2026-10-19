@@ -237,7 +237,14 @@ pub fn get_model_path(app_data_dir: &PathBuf, model_name: &str) -> Result<PathBu
         .ok_or_else(|| anyhow!("Unknown model: {}", model_name))?;
 
     let models_dir = get_models_directory(app_data_dir);
-    let model_path = models_dir.join(&model.gguf_file);
+    let shared_models_dir = crate::model_storage::official_models_root_for_branch_dir(app_data_dir)
+        .map_err(anyhow::Error::msg)?
+        .map(|dir| dir.join("summary"));
+    let model_path = crate::model_storage::resolve_model_for_read(
+        &models_dir,
+        shared_models_dir.as_deref(),
+        &model.gguf_file,
+    );
 
     Ok(model_path)
 }

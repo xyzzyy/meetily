@@ -9,22 +9,16 @@ pub static PARAKEET_ENGINE: Mutex<Option<Arc<ParakeetEngine>>> = Mutex::new(None
 
 // Global models directory path (set during app initialization)
 static MODELS_DIR: Mutex<Option<PathBuf>> = Mutex::new(None);
+static SHARED_MODELS_DIR: Mutex<Option<PathBuf>> = Mutex::new(None);
 
 /// Initialize the models directory path using app_data_dir
 /// This should be called during app setup before parakeet_init
 pub fn set_models_directory<R: Runtime>(app: &AppHandle<R>) {
-    let app_data_dir = app.path().app_data_dir()
-        .expect("Failed to get app data dir");
-
-    let models_dir = app_data_dir.join("models");
-
-    // Create directory if it doesn't exist
-    if !models_dir.exists() {
-        if let Err(e) = std::fs::create_dir_all(&models_dir) {
-            log::error!("Failed to create models directory: {}", e);
-            return;
-        }
-    }
+    let models_dir = crate::model_storage::owned_models_root(app)
+        .expect("Failed to resolve branch-owned models directory");
+    let shared_models_dir = crate::model_storage::official_models_root(app)
+        .expect("Failed to resolve shared models directory");
+    *SHARED_MODELS_DIR.lock().unwrap() = shared_models_dir.map(|dir| dir.join("parakeet"));
 
     log::info!("Parakeet models directory set to: {}", models_dir.display());
 
@@ -46,7 +40,8 @@ pub async fn parakeet_init() -> Result<(), String> {
 
     let models_dir = get_models_directory();
     let engine = ParakeetEngine::new_with_models_dir(models_dir)
-        .map_err(|e| format!("Failed to initialize Parakeet engine: {}", e))?;
+        .map_err(|e| format!("Failed to initialize Parakeet engine: {}", e))?
+        .with_shared_models_dir(SHARED_MODELS_DIR.lock().unwrap().clone());
     *guard = Some(Arc::new(engine));
     Ok(())
 }
