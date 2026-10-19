@@ -8,7 +8,7 @@
 use futures_util::StreamExt;
 use sha2::{Digest, Sha256};
 use std::path::PathBuf;
-use tauri::{AppHandle, Emitter, Manager, Runtime};
+use tauri::{AppHandle, Emitter, Runtime};
 
 /// WeSpeaker CAM++ speaker-embedding model (Apache-2.0, exported to ONNX by
 /// the sherpa-onnx project). ~28 MB. Input: fbank [1, T, 80]; output: [1, 192].
@@ -21,16 +21,21 @@ pub const EMBEDDING_MODEL_SHA256: &str =
 pub const EMBEDDING_MODEL_SIZE: u64 = 29_292_684;
 pub const EMBEDDING_MODEL_VERSION: &str = "wespeaker-campp-voxceleb-2023";
 
+/// Branch-owned diarization model directory. Downloads and deletions use this.
 pub fn models_dir<R: Runtime>(app: &AppHandle<R>) -> Result<PathBuf, String> {
-    let app_data_dir = app
-        .path()
-        .app_data_dir()
-        .map_err(|e| format!("Failed to get app data dir: {}", e))?;
-    Ok(app_data_dir.join("models").join("diarization"))
+    Ok(crate::model_storage::owned_models_root(app)?.join("diarization"))
 }
 
+/// Resolve the embedding model for reading, falling back to the official
+/// installation's copy. The returned path must never be used for mutations.
 pub fn embedding_model_path<R: Runtime>(app: &AppHandle<R>) -> Result<PathBuf, String> {
-    Ok(models_dir(app)?.join(EMBEDDING_MODEL_FILENAME))
+    let owned_root = crate::model_storage::owned_models_root(app)?;
+    let shared_root = crate::model_storage::official_models_root(app)?;
+    crate::model_storage::resolve_model_for_read(
+        &owned_root,
+        shared_root.as_deref(),
+        std::path::Path::new("diarization").join(EMBEDDING_MODEL_FILENAME),
+    )
 }
 
 pub fn is_embedding_model_present<R: Runtime>(app: &AppHandle<R>) -> bool {
@@ -141,7 +146,8 @@ pub async fn download_embedding_model<R: Runtime>(app: &AppHandle<R>) -> Result<
 }
 
 pub fn delete_embedding_model<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
-    let path = embedding_model_path(app)?;
+    // Only the branch-owned copy is deleted; a shared official copy is read-only.
+    let path = models_dir(app)?.join(EMBEDDING_MODEL_FILENAME);
     if path.exists() {
         std::fs::remove_file(&path)
             .map_err(|error| format!("Failed to delete diarization model: {error}"))?;
