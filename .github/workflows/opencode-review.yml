@@ -14,6 +14,8 @@ concurrency:
 jobs:
   review:
     runs-on: ubuntu-latest
+    # A runner has no one to answer permission prompts, so bound the job.
+    timeout-minutes: 20
     permissions:
       contents: read
       pull-requests: write
@@ -34,6 +36,11 @@ jobs:
         uses: anomalyco/opencode/github@latest
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # No terminal exists on a runner. Deny the two permissions that
+          # otherwise default to "ask", so the review cannot wait forever on a
+          # prompt. Denying an external path is reported to the model, which
+          # then continues with the repository checkout.
+          OPENCODE_CONFIG_CONTENT: '{"permission":{"external_directory":"deny","doom_loop":"deny"}}'
         with:
           model: opencode/deepseek-v4.1-flash-free
           use_github_token: true
