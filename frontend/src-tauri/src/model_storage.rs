@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use tauri::{AppHandle, Runtime};
 
 pub fn owned_models_root<R: Runtime>(app: &AppHandle<R>) -> Result<PathBuf, String> {
@@ -36,6 +36,9 @@ pub fn models_root<R: Runtime>(app: &AppHandle<R>) -> Result<PathBuf, String> {
 
 /// Resolve a file or model directory for reading, preferring branch-owned data.
 /// The returned path may be shared and must never be used for mutations.
+///
+/// The shared root is only consulted for plain relative paths. An absolute
+/// path or a `..` component would let `join` escape official model storage.
 pub fn resolve_model_for_read(
     owned_root: &Path,
     shared_root: Option<&Path>,
@@ -46,7 +49,10 @@ pub fn resolve_model_for_read(
     if owned.exists() {
         return owned;
     }
-    if let Some(shared) = shared_root {
+    let stays_inside_root = relative_path
+        .components()
+        .all(|component| matches!(component, Component::Normal(_) | Component::CurDir));
+    if let (Some(shared), true) = (shared_root, stays_inside_root) {
         let candidate = shared.join(relative_path);
         if candidate.exists() {
             return candidate;
@@ -106,5 +112,26 @@ mod tests {
             owned.join("parakeet/model")
         );
         assert_eq!(std::fs::read(shared.join("model.bin")).unwrap(), b"shared");
+    }
+
+    #[test]
+    fn shared_reads_never_escape_the_shared_root() {
+        let temp = tempfile::tempdir().unwrap();
+        let owned = temp.path().join("branch/models");
+        let shared = temp.path().join("official/models");
+        std::fs::create_dir_all(&owned).unwrap();
+        std::fs::create_dir_all(&shared).unwrap();
+        // Reachable only by climbing out of the shared models root.
+        std::fs::write(temp.path().join("official/settings.bin"), b"official").unwrap();
+        std::fs::write(shared.join("model.bin"), b"shared").unwrap();
+
+        assert_eq!(
+            resolve_model_for_read(&owned, Some(&shared), "../settings.bin"),
+            owned.join("../settings.bin")
+        );
+        assert_eq!(
+            resolve_model_for_read(&owned, Some(&shared), "./model.bin"),
+            shared.join("./model.bin")
+        );
     }
 }

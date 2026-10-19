@@ -563,8 +563,20 @@ pub fn run() {
                 }
             });
 
-            // Set models directory to use app_data_dir (unified storage location)
-            whisper_engine::commands::set_models_directory(&_app.handle());
+            // Set Whisper and Parakeet models directories. These resolve branch
+            // storage again, so a failure stops startup like the checks above.
+            if let Err(message) = whisper_engine::commands::set_models_directory(_app.handle())
+                .and_then(|()| parakeet_engine::commands::set_models_directory(_app.handle()))
+            {
+                use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
+                _app.dialog()
+                    .message(&message)
+                    .title("Meetily Branch storage needs attention")
+                    .kind(MessageDialogKind::Error)
+                    .buttons(MessageDialogButtons::Ok)
+                    .blocking_show();
+                return Err(message.into());
+            }
 
             // Initialize Whisper engine on startup
             tauri::async_runtime::spawn(async {
@@ -572,9 +584,6 @@ pub fn run() {
                     log::error!("Failed to initialize Whisper engine on startup: {}", e);
                 }
             });
-
-            // Set Parakeet models directory
-            parakeet_engine::commands::set_models_directory(&_app.handle());
 
             // Initialize Parakeet engine on startup
             tauri::async_runtime::spawn(async {
