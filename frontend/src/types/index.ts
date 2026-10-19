@@ -201,4 +201,6 @@ export interface SpeakerProfile {
   modelVersion: string;
   sampleCount: number;
   speechSeconds: number;
+  /** How many meeting speakers make up this voice. */
+  recordingCount: number;
 }

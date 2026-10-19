@@ -409,27 +409,37 @@ pub struct SpeakerProfileDto {
     pub model_version: String,
     pub sample_count: i64,
     pub speech_seconds: f64,
+    /// How many meeting speakers make up this voice.
+    pub recording_count: i64,
 }
 
 #[tauri::command]
 pub async fn list_speaker_profiles(
     state: State<'_, AppState>,
 ) -> Result<Vec<SpeakerProfileDto>, String> {
-    SpeakerProfilesRepository::list(state.speaker_store.pool())
+    let pool = state.speaker_store.pool();
+    let profiles = SpeakerProfilesRepository::list(pool)
         .await
-        .map(|profiles| {
-            profiles
-                .into_iter()
-                .map(|profile| SpeakerProfileDto {
-                    id: profile.id,
-                    name: profile.name,
-                    model_version: profile.model_version,
-                    sample_count: profile.sample_count,
-                    speech_seconds: profile.speech_seconds,
-                })
-                .collect()
+        .map_err(|error| error.to_string())?;
+    let counts: std::collections::HashMap<String, i64> = sqlx::query_as::<_, (String, i64)>(
+        "SELECT profile_id, COUNT(*) FROM speaker_profile_samples GROUP BY profile_id",
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(|error| error.to_string())?
+    .into_iter()
+    .collect();
+    Ok(profiles
+        .into_iter()
+        .map(|profile| SpeakerProfileDto {
+            recording_count: counts.get(&profile.id).copied().unwrap_or(0),
+            id: profile.id,
+            name: profile.name,
+            model_version: profile.model_version,
+            sample_count: profile.sample_count,
+            speech_seconds: profile.speech_seconds,
         })
-        .map_err(|error| error.to_string())
+        .collect())
 }
 
 #[derive(Debug, Clone, Serialize)]
