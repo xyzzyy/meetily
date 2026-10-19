@@ -206,12 +206,6 @@ export function SpeakerDiarizationSettings() {
         }
       />
 
-      <SettingsRow
-        title="Overlap handling"
-        description="Interruptions are marked as Multiple speakers."
-        control={<SettingsStatusBadge tone="local">Multiple speakers</SettingsStatusBadge>}
-      />
-
       <p className="text-sm text-muted-foreground">
         After processing, use Correct rows to change speaker labels or mark multiple speakers.
         Use Attribute or Merge to change a speaker across the meeting.
