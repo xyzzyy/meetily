@@ -629,6 +629,7 @@ fn format_recording_time(seconds: f64) -> String {
             assert!(!should_emit_transcript("   "));
         }
 
+        /// Build a chunk with only the fields timing resolution reads.
         fn chunk(start: f64, end: Option<f64>, samples: usize, sample_rate: u32) -> AudioChunk {
             AudioChunk {
                 data: vec![0.0; samples],
@@ -640,18 +641,21 @@ fn format_recording_time(seconds: f64) -> String {
             }
         }
 
+        /// A valid VAD end wins over the sample-derived duration.
         #[test]
         fn timing_prefers_vad_boundaries() {
             let timing = resolve_transcript_timing(&chunk(12.25, Some(14.75), 16_000, 16_000));
             assert_eq!(timing, (12.25, 14.75, 2.5));
         }
 
+        /// Producers without a VAD end fall back to samples divided by sample rate.
         #[test]
         fn timing_falls_back_to_sample_duration_without_vad_end() {
             let timing = resolve_transcript_timing(&chunk(3.0, None, 24_000, 16_000));
             assert_eq!(timing, (3.0, 4.5, 1.5));
         }
 
+        /// An end before the start is ignored in favour of the sample duration.
         #[test]
         fn timing_rejects_an_end_before_the_start() {
             let timing = resolve_transcript_timing(&chunk(8.0, Some(7.0), 8_000, 16_000));
