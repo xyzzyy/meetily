@@ -300,18 +300,21 @@ export function ParakeetModelManager({
     });
   };
 
+  const deletionPendingRef = useRef(false);
+
   const deleteModel = async (modelName: string) => {
+    if (deletionPendingRef.current) return;
+    deletionPendingRef.current = true;
     const displayInfo = getModelDisplayInfo(modelName);
     const displayName = displayInfo?.friendlyName || modelName;
-    const confirmed = await confirm(
-      `Delete transcription model ${displayName}? This will remove it from disk.`,
-      { title: 'Delete transcription model?', kind: 'warning' }
-    );
-    if (!confirmed) {
-      return;
-    }
-
     try {
+      const confirmed = await confirm(
+        `Delete transcription model ${displayName}? This will remove it from disk.`,
+        { title: 'Delete transcription model?', kind: 'warning', okLabel: 'Delete', cancelLabel: 'Cancel' }
+      );
+      if (!confirmed) {
+        return;
+      }
       await ParakeetAPI.deleteCorruptedModel(modelName);
 
       // Refresh models list
@@ -333,6 +336,8 @@ export function ParakeetModelManager({
         description: err instanceof Error ? err.message : 'Delete failed',
         duration: 4000
       });
+    } finally {
+      deletionPendingRef.current = false;
     }
   };
 

@@ -346,17 +346,20 @@ export function ModelManager({
     });
   };
 
-  const deleteModel = async (modelName: string) => {
-    const displayName = getDisplayName(modelName);
-    const confirmed = await confirm(
-      `Delete transcription model ${displayName}? This will remove it from disk.`,
-      { title: 'Delete transcription model?', kind: 'warning' }
-    );
-    if (!confirmed) {
-      return;
-    }
+  const deletionPendingRef = useRef(false);
 
+  const deleteModel = async (modelName: string) => {
+    if (deletionPendingRef.current) return;
+    deletionPendingRef.current = true;
+    const displayName = getDisplayName(modelName);
     try {
+      const confirmed = await confirm(
+        `Delete transcription model ${displayName}? This will remove it from disk.`,
+        { title: 'Delete transcription model?', kind: 'warning', okLabel: 'Delete', cancelLabel: 'Cancel' }
+      );
+      if (!confirmed) {
+        return;
+      }
       await WhisperAPI.deleteCorruptedModel(modelName);
 
       // Refresh models list
@@ -378,6 +381,8 @@ export function ModelManager({
         description: err instanceof Error ? err.message : 'Delete failed',
         duration: 4000
       });
+    } finally {
+      deletionPendingRef.current = false;
     }
   };
 

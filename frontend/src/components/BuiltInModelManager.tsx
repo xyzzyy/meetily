@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { confirm } from '@tauri-apps/plugin-dialog';
@@ -244,16 +244,19 @@ export function BuiltInModelManager({
     }
   };
 
-  const deleteModel = async (modelName: string) => {
-    const confirmed = await confirm(
-      `Delete downloaded model ${modelName}? This will remove it from disk.`,
-      { title: 'Delete model?', kind: 'warning' }
-    );
-    if (!confirmed) {
-      return;
-    }
+  const deletionPendingRef = useRef(false);
 
+  const deleteModel = async (modelName: string) => {
+    if (deletionPendingRef.current) return;
+    deletionPendingRef.current = true;
     try {
+      const confirmed = await confirm(
+        `Delete downloaded model ${modelName}? This will remove it from disk.`,
+        { title: 'Delete model?', kind: 'warning', okLabel: 'Delete', cancelLabel: 'Cancel' }
+      );
+      if (!confirmed) {
+        return;
+      }
       await invoke('builtin_ai_delete_model', { modelName });
       toast.success(`Model ${modelName} deleted`);
       if (selectedModel === modelName) {
@@ -263,6 +266,8 @@ export function BuiltInModelManager({
     } catch (error) {
       console.error('Failed to delete model:', error);
       toast.error(`Failed to delete ${modelName}`);
+    } finally {
+      deletionPendingRef.current = false;
     }
   };
 
@@ -430,7 +435,7 @@ export function BuiltInModelManager({
                       </Button>
                     </>
                   )}
-                  {/* Available - Show small trash icon (only if not currently selected) */}
+                  {/* Available - Show small trash icon */}
                   {isAvailable && !modelIsDownloading && (
                     <button
                       className="p-2 rounded hover:bg-gray-100 transition-colors text-gray-500 hover:text-red-600"
