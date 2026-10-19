@@ -50,7 +50,7 @@ Meetily records your meetings, transcribes them live, and writes summaries witho
 Meetily Branch tracks upstream Meetily 0.4.1. It adds a few protections so you can run it on the same machine as the official app without risk to the official app's data:
 
 - **Separate identity.** The app is named `Meetily Branch` and uses the bundle identifier `com.meetily.ai.branch`, so the operating system treats it as a different application from `com.meetily.ai`.
-- **Read-only model sharing.** If official Meetily has already downloaded models, Branch can **read** them so you don't download them twice. Downloads and deletions only happen in Branch's own models folder. Paths that are absolute, contain `..`, or point to symlinked storage are rejected.
+- **Read-only model sharing.** If official Meetily has already downloaded models, Branch can **read** them so you don't download them twice. Downloads and deletions are confined to Branch's own models folder. Absolute paths and paths containing a `..` component are rejected, so a lookup can't escape the models directories.
 
 More updates coming soon.
 
