@@ -153,8 +153,8 @@ export function SpeakerDiarizationSettings() {
 
       <p className="text-sm text-muted-foreground">
         After processing, use Correct rows to change speaker labels or mark multiple speakers.
-        Use Rename or Merge to change a speaker across the meeting.
-        Remember voice saves a local voice profile for future meetings.
+        Use Attribute or Merge to change a speaker across the meeting.
+        Attribute a speaker to a remembered voice to add their speech to it, or type a new name to remember a new voice.
       </p>
 
       {profiles.map(profile => (

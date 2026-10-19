@@ -1,8 +1,9 @@
 "use client";
 
-import { MeetingSpeaker, Transcript, TranscriptSegmentData } from '@/types';
+import { MeetingSpeaker, SpeakerProfile, Transcript, TranscriptSegmentData } from '@/types';
 import { VirtualizedTranscriptView } from '@/components/VirtualizedTranscriptView';
 import { SpeakerColorPicker } from './SpeakerColorPicker';
+import { SpeakerAttributeButton, type SpeakerAttribution } from './SpeakerAttributeButton';
 import { TranscriptButtonGroup } from './TranscriptButtonGroup';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -96,11 +97,9 @@ export function TranscriptPanel({
     }));
   }, [convertedSegments, speakers]);
   const [isLoadingSpeakers, setIsLoadingSpeakers] = useState(false);
-  const [editingSpeakerId, setEditingSpeakerId] = useState<string | null>(null);
-  const [draftSpeakerLabel, setDraftSpeakerLabel] = useState('');
   const [savingSpeakerId, setSavingSpeakerId] = useState<string | null>(null);
-  const [rememberingSpeakerId, setRememberingSpeakerId] = useState<string | null>(null);
-  const [rememberedSpeakerIds, setRememberedSpeakerIds] = useState<Set<string>>(new Set());
+  const [attributingSpeakerId, setAttributingSpeakerId] = useState<string | null>(null);
+  const [speakerProfiles, setSpeakerProfiles] = useState<SpeakerProfile[]>([]);
   const [isApplyingCorrection, setIsApplyingCorrection] = useState(false);
   const [isMerging, setIsMerging] = useState(false);
   const [isStartingDiarization, setIsStartingDiarization] = useState(false);
@@ -126,7 +125,7 @@ export function TranscriptPanel({
   ].includes(diarizationStatus?.currentStatus || '');
   const recoveryRequired = diarizationStatus?.currentStatus === 'recovery_required';
   const editsDisabled = refinementActive || recoveryRequired || savingSpeakerId !== null
-    || rememberingSpeakerId !== null || isApplyingCorrection || isMerging;
+    || attributingSpeakerId !== null || isApplyingCorrection || isMerging;
   const beginEdit = () => {
     if (editsDisabled || mutationInFlight.current) return false;
     mutationInFlight.current = true;
@@ -135,11 +134,9 @@ export function TranscriptPanel({
 
   useEffect(() => {
     setSpeakersExpanded(true);
-    setEditingSpeakerId(null);
     setMergingSpeakerId(null);
     setCorrectionMode(false);
     setSelectedRowIds(new Set());
-    setRememberedSpeakerIds(new Set());
     setAssignmentTargetId('');
     setAssignmentOverlap(false);
     setNewSpeakerLabel('');
@@ -167,7 +164,6 @@ export function TranscriptPanel({
   useEffect(() => {
     if (isRecording) {
       setSpeakers([]);
-      setEditingSpeakerId(null);
       return;
     }
 
@@ -311,74 +307,6 @@ export function TranscriptPanel({
     }
   };
 
-  const startEditingSpeaker = (speaker: MeetingSpeaker) => {
-    if (editsDisabled) return;
-    setEditingSpeakerId(speaker.speakerId);
-    setDraftSpeakerLabel(speaker.speakerLabel);
-  };
-
-  const cancelEditingSpeaker = useCallback(() => {
-    setEditingSpeakerId(null);
-    setDraftSpeakerLabel('');
-  }, []);
-
-  const saveSpeakerLabel = async (speaker: MeetingSpeaker) => {
-    if (!meetingId || editsDisabled) {
-      return;
-    }
-
-    const label = draftSpeakerLabel.trim();
-    if (!label) {
-      toast.error('Speaker name cannot be empty');
-      return;
-    }
-
-    if (label === speaker.speakerLabel) {
-      cancelEditingSpeaker();
-      return;
-    }
-
-    if (!beginEdit()) return;
-    setSavingSpeakerId(speaker.speakerId);
-    try {
-      await invoke('rename_speaker', {
-        request: {
-          meetingId,
-          speakerId: speaker.speakerId,
-          label,
-        },
-      });
-      setSpeakers(previousSpeakers =>
-        previousSpeakers.map(previousSpeaker =>
-          previousSpeaker.speakerId === speaker.speakerId
-            ? { ...previousSpeaker, speakerLabel: label }
-            : previousSpeaker
-        )
-      );
-      cancelEditingSpeaker();
-      setRememberedSpeakerIds(current => {
-        const next = new Set(current);
-        next.delete(speaker.speakerId);
-        return next;
-      });
-
-      if (onRefetchTranscripts) {
-        await onRefetchTranscripts();
-      }
-      await loadSpeakers();
-
-      toast.success('Speaker renamed');
-    } catch (error) {
-      console.error('Failed to rename speaker:', error);
-      toast.error('Failed to rename speaker', {
-        description: String(error),
-      });
-    } finally {
-      setSavingSpeakerId(null);
-      mutationInFlight.current = false;
-    }
-  };
-
   const changeSpeakerColor = async (speaker: MeetingSpeaker, color: string) => {
     if (!meetingId || !beginEdit()) return false;
     setSavingSpeakerId(speaker.speakerId);
@@ -397,19 +325,55 @@ export function TranscriptPanel({
     }
   };
 
-  const rememberSpeaker = async (speaker: MeetingSpeaker) => {
-    if (!meetingId || !beginEdit()) return;
-    setRememberingSpeakerId(speaker.speakerId);
+  const loadSpeakerProfiles = useCallback(async () => {
     try {
-      await invoke('remember_speaker', {
-        request: { meetingId, speakerId: speaker.speakerId, name: speaker.speakerLabel },
-      });
-      setRememberedSpeakerIds(current => new Set(current).add(speaker.speakerId));
-      toast.success(`Voice remembered for ${speaker.speakerLabel}`);
+      setSpeakerProfiles(await invoke<SpeakerProfile[]>('list_speaker_profiles'));
     } catch (error) {
-      toast.error('Could not remember voice', { description: String(error) });
+      console.error('Failed to load remembered voices:', error);
+    }
+  }, []);
+
+  useEffect(() => {
+    void loadSpeakerProfiles();
+  }, [loadSpeakerProfiles]);
+
+  const attributeSpeaker = async (speaker: MeetingSpeaker, attribution: SpeakerAttribution) => {
+    if (!meetingId || !beginEdit()) return;
+    setAttributingSpeakerId(speaker.speakerId);
+    try {
+      const result = await invoke<{
+        profileId: string | null;
+        name: string;
+        outcome: 'created' | 'added' | 'alreadyIncluded' | 'namedOnly';
+      }>('attribute_speaker', {
+        request: { meetingId, speakerId: speaker.speakerId, ...attribution },
+      });
+      setSpeakers(current => current.map(item => item.speakerId === speaker.speakerId
+        ? { ...item, speakerLabel: result.name } : item));
+      await onRefetchTranscripts?.();
+      await Promise.all([loadSpeakers(), loadSpeakerProfiles()]);
+      switch (result.outcome) {
+        case 'created':
+          toast.success(`Remembered ${result.name}'s voice`);
+          break;
+        case 'added':
+          toast.success(`Added this speaker to ${result.name}'s voice`);
+          break;
+        case 'alreadyIncluded':
+          toast.success(`Labelled as ${result.name}`, {
+            description: "This speaker's voice was already part of the remembered voice.",
+          });
+          break;
+        case 'namedOnly':
+          toast.success(`Labelled as ${result.name}`, {
+            description: 'Not enough clear speech to learn this voice (8 seconds needed).',
+          });
+          break;
+      }
+    } catch (error) {
+      toast.error('Could not attribute speaker', { description: String(error) });
     } finally {
-      setRememberingSpeakerId(null);
+      setAttributingSpeakerId(null);
       mutationInFlight.current = false;
     }
   };
@@ -527,8 +491,6 @@ export function TranscriptPanel({
             )}
             <div className="max-h-40 divide-y divide-border overflow-y-auto">
               {speakers.map((speaker) => {
-                const isEditing = editingSpeakerId === speaker.speakerId;
-
                 return (
                   <div
                     key={speaker.speakerId}
@@ -545,41 +507,7 @@ export function TranscriptPanel({
                         onChange={color => changeSpeakerColor(speaker, color)}
                       />
 
-                      {isEditing ? (
-                        <>
-                          <Input
-                            aria-label="Speaker name"
-                            className="h-8 min-w-[120px] flex-1"
-                            value={draftSpeakerLabel}
-                            disabled={editsDisabled}
-                            onChange={(event) => setDraftSpeakerLabel(event.target.value)}
-                            onKeyDown={(event) => {
-                              if (event.key === 'Enter') {
-                                void saveSpeakerLabel(speaker);
-                              }
-                              if (event.key === 'Escape') {
-                                cancelEditingSpeaker();
-                              }
-                            }}
-                          />
-                          <Button
-                            size="sm"
-                            onClick={() => void saveSpeakerLabel(speaker)}
-                            disabled={editsDisabled}
-                          >
-                            Save
-                          </Button>
-                          <Button
-                            size="sm"
-                            variant="ghost"
-                            onClick={cancelEditingSpeaker}
-                            disabled={editsDisabled}
-                          >
-                            Cancel
-                          </Button>
-                        </>
-                      ) : (
-                        <>
+                      <>
                           <div className="flex min-w-0 flex-1 items-baseline gap-1.5" title={`${speaker.speakerLabel} · ${speaker.segmentCount} transcript segments`}>
                             <span className="truncate text-sm font-medium text-foreground">
                               {speaker.speakerLabel}
@@ -588,15 +516,13 @@ export function TranscriptPanel({
                               {speaker.segmentCount}
                             </span>
                           </div>
-                          <Button
-                            size="sm"
-                            className="h-7 shrink-0 px-1.5 text-[11px]"
-                            variant="ghost"
-                            onClick={() => startEditingSpeaker(speaker)}
+                          <SpeakerAttributeButton
+                            speaker={speaker}
+                            profiles={speakerProfiles}
                             disabled={editsDisabled}
-                          >
-                            Rename
-                          </Button>
+                            busy={attributingSpeakerId === speaker.speakerId}
+                            onAttribute={(target, attribution) => void attributeSpeaker(target, attribution)}
+                          />
                           {speakers.length > 1 && mergingSpeakerId !== speaker.speakerId && (
                             <Button
                               size="sm"
@@ -612,16 +538,7 @@ export function TranscriptPanel({
                               Merge
                             </Button>
                           )}
-                          <Button size="sm" variant="ghost"
-                            className="h-7 shrink-0 px-1.5 text-[11px]"
-                            title="Save this voice and name for future meetings."
-                            disabled={editsDisabled || rememberedSpeakerIds.has(speaker.speakerId)}
-                            onClick={() => void rememberSpeaker(speaker)}>
-                            {rememberingSpeakerId === speaker.speakerId ? 'Remembering…'
-                              : rememberedSpeakerIds.has(speaker.speakerId) ? 'Voice remembered' : 'Remember voice'}
-                          </Button>
-                        </>
-                      )}
+                      </>
                     </div>
                     {mergingSpeakerId === speaker.speakerId && (
                       <div className="mt-2 flex flex-wrap items-center gap-2">

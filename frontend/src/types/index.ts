@@ -179,3 +179,12 @@ export interface MeetingSpeaker {
   speakerColor?: string | null;
   segmentCount: number;
 }
+
+/** A voice remembered locally for recognizing a person in future meetings. */
+export interface SpeakerProfile {
+  id: string;
+  name: string;
+  modelVersion: string;
+  sampleCount: number;
+  speechSeconds: number;
+}

@@ -24,7 +24,17 @@ impl SpeakerFeatureStore {
         app: &tauri::AppHandle,
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         let app_data_dir = crate::storage_safety::branch_app_data_dir(app)?;
-        Ok(Self::new(&app_data_dir.join("speaker_recognition.sqlite")).await?)
+        let store = Self::new(&app_data_dir.join("speaker_recognition.sqlite")).await?;
+        // Earlier builds created a new remembered voice each time; fold any
+        // same-name duplicates into one so attributing adds to a single voice.
+        // Only the app's own store: temporary stores used during schema
+        // conversion must stay untouched.
+        match super::repositories::speaker_profile::SpeakerProfilesRepository::merge_duplicate_names(store.pool()).await {
+            Ok(0) => {}
+            Ok(removed) => log::info!("Merged {removed} duplicate remembered voice(s)"),
+            Err(error) => log::warn!("Could not merge duplicate remembered voices: {error}"),
+        }
+        Ok(store)
     }
 
     pub fn pool(&self) -> &SqlitePool {

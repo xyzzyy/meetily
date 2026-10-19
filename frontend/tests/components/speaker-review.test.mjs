@@ -98,31 +98,43 @@ function button(tree, label) {
 async function settle() { for (let i = 0; i < 15; i++) await Promise.resolve(); }
 const alice = { speakerId: 'alice', speakerLabel: 'Alice', segmentCount: 1 };
 
-// Remembering a voice must not require a name change. It must show pending state,
-// prevent duplicate commands, and permit a retry after a failure.
+const attribute = tree => nodes(tree).find(node => node.type === 'SpeakerAttributeButton');
+
+// Attributing shows pending state, prevents duplicate commands, and permits a
+// retry after a failure. It never goes through the old rename path.
 {
   let reject;
   const pending = new Promise((_, fail) => { reject = fail; });
-  const panel = makePanel({ speakers: [alice] }, name => name === 'remember_speaker' ? pending : []);
-  button(panel.render(), 'Remember voice').props.onClick();
-  const busy = button(panel.render(), 'Remembering…');
+  const panel = makePanel({ speakers: [alice] }, name => name === 'attribute_speaker' ? pending : []);
+  attribute(panel.render()).props.onAttribute(alice, { name: 'Alice' });
+  const busy = attribute(panel.render());
+  assert.equal(busy.props.busy, true);
   assert.equal(busy.props.disabled, true);
-  busy.props.onClick();
-  assert.equal(panel.calls.filter(call => call.name === 'remember_speaker').length, 1);
-  assert.equal(panel.calls[0].args.request.name, 'Alice');
-  reject(new Error('Not enough clean speech'));
+  busy.props.onAttribute(alice, { name: 'Alice' });
+  assert.equal(panel.calls.filter(call => call.name === 'attribute_speaker').length, 1);
+  assert.equal(JSON.stringify(panel.calls[0].args.request), JSON.stringify({ meetingId: 'meeting', speakerId: 'alice', name: 'Alice' }));
+  reject(new Error('Speaker not found'));
   await settle();
-  assert.equal(button(panel.render(), 'Remember voice').props.disabled, false);
-  button(panel.render(), 'Remember voice').props.onClick();
+  assert.equal(attribute(panel.render()).props.disabled, false);
+  assert.ok(panel.notices.some(notice => notice.kind === 'error'));
+  attribute(panel.render()).props.onAttribute(alice, { name: 'Alice' });
   await settle();
-  assert.equal(panel.calls.filter(call => call.name === 'remember_speaker').length, 2);
-  assert.equal(panel.calls.some(call => call.name === 'rename_speaker'), false);
+  assert.equal(panel.calls.filter(call => call.name === 'attribute_speaker').length, 2);
+  assert.equal(panel.calls.some(call => call.name === 'rename_speaker' || call.name === 'remember_speaker'), false);
 }
+// Picking a remembered voice sends its id, relabels the speaker, and reloads voices.
 {
-  const panel = makePanel({ speakers: [alice] });
-  button(panel.render(), 'Remember voice').props.onClick();
+  const madior = { id: 'profile-1', name: 'Scrum Master Madior', modelVersion: 'v1', sampleCount: 3, speechSeconds: 30 };
+  const panel = makePanel({ speakers: [alice], speakerProfiles: [madior] }, async name => name === 'attribute_speaker'
+    ? { profileId: madior.id, name: madior.name, outcome: 'added' } : []);
+  assert.deepEqual(attribute(panel.render()).props.profiles, [madior]);
+  attribute(panel.render()).props.onAttribute(alice, { profileId: madior.id });
   await settle();
-  assert.equal(button(panel.render(), 'Voice remembered').props.disabled, true);
+  const call = panel.calls.find(entry => entry.name === 'attribute_speaker');
+  assert.equal(JSON.stringify(call.args.request), JSON.stringify({ meetingId: 'meeting', speakerId: 'alice', profileId: madior.id }));
+  assert.ok(panel.calls.some(entry => entry.name === 'list_speaker_profiles'));
+  assert.ok(panel.notices.some(notice => notice.kind === 'success'
+    && String(notice.args[0]).includes(madior.name)));
 }
 
 // Overlap-only and unlabelled transcripts must keep a route back to correction.
@@ -157,27 +169,18 @@ for (const currentStatus of ['processing', 'preparing_models', 'rebuilding_windo
   const tree = panel.render();
   assert.ok(text(tree).includes('Refining speakers locally…'));
   assert.equal(nodes(tree).find(node => node.type === 'SpeakerColorPicker').props.disabled, true);
-  for (const label of ['Rename', 'Remember voice', 'Merge', 'Apply (1)']) {
+  for (const label of ['Merge', 'Apply (1)']) {
     const action = button(tree, label);
     assert.equal(action.props.disabled, true, `${label} enabled during ${currentStatus}`);
     action.props.onClick();
   }
+  for (const action of nodes(tree).filter(node => node.type === 'SpeakerAttributeButton')) {
+    assert.equal(action.props.disabled, true, `Attribute enabled during ${currentStatus}`);
+    action.props.onAttribute(action.props.speaker, { name: 'Someone' });
+  }
   await settle();
   assert.equal(panel.calls.length, 0);
   assert.equal(nodes(tree).find(node => node.type === 'VirtualizedTranscriptView').props.onToggleSegment, undefined);
-}
-
-// An editor that was already open must also reject Save after processing starts.
-{
-  const panel = makePanel({ speakers: [alice], editingSpeakerId: 'alice',
-    draftSpeakerLabel: 'Alicia', diarizationStatus: { currentStatus: 'saving', progress: 95 } });
-  const tree = panel.render();
-  const save = button(tree, 'Save');
-  assert.equal(save.props.disabled, true);
-  assert.equal(nodes(tree).find(node => node.type === 'Input').props.disabled, true);
-  save.props.onClick();
-  await settle();
-  assert.equal(panel.calls.length, 0);
 }
 
 // Manual processing follows settings changes without closing the meeting.
@@ -216,7 +219,7 @@ for (const currentStatus of ['processing', 'preparing_models', 'rebuilding_windo
   const tree = panel.render();
   const content = text(tree);
   assert.equal(button(tree, 'Correct rows').props.disabled, true);
-  assert.equal(button(tree, 'Remember voice').props.disabled, true);
+  assert.equal(attribute(tree).props.disabled, true);
   assert.equal(nodes(tree).some(node => node.type === 'Button' && text(node) === 'Retry'), false);
   assert.ok(content.includes('Close and reopen the app'));
   assert.ok(content.includes('Transcript recovery is required'));

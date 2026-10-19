@@ -790,7 +790,7 @@ pub fn run() {
             diarization::commands::set_speaker_color,
             diarization::commands::merge_speakers,
             diarization::commands::reassign_transcripts,
-            diarization::commands::remember_speaker,
+            diarization::commands::attribute_speaker,
             diarization::commands::list_speaker_profiles,
             diarization::commands::update_speaker_profile,
             diarization::commands::delete_speaker_profile,

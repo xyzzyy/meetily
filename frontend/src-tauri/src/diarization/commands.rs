@@ -9,7 +9,7 @@ use crate::{
             diarization_status_to_database_value, DiarizationRepository, MeetingSpeaker,
             TranscriptCorrectionWindow, TranscriptSpeakerMetadata,
         },
-        repositories::speaker_profile::SpeakerProfilesRepository,
+        repositories::speaker_profile::{SampleSource, SpeakerProfilesRepository},
     },
     diarization::{
         alignment::assign_speaker_to_transcript,
@@ -460,37 +460,25 @@ pub async fn delete_speaker_profile(
         .map_err(|error| error.to_string())
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RememberSpeakerRequest {
-    pub meeting_id: String,
-    pub speaker_id: String,
-    pub name: String,
-}
+/// Minimum clean, non-overlapping speech needed to learn or extend a voice.
+const MIN_PROFILE_SPEECH_SECONDS: f64 = 8.0;
 
-#[tauri::command]
-pub async fn remember_speaker<R: Runtime>(
-    app: AppHandle<R>,
-    state: State<'_, AppState>,
-    request: RememberSpeakerRequest,
-) -> Result<String, String> {
-    let _edit = super::operations::try_meeting_edit(&request.meeting_id)?;
-    const MIN_PROFILE_SPEECH_SECONDS: f64 = 8.0;
-    let executable = std::env::current_exe()
-        .map_err(|error| format!("Unable to locate the running Meetily app: {error}"))?;
-    if is_running_from_mounted_disk_image(&executable) {
-        return Err(
-            "Move Meetily to Applications and eject the installer disk image before remembering voices"
-                .to_string(),
-        );
-    }
-    let name = normalize_speaker_label(&request.name)?;
-    let model_path = crate::diarization::models::embedding_model_path(&app)?;
+/// Compute a voiceprint from one meeting speaker's clean speech.
+///
+/// Returns `None` when the speaker has less than
+/// [`MIN_PROFILE_SPEECH_SECONDS`] of usable speech.
+async fn collect_speaker_voice<R: Runtime>(
+    app: &AppHandle<R>,
+    state: &State<'_, AppState>,
+    meeting_id: &str,
+    speaker_id: &str,
+) -> Result<Option<(Vec<f32>, f64, i64)>, String> {
+    let model_path = crate::diarization::models::embedding_model_path(app)?;
     crate::diarization::models::validate_model_file(&model_path)?;
 
     let folder_path: Option<String> =
         sqlx::query_scalar("SELECT folder_path FROM meetings WHERE id = ?")
-            .bind(&request.meeting_id)
+            .bind(meeting_id)
             .fetch_optional(state.db_manager.pool())
             .await
             .map_err(|error| error.to_string())?
@@ -501,7 +489,7 @@ pub async fn remember_speaker<R: Runtime>(
 
     let current_ids: std::collections::HashSet<String> =
         sqlx::query_scalar("SELECT id FROM transcripts WHERE meeting_id = ?")
-            .bind(&request.meeting_id)
+            .bind(meeting_id)
             .fetch_all(state.db_manager.pool())
             .await
             .map_err(|error| error.to_string())?
@@ -515,8 +503,8 @@ pub async fn remember_speaker<R: Runtime>(
            AND audio_start_time IS NOT NULL AND audio_end_time IS NOT NULL
          ORDER BY audio_start_time",
     )
-    .bind(&request.meeting_id)
-    .bind(&request.speaker_id)
+    .bind(meeting_id)
+    .bind(speaker_id)
     .fetch_all(state.speaker_store.pool())
     .await
     .map_err(|error| error.to_string())?;
@@ -532,7 +520,7 @@ pub async fn remember_speaker<R: Runtime>(
         })
         .collect::<Vec<_>>();
     let fallback_audio = super::finalize::find_meeting_audio(&folder).ok();
-    let (embedding, speech_seconds, sample_count) = tokio::task::spawn_blocking(move || -> Result<(Vec<f32>, f64, i64), String> {
+    tokio::task::spawn_blocking(move || -> Result<Option<(Vec<f32>, f64, i64)>, String> {
         let mut ranges = std::collections::BTreeMap::<std::path::PathBuf, Vec<(f64, f64)>>::new();
         for (_, source, start, end, _, _) in clean_segments {
             let stem = match source.as_str() {
@@ -565,39 +553,145 @@ pub async fn remember_speaker<R: Runtime>(
         }
         let speech_seconds = selected.len() as f64 / 16_000.0;
         if speech_seconds < MIN_PROFILE_SPEECH_SECONDS {
-            return Err(format!("At least {MIN_PROFILE_SPEECH_SECONDS:.0} seconds of clean, non-overlapping speech is required"));
+            return Ok(None);
         }
         let mut extractor = crate::diarization::embedding::EmbeddingExtractor::new(&model_path)
             .map_err(|error| error.to_string())?;
         let embedding = extractor.compute(&selected).map_err(|error| error.to_string())?;
-        Ok((embedding, speech_seconds, sample_count))
-    }).await.map_err(|error| error.to_string())??;
+        Ok(Some((embedding, speech_seconds, sample_count)))
+    }).await.map_err(|error| error.to_string())?
+}
 
-    let profile_id = SpeakerProfilesRepository::create(
-        state.speaker_store.pool(),
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AttributeSpeakerRequest {
+    pub meeting_id: String,
+    pub speaker_id: String,
+    /// An existing remembered voice to attribute this speaker to.
+    #[serde(default)]
+    pub profile_id: Option<String>,
+    /// A typed name. Matches an existing remembered voice by name, otherwise
+    /// remembers a new one.
+    #[serde(default)]
+    pub name: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum AttributionOutcome {
+    /// A new remembered voice was created from this speaker.
+    Created,
+    /// This speaker's speech was added to an existing remembered voice.
+    Added,
+    /// This speaker had already contributed to that voice; only the name was applied.
+    AlreadyIncluded,
+    /// Too little clean speech to learn from; only the name was applied.
+    NamedOnly,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AttributeSpeakerResponse {
+    pub profile_id: Option<String>,
+    pub name: String,
+    pub outcome: AttributionOutcome,
+}
+
+/// Attribute a meeting speaker to a person.
+///
+/// Picking an existing remembered voice (or typing its name) labels the
+/// speaker and adds their speech to that voice. Typing a new name remembers a
+/// new voice. A speaker with too little clean speech is still labelled.
+#[tauri::command]
+pub async fn attribute_speaker<R: Runtime>(
+    app: AppHandle<R>,
+    state: State<'_, AppState>,
+    request: AttributeSpeakerRequest,
+) -> Result<AttributeSpeakerResponse, String> {
+    let _edit = super::operations::try_meeting_edit(&request.meeting_id)?;
+    let executable = std::env::current_exe()
+        .map_err(|error| format!("Unable to locate the running Meetily app: {error}"))?;
+    if is_running_from_mounted_disk_image(&executable) {
+        return Err(
+            "Move Meetily to Applications and eject the installer disk image before remembering voices"
+                .to_string(),
+        );
+    }
+    let pool = state.speaker_store.pool();
+
+    let existing = match (&request.profile_id, &request.name) {
+        (Some(profile_id), _) => Some(
+            SpeakerProfilesRepository::get(pool, profile_id)
+                .await
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| "That remembered voice no longer exists".to_string())?,
+        ),
+        (None, Some(name)) => {
+            let name = normalize_speaker_label(name)?;
+            SpeakerProfilesRepository::find_by_name(pool, &name)
+                .await
+                .map_err(|error| error.to_string())?
+        }
+        (None, None) => return Err("Choose a remembered voice or type a name".to_string()),
+    };
+    let name = match (&existing, &request.name) {
+        (Some(profile), _) => profile.name.clone(),
+        (None, Some(name)) => normalize_speaker_label(name)?,
+        (None, None) => unreachable!("handled above"),
+    };
+
+    let voice = collect_speaker_voice(&app, &state, &request.meeting_id, &request.speaker_id).await?;
+    let source = || SampleSource {
+        meeting_id: &request.meeting_id,
+        speaker_id: &request.speaker_id,
+    };
+    let model_version = crate::diarization::models::EMBEDDING_MODEL_VERSION;
+    let (profile_id, outcome) = match (existing, voice) {
+        (Some(profile), Some((embedding, seconds, samples))) => {
+            let added = SpeakerProfilesRepository::add_sample(
+                pool, &profile.id, &embedding, model_version, samples, seconds, source(),
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+            let outcome = if added { AttributionOutcome::Added } else { AttributionOutcome::AlreadyIncluded };
+            (Some(profile.id), outcome)
+        }
+        (Some(profile), None) => (Some(profile.id), AttributionOutcome::NamedOnly),
+        (None, Some((embedding, seconds, samples))) => {
+            let id = SpeakerProfilesRepository::create_from_sample(
+                pool, &name, &embedding, model_version, samples, seconds, source(),
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+            (Some(id), AttributionOutcome::Created)
+        }
+        (None, None) => (None, AttributionOutcome::NamedOnly),
+    };
+
+    let updated = DiarizationRepository::rename_speaker(
+        pool,
+        &request.meeting_id,
+        &request.speaker_id,
         &name,
-        &embedding,
-        crate::diarization::models::EMBEDDING_MODEL_VERSION,
-        sample_count,
-        speech_seconds,
     )
     .await
     .map_err(|error| error.to_string())?;
+    if updated == 0 {
+        return Err("Speaker not found for meeting".to_string());
+    }
+    for table in ["transcript_speakers", "speaker_segments"] {
+        sqlx::query(&format!(
+            "UPDATE {table} SET speaker_profile_id = ? WHERE meeting_id = ? AND speaker_id = ?"
+        ))
+        .bind(&profile_id)
+        .bind(&request.meeting_id)
+        .bind(&request.speaker_id)
+        .execute(pool)
+        .await
+        .map_err(|error| error.to_string())?;
+    }
 
-    sqlx::query(
-        "UPDATE transcript_speakers SET speaker_profile_id = ?, speaker_label = ?,
-            diarization_method = 'manual', updated_at = CURRENT_TIMESTAMP
-         WHERE meeting_id = ? AND speaker_id = ?",
-    )
-    .bind(&profile_id)
-    .bind(&name)
-    .bind(&request.meeting_id)
-    .bind(&request.speaker_id)
-    .execute(state.speaker_store.pool())
-    .await
-    .map_err(|error| error.to_string())?;
-
-    Ok(profile_id)
+    Ok(AttributeSpeakerResponse { profile_id, name, outcome })
 }
 
 fn is_running_from_mounted_disk_image(executable: &std::path::Path) -> bool {
