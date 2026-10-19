@@ -62,6 +62,7 @@ Meetily Branch does not publish prebuilt installers, so you need to build it fro
 
 - **Rust** (stable) via [rustup](https://rustup.rs/)
 - **Node.js** 18+ and **pnpm 9** (`npm install -g pnpm@9.15.9`)
+- **Bun** *(only needed for the React hook tests)* via [bun.sh](https://bun.sh/)
 - **Platform toolchain**
   - macOS: Xcode Command Line Tools (`xcode-select --install`) and `cmake`
   - Windows: Visual Studio Build Tools with the C++ workload, plus `cmake` and LLVM
@@ -74,21 +75,18 @@ git clone https://github.com/xyzzyy/meetily.git meetily-branch
 cd meetily-branch/frontend
 pnpm install --frozen-lockfile
 
-# Development build with hot reload. GPU features are picked automatically.
-pnpm run tauri:dev
+# Development build with hot reload
+./dev-gpu.sh
 
 # Production bundle (.app/.dmg on macOS, installer on Windows)
-pnpm run tauri:build
+./build-gpu.sh
 ```
 
-The finished bundle is written to `frontend/src-tauri/target/release/bundle/`.
+On Windows, use `dev-gpu.bat` / `build-gpu.bat` (or the `.ps1` versions) instead.
 
-There are also wrapper scripts that clean and rebuild:
+These scripts pick a GPU backend for your hardware. They also build the `llama-helper` sidecar that runs the built-in summary model and copy it into `src-tauri/binaries/`. Running `pnpm run tauri:build` on its own skips that step, so on a fresh clone the bundle fails because the sidecar binary is missing. Run one of the GPU scripts at least once first.
 
-| Platform | Run (dev) | Build (release) |
-|---|---|---|
-| macOS / Linux | `./clean_run.sh` (add `debug` for verbose logs) | `./clean_build.sh` |
-| Windows | `clean_run_windows.bat` | `clean_build_windows.bat` |
+The repository root is a Cargo workspace, so the finished bundle is written to `target/release/bundle/` at the **repository root**, not under `frontend/`.
 
 For detailed platform instructions, see [docs/BUILDING.md](docs/BUILDING.md).
 
@@ -102,32 +100,37 @@ All app behavior lives in the Tauri app under `frontend/`. The Next.js UI calls 
 
 ### Picking a GPU backend
 
-`tauri:dev` and `tauri:build` detect your hardware. To force a specific backend:
+`dev-gpu.sh`, `build-gpu.sh`, `tauri:dev`, and `tauri:build` detect your hardware. To force a specific backend (after the sidecar has been built once):
 
 ```bash
 pnpm run tauri:dev:metal    # macOS
 pnpm run tauri:dev:cuda     # NVIDIA
 pnpm run tauri:dev:vulkan   # AMD / Intel
-pnpm run tauri:dev:cpu      # no GPU
+pnpm run tauri:dev:cpu      # CPU only on Windows/Linux
 ```
+
+On macOS, Whisper always builds with Metal and CoreML, so `tauri:dev:cpu` still uses the GPU there.
 
 There are matching `tauri:build:*` scripts for each backend. For details, see [docs/GPU_ACCELERATION.md](docs/GPU_ACCELERATION.md).
 
 ### Logging
 
 ```bash
-RUST_LOG=debug ./clean_run.sh                  # everything
-RUST_LOG=app_lib::audio=debug ./clean_run.sh   # audio pipeline only
+RUST_LOG=debug ./dev-gpu.sh                  # everything
+RUST_LOG=app_lib::audio=debug ./dev-gpu.sh   # audio pipeline only
 ```
+
+`clean_run.sh` sets `RUST_LOG` itself from its first argument (`info`, `debug`, or `trace`), so pass the level as an argument instead: `./clean_run.sh debug`.
 
 To open DevTools in the app, press `Cmd+Shift+I` on macOS or `Ctrl+Shift+I` on Windows/Linux.
 
 ### Tests
 
 ```bash
-cd frontend/src-tauri && cargo test                              # Rust core
-node --test frontend/tests/components/model-deletion.test.mjs    # from repo root
-cd frontend && bun test tests/hooks                              # React hook tests
+# Run each from the repository root
+(cd frontend/src-tauri && cargo test)                           # Rust core
+node --test frontend/tests/components/model-deletion.test.mjs   # component tests
+(cd frontend && bun test tests/hooks)                           # React hook tests (needs Bun)
 ```
 
 ## Architecture
@@ -178,7 +181,7 @@ Models go in the `models/` subfolder. If official Meetily is installed, its `com
 
 ## Contributing
 
-Issues and pull requests are welcome. Branch from `main`, using `fix/*` for bug fixes and `enhance/*` for features, then open a PR back into `main`. Read [CONTRIBUTING.md](CONTRIBUTING.md) before you start.
+Issues and pull requests are welcome. Branch from `main`, using `fix/*` for bug fixes and `enhance/*` for features, then open a PR back into `main`. [CONTRIBUTING.md](CONTRIBUTING.md) covers code style and PR expectations. It was inherited from upstream, so wherever it says `devtest`, use `main` in this fork.
 
 To contribute to the official app instead, open your change against [upstream Meetily](https://github.com/Zackriya-Solutions/meetily).
 
