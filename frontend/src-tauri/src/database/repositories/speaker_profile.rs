@@ -422,15 +422,17 @@ impl SpeakerProfilesRepository {
     }
 
     pub async fn delete(pool: &SqlitePool, id: &str) -> Result<(), SqlxError> {
+        // Speakers keep their names but are no longer linked to the voice,
+        // matching what removing a voice's last recording does.
         let mut transaction = pool.begin().await?;
-        sqlx::query("DELETE FROM speaker_profile_samples WHERE profile_id = ?")
-            .bind(id)
-            .execute(&mut *transaction)
-            .await?;
-        sqlx::query("DELETE FROM speaker_profiles WHERE id = ?")
-            .bind(id)
-            .execute(&mut *transaction)
-            .await?;
+        for statement in [
+            "DELETE FROM speaker_profile_samples WHERE profile_id = ?",
+            "UPDATE transcript_speakers SET speaker_profile_id = NULL WHERE speaker_profile_id = ?",
+            "UPDATE speaker_segments SET speaker_profile_id = NULL WHERE speaker_profile_id = ?",
+            "DELETE FROM speaker_profiles WHERE id = ?",
+        ] {
+            sqlx::query(statement).bind(id).execute(&mut *transaction).await?;
+        }
         transaction.commit().await?;
         Ok(())
     }
@@ -664,6 +666,26 @@ mod tests {
         )
         .await
         .unwrap());
+    }
+
+    #[tokio::test]
+    async fn forgetting_a_voice_unlinks_its_speakers_but_keeps_their_names() {
+        let pool = speaker_store().await;
+        let id = SpeakerProfilesRepository::create_from_sample(
+            &pool, "Alice", &[1.0, 0.0], "v1", 2, 20.0,
+            SampleSource { meeting_id: "m1", speaker_id: "S1" },
+        )
+        .await
+        .unwrap();
+        link(&pool, "t1", "m1", "S1", &id).await;
+        SpeakerProfilesRepository::delete(&pool, &id).await.unwrap();
+        assert!(SpeakerProfilesRepository::get(&pool, &id).await.unwrap().is_none());
+        assert_eq!(linked_profile(&pool, "t1").await, None);
+        let label: String = sqlx::query_scalar("SELECT speaker_label FROM transcript_speakers WHERE transcript_id = 't1'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(label, "Alice");
     }
 
     #[tokio::test]

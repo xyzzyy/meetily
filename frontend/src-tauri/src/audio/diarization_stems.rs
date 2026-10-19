@@ -63,48 +63,54 @@ impl DiarizationStemSaver {
             task.await.context("Diarization stem writer crashed")??;
         }
 
-        let ffmpeg = find_ffmpeg_path().ok_or_else(|| anyhow!("FFmpeg is unavailable"))?;
-        for stem in ["microphone", "system"] {
-            let raw = self.output_dir.join(format!(".{stem}.f32"));
-            let final_path = self.output_dir.join(format!("{stem}.flac"));
-            let temporary = self.output_dir.join(format!(".{stem}.flac.tmp"));
-            if !raw.exists() || raw.metadata()?.len() == 0 {
-                warn!("Skipping empty diarization stem: {}", raw.display());
-                let _ = fs::remove_file(raw);
-                continue;
-            }
+        // Encoding hours of audio blocks, so keep it off the async runtime.
+        let output_dir = self.output_dir.clone();
+        tokio::task::spawn_blocking(move || -> Result<()> {
+            let ffmpeg = find_ffmpeg_path().ok_or_else(|| anyhow!("FFmpeg is unavailable"))?;
+            for stem in ["microphone", "system"] {
+                let raw = output_dir.join(format!(".{stem}.f32"));
+                let final_path = output_dir.join(format!("{stem}.flac"));
+                let temporary = output_dir.join(format!(".{stem}.flac.tmp"));
+                if !raw.exists() || raw.metadata()?.len() == 0 {
+                    warn!("Skipping empty diarization stem: {}", raw.display());
+                    let _ = fs::remove_file(raw);
+                    continue;
+                }
 
-            let output = Command::new(&ffmpeg)
-                .args(["-y", "-hide_banner", "-loglevel", "error"])
-                .args([
-                    "-f",
-                    "f32le",
-                    "-ar",
-                    &CAPTURE_SAMPLE_RATE.to_string(),
-                    "-ac",
-                    "1",
-                ])
-                .arg("-i")
-                .arg(&raw)
-                .args(["-ar", &DIARIZATION_SAMPLE_RATE.to_string(), "-ac", "1"])
-                .args(["-c:a", "flac", "-compression_level", "5"])
-                .args(["-f", "flac"])
-                .arg(&temporary)
-                .output()?;
-            if !output.status.success() {
-                return Err(anyhow!(
-                    "Failed to finalize {stem} stem: {}",
-                    String::from_utf8_lossy(&output.stderr)
-                ));
+                let output = Command::new(&ffmpeg)
+                    .args(["-y", "-hide_banner", "-loglevel", "error"])
+                    .args([
+                        "-f",
+                        "f32le",
+                        "-ar",
+                        &CAPTURE_SAMPLE_RATE.to_string(),
+                        "-ac",
+                        "1",
+                    ])
+                    .arg("-i")
+                    .arg(&raw)
+                    .args(["-ar", &DIARIZATION_SAMPLE_RATE.to_string(), "-ac", "1"])
+                    .args(["-c:a", "flac", "-compression_level", "5"])
+                    .args(["-f", "flac"])
+                    .arg(&temporary)
+                    .output()?;
+                if !output.status.success() {
+                    return Err(anyhow!(
+                        "Failed to finalize {stem} stem: {}",
+                        String::from_utf8_lossy(&output.stderr)
+                    ));
+                }
+                if !temporary.exists() || temporary.metadata()?.len() == 0 {
+                    return Err(anyhow!("FFmpeg produced an empty {stem} stem"));
+                }
+                fs::rename(&temporary, &final_path)?;
+                fs::remove_file(&raw)?;
+                info!("Finalized diarization stem: {}", final_path.display());
             }
-            if !temporary.exists() || temporary.metadata()?.len() == 0 {
-                return Err(anyhow!("FFmpeg produced an empty {stem} stem"));
-            }
-            fs::rename(&temporary, &final_path)?;
-            fs::remove_file(&raw)?;
-            info!("Finalized diarization stem: {}", final_path.display());
-        }
-        Ok(())
+            Ok(())
+        })
+        .await
+        .context("Diarization stem encoder crashed")?
     }
 }
 

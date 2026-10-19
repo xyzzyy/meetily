@@ -139,7 +139,10 @@ fn assign_live_speaker(
         speaker_id: Some(id.to_string()),
         speaker_label: Some(label.to_string()),
         speaker_source: Some(source.to_string()),
-        speaker_color: Some(if overlap { "orange" } else { "blue" }.to_string()),
+        speaker_color: Some(
+            if overlap { crate::diarization::colors::LIVE_OVERLAP_COLOR } else { crate::diarization::colors::LIVE_SPEAKER_COLOR }
+                .to_string(),
+        ),
         is_overlap: Some(overlap),
         diarization_status: Some("provisional".to_string()),
         diarization_method: Some("live_source_wespeaker".to_string()),
@@ -194,7 +197,7 @@ fn assign_live_speaker(
                 assignment.confidence = Some(result.confidence);
                 if result.needs_review {
                     assignment.diarization_status = Some("needs_review".to_string());
-                    assignment.speaker_color = Some("gray".to_string());
+                    assignment.speaker_color = Some(crate::diarization::colors::LIVE_REVIEW_COLOR.to_string());
                 }
                 assignment
             } else {

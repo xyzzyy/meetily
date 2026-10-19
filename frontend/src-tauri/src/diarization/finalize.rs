@@ -123,10 +123,47 @@ pub fn cancel() {
 }
 
 pub fn fluid_model_cache<R: Runtime>(app: &AppHandle<R>) -> Result<PathBuf> {
-    Ok(app
-        .path()
-        .app_data_dir()?
+    // The validated branch directory, so preparing or deleting these models
+    // can never touch official Meetily storage.
+    Ok(crate::storage_safety::branch_app_data_dir(app)
+        .map_err(|error| anyhow!(error))?
         .join("diarization/fluid-audio-0.12.4"))
+}
+
+/// Whether post-call refinement can run here. It uses a bundled Swift helper
+/// that needs an Apple Silicon Mac running macOS 14.4 or later; elsewhere the
+/// live labels are kept.
+pub fn refinement_supported() -> bool {
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    {
+        macos_version_at_least(14, 4) && resolve_sidecar_binary().is_ok()
+    }
+    #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+    {
+        false
+    }
+}
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+fn macos_version_at_least(major: u32, minor: u32) -> bool {
+    static VERSION: std::sync::OnceLock<Option<(u32, u32)>> = std::sync::OnceLock::new();
+    let version = VERSION.get_or_init(|| {
+        let output = std::process::Command::new("/usr/bin/sw_vers")
+            .arg("-productVersion")
+            .output()
+            .ok()?;
+        parse_macos_version(&String::from_utf8_lossy(&output.stdout))
+    });
+    version.is_some_and(|version| version >= (major, minor))
+}
+
+/// Parse `sw_vers -productVersion` output such as `14.4.1` or `15`.
+#[cfg_attr(not(all(target_os = "macos", target_arch = "aarch64")), allow(dead_code))]
+fn parse_macos_version(text: &str) -> Option<(u32, u32)> {
+    let mut parts = text.trim().split('.');
+    let major = parts.next()?.parse().ok()?;
+    let minor = parts.next().map(str::parse).transpose().ok()?.unwrap_or(0);
+    Some((major, minor))
 }
 
 pub fn offline_models_present<R: Runtime>(app: &AppHandle<R>) -> bool {
@@ -1707,6 +1744,18 @@ fn quality_flags_from_json(value: Option<&str>) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    use super::parse_macos_version;
+
+    #[test]
+    fn parses_macos_versions_for_the_refinement_check() {
+        assert_eq!(parse_macos_version("14.4.1\n"), Some((14, 4)));
+        assert_eq!(parse_macos_version("15"), Some((15, 0)));
+        assert_eq!(parse_macos_version("13.6"), Some((13, 6)));
+        assert_eq!(parse_macos_version(""), None);
+        assert!(parse_macos_version("14.3").unwrap() < (14, 4));
+        assert!(parse_macos_version("26.0").unwrap() >= (14, 4));
+    }
+
     use super::*;
 
     fn speaker_row(

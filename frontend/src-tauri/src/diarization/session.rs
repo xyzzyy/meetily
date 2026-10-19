@@ -58,9 +58,12 @@ impl DiarizationSession {
 
     pub fn label_segment_detailed(&mut self, samples_16k: &[f32]) -> Option<ClusterAssignment> {
         if samples_16k.len() < MIN_SAMPLES_FOR_EMBEDDING {
+            // Too short to fingerprint: carry the previous speaker, including
+            // the remembered voice it matched, so one person stays one speaker.
+            let profile_id = self.clusterer.last_profile_id();
             return self.clusterer.last_label().map(|label| ClusterAssignment {
                 label,
-                profile_id: None,
+                profile_id,
                 confidence: 0.0,
                 needs_review: false,
             });
@@ -72,9 +75,10 @@ impl DiarizationSession {
                     "Diarization embedding failed, carrying previous label: {}",
                     e
                 );
+                let profile_id = self.clusterer.last_profile_id();
                 self.clusterer.last_label().map(|label| ClusterAssignment {
                     label,
-                    profile_id: None,
+                    profile_id,
                     confidence: 0.0,
                     needs_review: true,
                 })

@@ -75,6 +75,15 @@ impl SpeakerClusterer {
         self.last_label.clone()
     }
 
+    /// The remembered voice behind the last label, if it matched one.
+    pub fn last_profile_id(&self) -> Option<String> {
+        let label = self.last_label.as_deref()?;
+        self.clusters
+            .iter()
+            .find(|cluster| cluster.label == label)
+            .and_then(|cluster| cluster.profile_id.clone())
+    }
+
     /// Assign an L2-normalized embedding to a cluster, returning its label.
     /// Unmatched profile-seeded clusters require the stricter profile
     /// threshold for their first match.
@@ -225,6 +234,18 @@ mod tests {
         assert_eq!(c.assign(&a), "Speaker 1");
         assert_eq!(c.assign(&b), "Speaker 2");
         assert_eq!(c.last_label().as_deref(), Some("Speaker 2"));
+    }
+
+    #[test]
+    fn last_profile_id_follows_the_last_matched_voice() {
+        let mut c = SpeakerClusterer::new();
+        c.seed_profile("profile-alice", "Alice", unit(vec![1.0, 0.0, 0.0]));
+        assert_eq!(c.last_profile_id(), None);
+        let alice = c.assign_detailed(&unit(vec![1.0, 0.02, 0.0]));
+        assert_eq!(alice.profile_id.as_deref(), Some("profile-alice"));
+        assert_eq!(c.last_profile_id().as_deref(), Some("profile-alice"));
+        c.assign(&unit(vec![0.0, 1.0, 0.0]));
+        assert_eq!(c.last_profile_id(), None, "an anonymous speaker has no remembered voice");
     }
 
     #[test]

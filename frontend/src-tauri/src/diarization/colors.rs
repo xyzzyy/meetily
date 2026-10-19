@@ -15,6 +15,29 @@ pub static PALETTE: Lazy<Vec<ColorChoice>> = Lazy::new(|| {
         .expect("The bundled speaker palette must be valid")
 });
 
+/// Live labelling's default colours: speaker, overlap and needs-review.
+/// Older builds stored them as CSS names. None of these is a colour a speaker
+/// was given, so they're replaced with a distinct palette colour.
+pub const LIVE_SPEAKER_COLOR: &str = "#3b82f6";
+pub const LIVE_OVERLAP_COLOR: &str = "#f97316";
+pub const LIVE_REVIEW_COLOR: &str = "#6b7280";
+const LIVE_DEFAULT_COLORS: [&str; 6] = [
+    LIVE_SPEAKER_COLOR,
+    LIVE_OVERLAP_COLOR,
+    LIVE_REVIEW_COLOR,
+    "blue",
+    "orange",
+    "gray",
+];
+
+/// A stored colour worth keeping: a `#rrggbb` value that isn't a live default.
+fn is_assigned_color(color: &str) -> bool {
+    color.len() == 7
+        && color.starts_with('#')
+        && color[1..].chars().all(|c| c.is_ascii_hexdigit())
+        && !LIVE_DEFAULT_COLORS.contains(&color)
+}
+
 fn next_color(used: &HashSet<String>) -> String {
     if let Some(color) = PALETTE.iter().find(|color| !used.contains(&color.value)) {
         return color.value.clone();
@@ -35,14 +58,14 @@ fn next_color(used: &HashSet<String>) -> String {
 }
 
 pub fn apply_colors(speakers: &mut [MeetingSpeaker], choices: &HashMap<String, String>) {
-    // Ignore the old all-blue default. Keep any distinct colors from live analysis.
+    // Ignore live defaults and anything that isn't a hex colour.
     let mut reserved: HashSet<String> = speakers
         .iter()
         .filter_map(|speaker| {
             speaker
                 .speaker_color
                 .as_ref()
-                .filter(|color| color.as_str() != "#3b82f6")
+                .filter(|color| is_assigned_color(color))
                 .cloned()
         })
         .collect();
@@ -51,7 +74,7 @@ pub fn apply_colors(speakers: &mut [MeetingSpeaker], choices: &HashMap<String, S
         let color = speaker
             .speaker_color
             .as_ref()
-            .filter(|color| color.as_str() != "#3b82f6" && !used.contains(*color))
+            .filter(|color| is_assigned_color(color) && !used.contains(*color))
             .cloned()
             .unwrap_or_else(|| next_color(&reserved));
         reserved.insert(color.clone());
@@ -97,6 +120,19 @@ mod tests {
             .map(|row| row.speaker_color.as_ref().unwrap())
             .collect();
         assert_eq!(colors.len(), rows.len());
+    }
+
+    #[test]
+    fn live_default_colors_and_names_get_palette_colors() {
+        let mut rows = speakers(4);
+        for (row, color) in rows.iter_mut().zip(["blue", "gray", LIVE_OVERLAP_COLOR, LIVE_REVIEW_COLOR]) {
+            row.speaker_color = Some(color.into());
+        }
+        apply_colors(&mut rows, &HashMap::new());
+        for row in &rows {
+            let color = row.speaker_color.as_deref().unwrap();
+            assert!(PALETTE.iter().any(|choice| choice.value == color), "{color} is not a palette colour");
+        }
     }
 
     #[test]

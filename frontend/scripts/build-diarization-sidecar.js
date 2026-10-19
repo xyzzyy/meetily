@@ -21,14 +21,23 @@ const output = path.join(
   'binaries',
   'meetily-diarization-aarch64-apple-darwin'
 );
+// Ask xcrun last: it finds the SDK in a full Xcode install too.
+function xcrunSdkPath() {
+  try {
+    return execFileSync('xcrun', ['--sdk', 'macosx', '--show-sdk-path'], { encoding: 'utf8' }).trim();
+  } catch {
+    return undefined;
+  }
+}
 const sdkCandidates = [
   process.env.SDKROOT,
   '/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk',
-].filter(Boolean);
-const sdk = sdkCandidates.find(candidate => fs.existsSync(candidate));
+];
+const sdk = sdkCandidates.filter(Boolean).find(candidate => fs.existsSync(candidate))
+  ?? [xcrunSdkPath()].filter(Boolean).find(candidate => fs.existsSync(candidate));
 
 if (!sdk) {
-  console.error('A macOS SDK from Apple Command Line Tools is required to build speaker recognition.');
+  console.error('A macOS SDK (from Xcode or Apple Command Line Tools) is required to build speaker recognition.');
   process.exit(1);
 }
 

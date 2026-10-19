@@ -80,7 +80,13 @@ pub async fn download_embedding_model<R: Runtime>(app: &AppHandle<R>) -> Result<
         "Downloading diarization embedding model from {}",
         EMBEDDING_MODEL_URL
     );
-    let client = reqwest::Client::new();
+    // A stalled download would otherwise hold the speaker processing slot
+    // until the app restarts. Same limits as the Parakeet downloader.
+    let client = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(30))
+        .timeout(std::time::Duration::from_secs(3600))
+        .build()
+        .map_err(|e| format!("Failed to prepare the download: {}", e))?;
     let response = client
         .get(EMBEDDING_MODEL_URL)
         .send()
@@ -100,7 +106,16 @@ pub async fn download_embedding_model<R: Runtime>(app: &AppHandle<R>) -> Result<
         .map_err(|e| format!("Failed to create temp file: {}", e))?;
 
     let mut stream = response.bytes_stream();
-    while let Some(chunk) = stream.next().await {
+    loop {
+        let chunk = match tokio::time::timeout(std::time::Duration::from_secs(30), stream.next()).await {
+            Ok(Some(chunk)) => chunk,
+            Ok(None) => break,
+            Err(_) => {
+                drop(file);
+                let _ = tokio::fs::remove_file(&tmp_path).await;
+                return Err("Download stalled: no data received for 30 seconds".to_string());
+            }
+        };
         let chunk = chunk.map_err(|e| format!("Download stream error: {}", e))?;
         tokio::io::AsyncWriteExt::write_all(&mut file, &chunk)
             .await

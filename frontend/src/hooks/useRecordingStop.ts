@@ -299,7 +299,11 @@ export function useRecordingStop(
               const settings = await invoke<{ enabled: boolean; postCallRefinementEnabled: boolean }>(
                 'get_diarization_settings'
               );
-              if (settings.enabled && settings.postCallRefinementEnabled && folderPath) {
+              if (!settings.enabled || !settings.postCallRefinementEnabled || !folderPath) return;
+              // Refinement needs Apple Silicon with macOS 14.4+; elsewhere keep the
+              // live labels instead of recording a failed run.
+              const models = await invoke<{ refinementSupported: boolean }>('get_diarization_model_status');
+              if (models.refinementSupported) {
                 await invoke('start_final_diarization', {
                   request: { meetingId, overwriteManualEdits: false }
                 });

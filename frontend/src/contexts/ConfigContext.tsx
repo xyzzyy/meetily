@@ -439,8 +439,19 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const updateDiarizationSettings = useCallback(async (settings: DiarizationSettings) => {
-    setDiarizationSettings(settings);
-    await configService.saveDiarizationSettings(settings);
+    // Show the change immediately, but put the saved values back if the save
+    // fails so the switches never show settings the app isn't using.
+    let previous: DiarizationSettings | undefined;
+    setDiarizationSettings(current => {
+      previous = current;
+      return settings;
+    });
+    try {
+      await configService.saveDiarizationSettings(settings);
+    } catch (error) {
+      if (previous) setDiarizationSettings(previous);
+      throw error;
+    }
   }, []);
 
   // Update individual provider API key

@@ -41,6 +41,7 @@ export function SpeakerDiarizationSettings() {
       setModelInstalled(true);
       setDownloadPercent(null);
     } catch (error) {
+      setDownloadPercent(null);
       await message(String(error), { title: 'Speaker model download failed', kind: 'error' });
     } finally {
       setModelBusy(false);
@@ -61,7 +62,10 @@ export function SpeakerDiarizationSettings() {
 
   const update = (patch: Partial<typeof diarizationSettings>) => {
     updateDiarizationSettings({ ...diarizationSettings, ...patch })
-      .catch(error => console.error('[SpeakerDiarizationSettings] Failed to save:', error));
+      .catch(error => {
+        console.error('[SpeakerDiarizationSettings] Failed to save:', error);
+        void message(String(error), { title: 'Could not save speaker label settings', kind: 'error' });
+      });
   };
 
   const showLiveLabels = diarizationSettings.showProvisionalLabels

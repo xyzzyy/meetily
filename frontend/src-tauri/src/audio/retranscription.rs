@@ -47,9 +47,23 @@ impl Drop for RetranscriptionGuard {
     }
 }
 
-/// Keep natural short pauses separate during Enhance. Model token times provide
-/// Parakeet row boundaries; Whisper uses shorter speech spans as a fallback.
-const VAD_REDEMPTION_TIME_MS: u32 = 500;
+/// VAD redemption time in milliseconds - bridges natural pauses in speech
+/// Batch processing needs longer redemption (2000ms) than the live pipeline
+/// because it has no latency requirement, and short redemption fragments
+/// speech at every breath. Short Whisper inputs are zero-padded to its 30s
+/// window and invite hallucinated boilerplate (see pipeline.rs).
+const VAD_REDEMPTION_TIME_MS: u32 = 2000;
+
+/// Redemption time when Enhance also assigns speakers. Short pauses are kept
+/// apart so a row can end where the speaker changes. Parakeet row boundaries
+/// come from its token times; Whisper uses these shorter spans as a fallback.
+const SPEAKER_VAD_REDEMPTION_TIME_MS: u32 = 500;
+
+/// Longest input sent to the engine in one piece (16 kHz samples).
+const MAX_SEGMENT_SAMPLES: usize = 25 * 16000;
+
+/// Whisper input limit when assigning speakers, so turns aren't merged.
+const SPEAKER_WHISPER_MAX_SEGMENT_SAMPLES: usize = 8 * 16000;
 
 /// Progress update emitted during retranscription
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -305,10 +319,15 @@ async fn run_retranscription<R: Runtime>(
     let app_for_vad = app.clone();
     let meeting_id_for_vad = meeting_id.clone();
 
+    let redemption_time_ms = if assign_speakers {
+        SPEAKER_VAD_REDEMPTION_TIME_MS
+    } else {
+        VAD_REDEMPTION_TIME_MS
+    };
     let speech_segments = tokio::task::spawn_blocking(move || {
         get_speech_chunks_with_progress(
             &audio_samples,
-            VAD_REDEMPTION_TIME_MS,
+            redemption_time_ms,
             |vad_progress, segments_found| {
                 // Map VAD progress (0-100) to overall progress (20-25)
                 let overall_progress = 20 + (vad_progress as f32 * 0.05) as u32;
@@ -335,7 +354,7 @@ async fn run_retranscription<R: Runtime>(
     let total_segments = speech_segments.len();
     info!(
         "VAD detected {} speech segments (redemption_time={}ms)",
-        total_segments, VAD_REDEMPTION_TIME_MS
+        total_segments, redemption_time_ms
     );
 
     // Diagnostic: log segment duration distribution
@@ -400,8 +419,13 @@ async fn run_retranscription<R: Runtime>(
     };
 
     // Keep input context for Parakeet, but use its token times for output rows.
-    // Whisper has no word timing on this path: use shorter, turn-aware input.
-    let max_samples = if use_parakeet { 25 * 16000 } else { 8 * 16000 };
+    // Whisper has no word timing on this path, so when assigning speakers it
+    // gets shorter, turn-aware input. Otherwise keep the long, safer inputs.
+    let max_samples = if assign_speakers && !use_parakeet {
+        SPEAKER_WHISPER_MAX_SEGMENT_SAMPLES
+    } else {
+        MAX_SEGMENT_SAMPLES
+    };
     let turns = if use_parakeet {
         Vec::new()
     } else {
@@ -1046,8 +1070,11 @@ mod tests {
 
     #[test]
     fn test_vad_redemption_time_constant() {
-        // Batch processing uses 2000ms to bridge natural pauses in full-file VAD
-        assert_eq!(VAD_REDEMPTION_TIME_MS, 500);
+        // Batch processing uses 2000ms to bridge natural pauses in full-file VAD.
+        // Only speaker assignment keeps short pauses apart.
+        assert_eq!(VAD_REDEMPTION_TIME_MS, 2000);
+        assert_eq!(SPEAKER_VAD_REDEMPTION_TIME_MS, 500);
+        assert_eq!(MAX_SEGMENT_SAMPLES, 25 * 16000);
     }
 
     #[test]

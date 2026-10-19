@@ -26,6 +26,8 @@ pub struct DiarizationModelStatus {
     pub installed: bool,
     pub embedding_installed: bool,
     pub offline_installed: bool,
+    /// Whether post-call refinement can run on this machine.
+    pub refinement_supported: bool,
     pub filename: String,
     pub version: String,
     pub size_bytes: u64,
@@ -37,10 +39,14 @@ pub async fn get_diarization_model_status<R: Runtime>(
 ) -> Result<DiarizationModelStatus, String> {
     let embedding_installed = crate::diarization::models::is_embedding_model_present(&app);
     let offline_installed = super::finalize::offline_models_present(&app);
+    let refinement_supported = super::finalize::refinement_supported();
     Ok(DiarizationModelStatus {
-        installed: embedding_installed && offline_installed,
+        // Live labels only need the embedding model. The offline models matter
+        // only where post-call refinement can run.
+        installed: embedding_installed && (offline_installed || !refinement_supported),
         embedding_installed,
         offline_installed,
+        refinement_supported,
         filename: crate::diarization::models::EMBEDDING_MODEL_FILENAME.to_string(),
         version: crate::diarization::models::EMBEDDING_MODEL_VERSION.to_string(),
         size_bytes: crate::diarization::models::EMBEDDING_MODEL_SIZE,
@@ -51,6 +57,9 @@ pub async fn get_diarization_model_status<R: Runtime>(
 pub async fn download_diarization_model<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
     let _operation = super::operations::try_processing_slot()?;
     crate::diarization::models::download_embedding_model(&app).await?;
+    if !super::finalize::refinement_supported() {
+        return Ok(());
+    }
     super::finalize::prepare_offline_models(&app)
         .await
         .map_err(|error| error.to_string())
@@ -687,7 +696,7 @@ pub enum AttributionOutcome {
     Added,
     /// This speaker had already contributed to that voice; only the name was applied.
     AlreadyIncluded,
-    /// Too little clean speech to learn from; only the name was applied.
+    /// The voice couldn't be learned (see `voice_note`); only the name was applied.
     NamedOnly,
 }
 
@@ -697,6 +706,19 @@ pub struct AttributeSpeakerResponse {
     pub profile_id: Option<String>,
     pub name: String,
     pub outcome: AttributionOutcome,
+    /// Why the voice wasn't learned, when only the name was applied.
+    pub voice_note: Option<String>,
+}
+
+/// A reason voices can't be learned at all right now, if there is one.
+fn voice_learning_blocker() -> Option<String> {
+    let executable = match std::env::current_exe() {
+        Ok(executable) => executable,
+        Err(error) => return Some(format!("Unable to locate the running Meetily app: {error}.")),
+    };
+    is_running_from_mounted_disk_image(&executable).then(|| {
+        "Move Meetily to Applications and eject the installer disk image to remember voices.".to_string()
+    })
 }
 
 /// Attribute a meeting speaker to a person.
@@ -711,14 +733,6 @@ pub async fn attribute_speaker<R: Runtime>(
     request: AttributeSpeakerRequest,
 ) -> Result<AttributeSpeakerResponse, String> {
     let _edit = super::operations::try_meeting_edit(&request.meeting_id)?;
-    let executable = std::env::current_exe()
-        .map_err(|error| format!("Unable to locate the running Meetily app: {error}"))?;
-    if is_running_from_mounted_disk_image(&executable) {
-        return Err(
-            "Move Meetily to Applications and eject the installer disk image before remembering voices"
-                .to_string(),
-        );
-    }
     let pool = state.speaker_store.pool();
 
     let existing = match (&request.profile_id, &request.name) {
@@ -742,7 +756,21 @@ pub async fn attribute_speaker<R: Runtime>(
         (None, None) => unreachable!("handled above"),
     };
 
-    let voice = collect_speaker_voice(&app, &state, &request.meeting_id, &request.speaker_id).await?;
+    // Naming must always work, so any reason the voice can't be learned only
+    // skips the voiceprint; it's reported back instead of failing the request.
+    let (voice, voice_note) = match voice_learning_blocker() {
+        Some(reason) => (None, Some(reason)),
+        None => match collect_speaker_voice(&app, &state, &request.meeting_id, &request.speaker_id).await {
+            Ok(Some(voice)) => (Some(voice), None),
+            Ok(None) => (
+                None,
+                Some(format!(
+                    "Not enough clear speech to learn this voice ({MIN_PROFILE_SPEECH_SECONDS:.0} seconds needed)."
+                )),
+            ),
+            Err(error) => (None, Some(format!("The voice wasn't learned: {error}."))),
+        },
+    };
     let source = || SampleSource {
         meeting_id: &request.meeting_id,
         speaker_id: &request.speaker_id,
@@ -793,7 +821,7 @@ pub async fn attribute_speaker<R: Runtime>(
         .map_err(|error| error.to_string())?;
     }
 
-    Ok(AttributeSpeakerResponse { profile_id, name, outcome })
+    Ok(AttributeSpeakerResponse { profile_id, name, outcome, voice_note })
 }
 
 fn is_running_from_mounted_disk_image(executable: &std::path::Path) -> bool {

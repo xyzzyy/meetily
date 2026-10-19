@@ -345,6 +345,7 @@ export function TranscriptPanel({
         profileId: string | null;
         name: string;
         outcome: 'created' | 'added' | 'alreadyIncluded' | 'namedOnly';
+        voiceNote?: string | null;
       }>('attribute_speaker', {
         request: { meetingId, speakerId: speaker.speakerId, ...attribution },
       });
@@ -366,7 +367,7 @@ export function TranscriptPanel({
           break;
         case 'namedOnly':
           toast.success(`Labelled as ${result.name}`, {
-            description: 'Not enough clear speech to learn this voice (8 seconds needed).',
+            description: result.voiceNote ?? "This speaker's voice wasn't learned.",
           });
           break;
       }
@@ -412,7 +413,15 @@ export function TranscriptPanel({
               </p>
             </div>
             {refinementActive ? (
-              <Button size="sm" variant="ghost" onClick={() => void invoke('cancel_final_diarization')}>
+              <Button
+                size="sm"
+                variant="ghost"
+                onClick={() => {
+                  invoke('cancel_final_diarization').catch(error => {
+                    toast.error('Could not cancel speaker processing', { description: String(error) });
+                  });
+                }}
+              >
                 Cancel
               </Button>
             ) : ['fallback_to_live', 'needs_review', 'failed', 'cancelled'].includes(diarizationStatus.currentStatus) ? (
