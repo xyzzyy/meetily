@@ -86,6 +86,8 @@ On Windows, use `dev-gpu.bat` / `build-gpu.bat` instead. The `.ps1` versions alw
 
 These scripts pick a GPU backend for your hardware. They also build the `llama-helper` sidecar that runs the built-in summary model and copy it into `src-tauri/binaries/`. Running `pnpm run tauri:build` on its own skips that step, so on a fresh clone the bundle fails because the sidecar binary is missing. Run one of the GPU scripts at least once first.
 
+> **AMD ROCm or OpenBLAS-only systems:** auto-detection picks `hipblas` or `openblas`, but the sidecar only supports `metal`, `cuda`, and `vulkan`, so its build fails. To work around this, set the backend yourself: `TAURI_GPU_FEATURE=vulkan ./build-gpu.sh` (needs the Vulkan SDK) or `TAURI_GPU_FEATURE=none ./build-gpu.sh` (CPU only). The same works with `dev-gpu.sh`, and with `set TAURI_GPU_FEATURE=...` before the `.bat` scripts.
+
 The repository root is a Cargo workspace, so the finished bundle is written to `target/release/bundle/` at the **repository root**, not under `frontend/`.
 
 For detailed platform instructions, see [docs/BUILDING.md](docs/BUILDING.md).
@@ -157,7 +159,7 @@ For more detail, see [docs/architecture.md](docs/architecture.md).
 
 ## Where data lives
 
-Meetily Branch keeps meetings, recordings, and models in the app-data directory for its own identifier:
+Meetily Branch keeps its meeting database, settings, and models in the app-data directory for its own identifier:
 
 | Platform | Location |
 |---|---|
@@ -167,7 +169,15 @@ Meetily Branch keeps meetings, recordings, and models in the app-data directory 
 
 Models go in the `models/` subfolder. If official Meetily is installed, its `com.meetily.ai/models/` folder is used only as a read-only fallback.
 
-One exception: notification settings are written to `meetily/notifications.json` in the OS config directory (`~/Library/Application Support/meetily/` on macOS, `%APPDATA%\meetily\` on Windows, `~/.config/meetily/` on Linux). Official Meetily uses the same file, so if both apps are installed they share notification settings.
+By default, audio recordings are saved outside app-data in a `meetily-branch-recordings` folder. Official Meetily uses `meetily-recordings`, so the two apps keep separate recordings. You can change the location in the app's recording settings.
+
+| Platform | Default recordings folder |
+|---|---|
+| macOS | `~/Movies/meetily-branch-recordings/` |
+| Windows | `%USERPROFILE%\Music\meetily-branch-recordings\` |
+| Linux | `~/Documents/meetily-branch-recordings/` |
+
+Notification settings are the one exception: they are written to `meetily/notifications.json` in the OS config directory (`~/Library/Application Support/meetily/` on macOS, `%APPDATA%\meetily\` on Windows, `~/.config/meetily/` on Linux). Official Meetily uses the same file, so if both apps are installed they share notification settings.
 
 ## Documentation
 
