@@ -1,6 +1,6 @@
 // Commit name to recover the serial whisper engine processing for smaller meetings [Slower processing but dooes not fail] - "before parallel processing implementation"
 
-use std::path::{PathBuf};
+use std::path::{Path, PathBuf};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
@@ -67,6 +67,10 @@ const CANCEL_DOWNLOAD_CLEANUP_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub struct WhisperEngine {
     models_dir: PathBuf,
+    /// Optional read-only root of the official Meetily model directory. It is
+    /// only consulted when a model is missing from `models_dir`, so that the
+    /// branch build can reuse already downloaded models.
+    shared_models_dir: Option<PathBuf>,
     current_context: Arc<RwLock<Option<WhisperContext>>>,
     current_model: Arc<RwLock<Option<String>>>,
     available_models: Arc<RwLock<HashMap<String, ModelInfo>>>,
@@ -115,6 +119,15 @@ impl WhisperEngine {
     /// Create a new WhisperEngine with optional custom models directory
     /// If models_dir is None, uses default location (app data dir for production, local for dev)
     pub fn new_with_models_dir(models_dir: Option<PathBuf>) -> Result<Self> {
+        Self::new_with_model_roots(models_dir, None)
+    }
+
+    /// Create a new WhisperEngine with a branch-owned models directory and an
+    /// optional read-only shared models directory used as a lookup fallback.
+    pub fn new_with_model_roots(
+        models_dir: Option<PathBuf>,
+        shared_models_dir: Option<PathBuf>,
+    ) -> Result<Self> {
         // PERFORMANCE: Suppress verbose whisper.cpp and Metal logs
         // These C library logs bypass Rust logging and clutter output
         // Set environment variables to reduce C library verbosity
@@ -183,6 +196,7 @@ impl WhisperEngine {
         
         let engine = Self {
             models_dir,
+            shared_models_dir,
             current_context: Arc::new(RwLock::new(None)),
             current_model: Arc::new(RwLock::new(None)),
             available_models: Arc::new(RwLock::new(HashMap::new())),
@@ -207,14 +221,23 @@ impl WhisperEngine {
             .clone()
     }
     
+    /// Resolve a model file for reading. Branch-owned storage wins; the shared
+    /// official directory is only used when the model is missing locally.
+    fn resolve_model_path(&self, relative_path: &str) -> PathBuf {
+        crate::model_storage::resolve_model_path_for_read(
+            &self.models_dir,
+            self.shared_models_dir.as_deref(),
+            Path::new(relative_path),
+        )
+    }
+
     pub async fn discover_models(&self) -> Result<Vec<ModelInfo>> {
-        let models_dir = &self.models_dir;
         let mut models = Vec::new();
         // Use centralized model catalog from config.rs
         let model_configs = WHISPER_MODEL_CATALOG;
 
         for &(name, filename, size_mb, accuracy, speed, description) in model_configs {
-            let model_path = models_dir.join(filename);
+            let model_path = self.resolve_model_path(filename);
             let status = if model_path.exists() {
                 // Check if file size is reasonable (at least 1MB for a valid model)
                 match std::fs::metadata(&model_path) {
@@ -874,6 +897,14 @@ impl WhisperEngine {
         };
 
         let model_info = model_info.ok_or_else(|| anyhow!("Model '{}' not found", model_name))?;
+
+        // The shared official model directory is read-only for this build.
+        if !model_info.path.starts_with(&self.models_dir) {
+            return Err(anyhow!(
+                "Model '{}' lives in the shared Meetily model directory and cannot be deleted from Meetily Branch",
+                model_name
+            ));
+        }
 
         // Check if model is corrupted before allowing deletion
         log::info!("Model '{}' has status: {:?}", model_name, model_info.status);

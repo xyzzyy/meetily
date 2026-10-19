@@ -10,13 +10,19 @@ pub static PARAKEET_ENGINE: Mutex<Option<Arc<ParakeetEngine>>> = Mutex::new(None
 // Global models directory path (set during app initialization)
 static MODELS_DIR: Mutex<Option<PathBuf>> = Mutex::new(None);
 
+// Read-only fallback directory of the official Meetily model directory
+static SHARED_MODELS_DIR: Mutex<Option<PathBuf>> = Mutex::new(None);
+
 /// Initialize the models directory path using app_data_dir
 /// This should be called during app setup before parakeet_init
 pub fn set_models_directory<R: Runtime>(app: &AppHandle<R>) {
-    let app_data_dir = app.path().app_data_dir()
-        .expect("Failed to get app data dir");
-
-    let models_dir = app_data_dir.join("models");
+    let models_dir = match crate::model_storage::owned_models_root(app) {
+        Ok(dir) => dir,
+        Err(error) => {
+            log::error!("Failed to resolve branch models directory: {}", error);
+            return;
+        }
+    };
 
     // Create directory if it doesn't exist
     if !models_dir.exists() {
@@ -26,15 +32,38 @@ pub fn set_models_directory<R: Runtime>(app: &AppHandle<R>) {
         }
     }
 
+    let shared_models_dir = match crate::model_storage::official_models_root(app) {
+        Ok(shared) => shared,
+        Err(error) => {
+            log::warn!("Shared models directory unavailable: {}", error);
+            None
+        }
+    };
+
     log::info!("Parakeet models directory set to: {}", models_dir.display());
+    if let Some(shared) = shared_models_dir.as_ref() {
+        log::info!(
+            "Parakeet shared models directory (read-only): {}",
+            shared.display()
+        );
+    }
 
     let mut guard = MODELS_DIR.lock().unwrap();
     *guard = Some(models_dir);
+
+    let mut shared_guard = SHARED_MODELS_DIR.lock().unwrap();
+    *shared_guard = shared_models_dir;
 }
 
 /// Get the configured models directory
 fn get_models_directory() -> Option<PathBuf> {
     MODELS_DIR.lock().unwrap().clone()
+}
+
+/// Get the read-only shared models directory, if the official installation
+/// exposes one.
+fn get_shared_models_directory() -> Option<PathBuf> {
+    SHARED_MODELS_DIR.lock().unwrap().clone()
 }
 
 #[command]
@@ -45,7 +74,7 @@ pub async fn parakeet_init() -> Result<(), String> {
     }
 
     let models_dir = get_models_directory();
-    let engine = ParakeetEngine::new_with_models_dir(models_dir)
+    let engine = ParakeetEngine::new_with_model_roots(models_dir, get_shared_models_directory())
         .map_err(|e| format!("Failed to initialize Parakeet engine: {}", e))?;
     *guard = Some(Arc::new(engine));
     Ok(())

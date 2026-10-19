@@ -262,6 +262,11 @@ impl From<std::io::Error> for ParakeetEngineError {
 
 pub struct ParakeetEngine {
     models_dir: PathBuf,
+    /// Optional read-only root of the official Meetily Parakeet model
+    /// directory. It is only consulted when a model is missing from
+    /// `models_dir`, so that the branch build can reuse already downloaded
+    /// models.
+    shared_models_dir: Option<PathBuf>,
     current_model: Arc<RwLock<Option<ParakeetModel>>>,
     current_model_name: Arc<RwLock<Option<String>>>,
     model_lifecycle_lock: Mutex<()>,
@@ -276,6 +281,15 @@ pub struct ParakeetEngine {
 impl ParakeetEngine {
     /// Create a new Parakeet engine with optional custom models directory
     pub fn new_with_models_dir(models_dir: Option<PathBuf>) -> Result<Self> {
+        Self::new_with_model_roots(models_dir, None)
+    }
+
+    /// Create a new Parakeet engine with a branch-owned models directory and an
+    /// optional read-only shared models directory used as a lookup fallback.
+    pub fn new_with_model_roots(
+        models_dir: Option<PathBuf>,
+        shared_models_dir: Option<PathBuf>,
+    ) -> Result<Self> {
         let models_dir = if let Some(dir) = models_dir {
             dir.join("parakeet") // Parakeet models in subdirectory
         } else {
@@ -297,7 +311,15 @@ impl ParakeetEngine {
             }
         };
 
+        let shared_models_dir = shared_models_dir.map(|dir| dir.join("parakeet"));
+
         log::info!("ParakeetEngine using models directory: {}", models_dir.display());
+        if let Some(shared) = shared_models_dir.as_ref() {
+            log::info!(
+                "ParakeetEngine using shared models directory (read-only): {}",
+                shared.display()
+            );
+        }
 
         // Create directory if it doesn't exist
         if !models_dir.exists() {
@@ -306,6 +328,7 @@ impl ParakeetEngine {
 
         Ok(Self {
             models_dir,
+            shared_models_dir,
             current_model: Arc::new(RwLock::new(None)),
             current_model_name: Arc::new(RwLock::new(None)),
             model_lifecycle_lock: Mutex::new(()),
@@ -328,6 +351,17 @@ impl ParakeetEngine {
         self.model_lifecycle_test_hook.lock().await.clone()
     }
 
+    /// Resolve a model directory for reading. Branch-owned storage wins; the
+    /// shared official directory is only used when the model is missing
+    /// locally.
+    fn resolve_model_path(&self, relative_path: &str) -> PathBuf {
+        crate::model_storage::resolve_model_path_for_read(
+            &self.models_dir,
+            self.shared_models_dir.as_deref(),
+            Path::new(relative_path),
+        )
+    }
+
     /// Discover available Parakeet models.
     pub async fn discover_models(&self) -> Result<Vec<ModelInfo>> {
         self.discover_models_from_specs(PARAKEET_MODEL_SPECS).await
@@ -340,7 +374,7 @@ impl ParakeetEngine {
             let mut validation_errors = Vec::new();
 
             for spec in specs {
-                let model_path = self.models_dir.join(spec.name);
+                let model_path = self.resolve_model_path(spec.name);
                 let status = if model_path.exists() {
                     match Self::validate_model_directory(&model_path, spec.artifacts) {
                         Ok(()) => ModelStatus::Available,
@@ -580,6 +614,14 @@ impl ParakeetEngine {
 
         let model_info = model_info.ok_or_else(|| anyhow!("Parakeet model '{}' not found", model_name))?;
 
+        // The shared official model directory is read-only for this build.
+        if !model_info.path.starts_with(&self.models_dir) {
+            return Err(anyhow!(
+                "Parakeet model '{}' lives in the shared Meetily model directory and cannot be deleted from Meetily Branch",
+                model_name
+            ));
+        }
+
         log::info!("Parakeet model '{}' has status: {:?}", model_name, model_info.status);
 
         // Allow deletion of corrupted or available models
@@ -633,19 +675,22 @@ impl ParakeetEngine {
         model_name: &str,
         progress_callback: Option<Box<dyn Fn(DownloadProgress) + Send>>,
     ) -> Result<()> {
-        let model_info = self
-            .available_models
-            .read()
-            .await
-            .get(model_name)
-            .cloned()
-            .ok_or_else(|| anyhow!("Model {} not found", model_name))?;
+        {
+            let models = self.available_models.read().await;
+            if !models.contains_key(model_name) {
+                return Err(anyhow!("Model {} not found", model_name));
+            }
+        }
         let spec = find_model_spec(model_name)
             .ok_or_else(|| anyhow!("Unsupported Parakeet model: {}", model_name))?;
 
+        // Downloads always target branch-owned storage, even when the model was
+        // discovered in the shared official directory.
+        let model_dir = self.models_dir.join(spec.name);
+
         self.download_model_detailed_from_source(
             model_name,
-            &model_info.path,
+            &model_dir,
             spec.source_base_url,
             spec.artifacts,
             progress_callback,

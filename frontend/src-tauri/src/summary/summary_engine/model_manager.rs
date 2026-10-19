@@ -2,7 +2,7 @@
 // Follows the same pattern as whisper_engine/whisper_engine.rs for consistency
 
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
@@ -111,6 +111,12 @@ pub struct ModelManager {
     /// Directory where models are stored
     models_dir: PathBuf,
 
+    /// Optional read-only root of the official Meetily summary model
+    /// directory. It is only consulted when a model is missing from
+    /// `models_dir`, so that the branch build can reuse already downloaded
+    /// models.
+    shared_models_dir: Option<PathBuf>,
+
     /// Currently available models with their status
     available_models: Arc<RwLock<HashMap<String, ModelInfo>>>,
 
@@ -129,6 +135,15 @@ impl ModelManager {
 
     /// Create a new model manager with custom models directory
     pub fn new_with_models_dir(models_dir: Option<PathBuf>) -> Result<Self> {
+        Self::new_with_model_roots(models_dir, None)
+    }
+
+    /// Create a new model manager with a branch-owned models directory and an
+    /// optional read-only shared models directory used as a lookup fallback.
+    pub fn new_with_model_roots(
+        models_dir: Option<PathBuf>,
+        shared_models_dir: Option<PathBuf>,
+    ) -> Result<Self> {
         let models_dir = if let Some(dir) = models_dir {
             dir
         } else {
@@ -155,9 +170,16 @@ impl ModelManager {
             "Built-in AI ModelManager using directory: {}",
             models_dir.display()
         );
+        if let Some(shared) = shared_models_dir.as_ref() {
+            log::info!(
+                "Built-in AI ModelManager using shared directory (read-only): {}",
+                shared.display()
+            );
+        }
 
         Ok(Self {
             models_dir,
+            shared_models_dir,
             available_models: Arc::new(RwLock::new(HashMap::new())),
             active_downloads: Arc::new(RwLock::new(HashSet::new())),
             cancel_download_flag: Arc::new(RwLock::new(None)),
@@ -178,6 +200,16 @@ impl ModelManager {
         Ok(())
     }
 
+    /// Resolve a model file for reading. Branch-owned storage wins; the shared
+    /// official directory is only used when the model is missing locally.
+    fn resolve_model_path(&self, relative_path: &str) -> PathBuf {
+        crate::model_storage::resolve_model_path_for_read(
+            &self.models_dir,
+            self.shared_models_dir.as_deref(),
+            Path::new(relative_path),
+        )
+    }
+
     /// Scan models directory and update status
     pub async fn scan_models(&self) -> Result<()> {
         let start = std::time::Instant::now();
@@ -191,7 +223,7 @@ impl ModelManager {
         let mut models_map = HashMap::new();
 
         for model_def in model_defs {
-            let model_path = self.models_dir.join(&model_def.gguf_file);
+            let model_path = self.resolve_model_path(&model_def.gguf_file);
             log::debug!(
                 "Checking model '{}' at path: {}",
                 model_def.name,
@@ -825,6 +857,14 @@ impl ModelManager {
 
         let model_def = get_model_by_name(model_name)
             .ok_or_else(|| anyhow!("Unknown model: {}", model_name))?;
+
+        // The shared official model directory is read-only for this build.
+        if !self.resolve_model_path(&model_def.gguf_file).starts_with(&self.models_dir) {
+            return Err(anyhow!(
+                "Model '{}' lives in the shared Meetily model directory and cannot be deleted from Meetily Branch",
+                model_name
+            ));
+        }
 
         let file_path = self.models_dir.join(&model_def.gguf_file);
 

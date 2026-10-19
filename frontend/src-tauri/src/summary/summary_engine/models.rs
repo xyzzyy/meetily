@@ -3,7 +3,10 @@
 
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+
+/// Sub-directory of the models root that stores the built-in AI models
+const SUMMARY_MODELS_SUBDIR: &str = "summary";
 
 // ============================================================================
 // Model Definitions
@@ -231,20 +234,33 @@ pub fn get_default_model() -> ModelDef {
         .expect("At least one model must be defined")
 }
 
-/// Resolve model name to full file path in the models directory
+/// Resolve model name to full file path in the models directory.
+///
+/// Branch-owned storage wins. When the model is missing there, the official
+/// shared Meetily model directory is used as a read-only fallback so that
+/// already downloaded models can be reused.
 pub fn get_model_path(app_data_dir: &PathBuf, model_name: &str) -> Result<PathBuf> {
     let model = get_model_by_name(model_name)
         .ok_or_else(|| anyhow!("Unknown model: {}", model_name))?;
 
-    let models_dir = get_models_directory(app_data_dir);
-    let model_path = models_dir.join(&model.gguf_file);
+    let models_root = get_models_root(app_data_dir);
+    let shared_root = crate::model_storage::official_models_root_for_app_data(app_data_dir);
 
-    Ok(model_path)
+    Ok(crate::model_storage::resolve_model_path_for_read(
+        &models_root,
+        shared_root.as_deref(),
+        &Path::new(SUMMARY_MODELS_SUBDIR).join(&model.gguf_file),
+    ))
 }
 
 /// Get the models directory path for built-in AI
 pub fn get_models_directory(app_data_dir: &PathBuf) -> PathBuf {
-    app_data_dir.join("models").join("summary")
+    get_models_root(app_data_dir).join(SUMMARY_MODELS_SUBDIR)
+}
+
+/// Get the root directory that holds every model of this app
+fn get_models_root(app_data_dir: &PathBuf) -> PathBuf {
+    app_data_dir.join("models")
 }
 
 // ============================================================================
