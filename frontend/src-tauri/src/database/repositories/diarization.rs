@@ -4,6 +4,16 @@ use sqlx::{Sqlite, SqlitePool};
 
 pub struct DiarizationRepository;
 
+/// Transcript windows loaded from the core database for this meeting.
+/// Callers must not accept these values from an unverified client request.
+#[derive(Debug, Clone)]
+pub struct TranscriptCorrectionWindow {
+    pub transcript_id: String,
+    pub audio_start_time: Option<f64>,
+    pub audio_end_time: Option<f64>,
+    pub speaker_source: Option<String>,
+}
+
 #[derive(Debug, Clone, sqlx::FromRow, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MeetingSpeaker {
@@ -11,6 +21,25 @@ pub struct MeetingSpeaker {
     pub speaker_label: String,
     pub speaker_color: Option<String>,
     pub segment_count: i64,
+}
+
+#[derive(Debug, Clone, sqlx::FromRow, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TranscriptSpeakerMetadata {
+    pub transcript_id: String,
+    pub meeting_id: String,
+    pub audio_start_time: Option<f64>,
+    pub audio_end_time: Option<f64>,
+    pub speaker_id: Option<String>,
+    pub speaker_label: Option<String>,
+    pub speaker_profile_id: Option<String>,
+    pub speaker_source: Option<String>,
+    pub speaker_color: Option<String>,
+    pub is_overlap: i64,
+    pub candidate_speaker_ids: Option<String>,
+    pub diarization_status: String,
+    pub diarization_method: Option<String>,
+    pub diarization_confidence: Option<f64>,
 }
 
 impl DiarizationRepository {
@@ -74,6 +103,9 @@ impl DiarizationRepository {
     pub async fn update_transcript_assignment<'e, E>(
         executor: E,
         transcript_id: &str,
+        meeting_id: &str,
+        audio_start_time: Option<f64>,
+        audio_end_time: Option<f64>,
         assignment: &crate::diarization::types::SpeakerAssignment,
     ) -> Result<(), sqlx::Error>
     where
@@ -83,19 +115,34 @@ impl DiarizationRepository {
             diarization_status_to_database_value(assignment.diarization_status);
 
         sqlx::query(
-            "UPDATE transcripts SET
-                speaker_id = ?,
-                speaker_label = ?,
-                speaker_profile_id = ?,
-                speaker_source = ?,
-                speaker_color = ?,
-                is_overlap = ?,
-                candidate_speaker_ids = ?,
-                diarization_status = ?,
-                diarization_method = ?,
-                diarization_confidence = ?
-             WHERE id = ?",
+            "INSERT INTO transcript_speakers (
+                transcript_id, meeting_id, audio_start_time, audio_end_time,
+                speaker_id, speaker_label, speaker_profile_id, speaker_source,
+                speaker_color, is_overlap, candidate_speaker_ids,
+                diarization_status, diarization_method, diarization_confidence,
+                published, updated_at
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, CURRENT_TIMESTAMP)
+             ON CONFLICT(transcript_id) DO UPDATE SET
+                meeting_id = excluded.meeting_id,
+                audio_start_time = excluded.audio_start_time,
+                audio_end_time = excluded.audio_end_time,
+                speaker_id = excluded.speaker_id,
+                speaker_label = excluded.speaker_label,
+                speaker_profile_id = excluded.speaker_profile_id,
+                speaker_source = excluded.speaker_source,
+                speaker_color = excluded.speaker_color,
+                is_overlap = excluded.is_overlap,
+                candidate_speaker_ids = excluded.candidate_speaker_ids,
+                diarization_status = excluded.diarization_status,
+                diarization_method = excluded.diarization_method,
+                diarization_confidence = excluded.diarization_confidence,
+                published = 1,
+                updated_at = CURRENT_TIMESTAMP",
         )
+        .bind(transcript_id)
+        .bind(meeting_id)
+        .bind(audio_start_time)
+        .bind(audio_end_time)
         .bind(&assignment.speaker_id)
         .bind(&assignment.speaker_label)
         .bind(&assignment.speaker_profile_id)
@@ -106,7 +153,6 @@ impl DiarizationRepository {
         .bind(diarization_status)
         .bind(&assignment.diarization_method)
         .bind(assignment.diarization_confidence)
-        .bind(transcript_id)
         .execute(executor)
         .await?;
 
@@ -123,8 +169,9 @@ impl DiarizationRepository {
                 COALESCE(NULLIF(TRIM(MAX(speaker_label)), ''), speaker_id) AS speaker_label,
                 MAX(speaker_color) AS speaker_color,
                 COUNT(*) AS segment_count
-             FROM transcripts
+             FROM transcript_speakers
              WHERE meeting_id = ?
+                AND published = 1
                 AND speaker_id IS NOT NULL
                 AND TRIM(speaker_id) <> ''
              GROUP BY speaker_id
@@ -144,8 +191,9 @@ impl DiarizationRepository {
         let mut transaction = pool.begin().await?;
 
         let transcript_result = sqlx::query(
-            "UPDATE transcripts
-             SET speaker_label = ?
+            "UPDATE transcript_speakers
+             SET speaker_label = ?, diarization_method = 'manual',
+                 updated_at = CURRENT_TIMESTAMP
              WHERE meeting_id = ? AND speaker_id = ?",
         )
         .bind(speaker_label)
@@ -156,7 +204,7 @@ impl DiarizationRepository {
 
         let segment_result = sqlx::query(
             "UPDATE speaker_segments
-             SET speaker_label = ?
+             SET speaker_label = ?, diarization_method = 'manual'
              WHERE meeting_id = ? AND speaker_id = ?",
         )
         .bind(speaker_label)
@@ -187,18 +235,29 @@ impl DiarizationRepository {
         target_label: &str,
     ) -> Result<u64, sqlx::Error> {
         let mut transaction = pool.begin().await?;
+        let target_color: Option<String> = sqlx::query_scalar(
+            "SELECT MAX(speaker_color) FROM transcript_speakers
+             WHERE meeting_id = ? AND speaker_id = ? AND published = 1",
+        )
+        .bind(meeting_id)
+        .bind(target_speaker_id)
+        .fetch_one(&mut *transaction)
+        .await?;
         let mut updated = 0;
         for source_id in source_speaker_ids {
             if source_id == target_speaker_id {
                 continue;
             }
             updated += sqlx::query(
-                "UPDATE transcripts SET
-                    speaker_id = ?, speaker_label = ?, diarization_method = 'manual'
+                "UPDATE transcript_speakers SET
+                    speaker_id = ?, speaker_label = ?, speaker_profile_id = NULL,
+                    speaker_color = ?, diarization_method = 'manual',
+                    updated_at = CURRENT_TIMESTAMP
                  WHERE meeting_id = ? AND speaker_id = ?",
             )
             .bind(target_speaker_id)
             .bind(target_label)
+            .bind(&target_color)
             .bind(meeting_id)
             .bind(source_id)
             .execute(&mut *transaction)
@@ -224,40 +283,119 @@ impl DiarizationRepository {
     pub async fn reassign_transcripts(
         pool: &SqlitePool,
         meeting_id: &str,
-        transcript_ids: &[String],
+        transcript_windows: &[TranscriptCorrectionWindow],
         speaker_id: Option<&str>,
         speaker_label: Option<&str>,
         is_overlap: bool,
         candidate_speaker_ids: &[String],
     ) -> Result<u64, sqlx::Error> {
         let mut transaction = pool.begin().await?;
-        let candidates =
-            serde_json::to_string(candidate_speaker_ids).unwrap_or_else(|_| "[]".to_string());
+        let assigned_id = if is_overlap { None } else { speaker_id };
+        let target_color: Option<String> = sqlx::query_scalar(
+            "SELECT MAX(speaker_color) FROM transcript_speakers
+             WHERE meeting_id = ? AND speaker_id = ? AND published = 1",
+        )
+        .bind(meeting_id)
+        .bind(assigned_id)
+        .fetch_one(&mut *transaction)
+        .await?;
+        let candidates = serde_json::to_string(if is_overlap {
+            candidate_speaker_ids
+        } else {
+            &[]
+        })
+        .unwrap_or_else(|_| "[]".to_string());
         let mut updated = 0;
-        for transcript_id in transcript_ids {
+        for window in transcript_windows {
+            // Corrections are the source of truth for voice enrollment. The original
+            // speaker_segments remain analysis output and must not supply training audio.
             updated += sqlx::query(
-                "UPDATE transcripts SET
-                    speaker_id = ?, speaker_label = ?, is_overlap = ?,
-                    candidate_speaker_ids = ?, diarization_status = 'final',
-                    diarization_method = 'manual', diarization_confidence = 1.0
-                 WHERE meeting_id = ? AND id = ?",
+                "INSERT INTO transcript_speakers (
+                    transcript_id, meeting_id, audio_start_time, audio_end_time,
+                    speaker_id, speaker_label, speaker_profile_id, speaker_source,
+                    speaker_color, is_overlap, candidate_speaker_ids,
+                    diarization_status, diarization_method, diarization_confidence,
+                    published, updated_at
+                 ) VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, 'final', 'manual', 1.0,
+                           1, CURRENT_TIMESTAMP)
+                 ON CONFLICT(transcript_id) DO UPDATE SET
+                    audio_start_time = excluded.audio_start_time,
+                    audio_end_time = excluded.audio_end_time,
+                    speaker_id = excluded.speaker_id,
+                    speaker_label = excluded.speaker_label,
+                    speaker_profile_id = NULL,
+                    speaker_source = COALESCE(excluded.speaker_source,
+                                              transcript_speakers.speaker_source),
+                    speaker_color = excluded.speaker_color,
+                    is_overlap = excluded.is_overlap,
+                    candidate_speaker_ids = excluded.candidate_speaker_ids,
+                    diarization_status = 'final', diarization_method = 'manual',
+                    diarization_confidence = 1.0, published = 1,
+                    updated_at = CURRENT_TIMESTAMP
+                 WHERE transcript_speakers.meeting_id = excluded.meeting_id",
             )
-            .bind(speaker_id)
+            .bind(&window.transcript_id)
+            .bind(meeting_id)
+            .bind(window.audio_start_time)
+            .bind(window.audio_end_time)
+            .bind(assigned_id)
             .bind(if is_overlap {
                 Some("Multiple speakers")
             } else {
                 speaker_label
             })
+            .bind(&window.speaker_source)
+            .bind(&target_color)
             .bind(is_overlap as i64)
             .bind(&candidates)
-            .bind(meeting_id)
-            .bind(transcript_id)
             .execute(&mut *transaction)
             .await?
             .rows_affected();
         }
         transaction.commit().await?;
         Ok(updated)
+    }
+
+    pub async fn get_transcript_metadata(
+        pool: &SqlitePool,
+        transcript_ids: &[String],
+    ) -> Result<Vec<TranscriptSpeakerMetadata>, sqlx::Error> {
+        if transcript_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut builder = sqlx::QueryBuilder::<Sqlite>::new(
+            "SELECT transcript_id, meeting_id, audio_start_time, audio_end_time, \
+             speaker_id, speaker_label, speaker_profile_id, speaker_source, \
+             speaker_color, is_overlap, candidate_speaker_ids, diarization_status, \
+             diarization_method, diarization_confidence FROM transcript_speakers \
+             WHERE published = 1 AND transcript_id IN (",
+        );
+        let mut separated = builder.separated(", ");
+        for id in transcript_ids {
+            separated.push_bind(id);
+        }
+        separated.push_unseparated(")");
+        builder.build_query_as().fetch_all(pool).await
+    }
+
+    pub async fn delete_meeting_data(
+        pool: &SqlitePool,
+        meeting_id: &str,
+    ) -> Result<(), sqlx::Error> {
+        let mut transaction = pool.begin().await?;
+        for table in [
+            "transcript_speakers",
+            "speaker_segments",
+            "meeting_diarization_status",
+            "diarization_runs",
+        ] {
+            let query = format!("DELETE FROM {table} WHERE meeting_id = ?");
+            sqlx::query(&query)
+                .bind(meeting_id)
+                .execute(&mut *transaction)
+                .await?;
+        }
+        transaction.commit().await
     }
 }
 
@@ -284,8 +422,11 @@ mod tests {
             .expect("test pool should connect");
 
         sqlx::query(
-            "CREATE TABLE transcripts (
-                id TEXT PRIMARY KEY,
+            "CREATE TABLE transcript_speakers (
+                transcript_id TEXT PRIMARY KEY,
+                meeting_id TEXT NOT NULL,
+                audio_start_time REAL,
+                audio_end_time REAL,
                 speaker_id TEXT,
                 speaker_label TEXT,
                 speaker_profile_id TEXT,
@@ -295,41 +436,20 @@ mod tests {
                 candidate_speaker_ids TEXT,
                 diarization_status TEXT NOT NULL DEFAULT 'none',
                 diarization_method TEXT,
-                diarization_confidence REAL
+                diarization_confidence REAL,
+                published INTEGER NOT NULL DEFAULT 1,
+                updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
             )",
         )
         .execute(&pool)
         .await
         .expect("transcripts table should be created");
-
-        sqlx::query("INSERT INTO transcripts (id) VALUES ('transcript-1')")
-            .execute(&pool)
-            .await
-            .expect("transcript row should be inserted");
 
         pool
     }
 
     async fn speaker_test_pool() -> SqlitePool {
-        let pool = SqlitePoolOptions::new()
-            .max_connections(1)
-            .connect("sqlite::memory:")
-            .await
-            .expect("test pool should connect");
-
-        sqlx::query(
-            "CREATE TABLE transcripts (
-                id TEXT PRIMARY KEY,
-                meeting_id TEXT NOT NULL,
-                speaker_id TEXT,
-                speaker_label TEXT,
-                speaker_color TEXT,
-                audio_start_time REAL
-            )",
-        )
-        .execute(&pool)
-        .await
-        .expect("transcripts table should be created");
+        let pool = transcript_test_pool().await;
 
         sqlx::query(
             "CREATE TABLE speaker_segments (
@@ -402,8 +522,8 @@ mod tests {
             ("t-5", "meeting-1", None, None, None, 4.0),
         ] {
             sqlx::query(
-                "INSERT INTO transcripts (
-                    id, meeting_id, speaker_id, speaker_label, speaker_color, audio_start_time
+                "INSERT INTO transcript_speakers (
+                    transcript_id, meeting_id, speaker_id, speaker_label, speaker_color, audio_start_time
                  )
                  VALUES (?, ?, ?, ?, ?, ?)",
             )
@@ -464,9 +584,16 @@ mod tests {
             diarization_confidence: Some(0.82),
         };
 
-        DiarizationRepository::update_transcript_assignment(&pool, "transcript-1", &assignment)
-            .await
-            .expect("assignment should be persisted");
+        DiarizationRepository::update_transcript_assignment(
+            &pool,
+            "transcript-1",
+            "meeting-1",
+            Some(1.0),
+            Some(2.0),
+            &assignment,
+        )
+        .await
+        .expect("assignment should be persisted");
 
         let row: (
             Option<String>,
@@ -485,7 +612,7 @@ mod tests {
                 diarization_status,
                 diarization_method,
                 diarization_confidence
-             FROM transcripts WHERE id = 'transcript-1'",
+             FROM transcript_speakers WHERE transcript_id = 'transcript-1'",
         )
         .fetch_one(&pool)
         .await
@@ -530,9 +657,9 @@ mod tests {
         assert_eq!(updated_count, 4);
 
         let meeting_one_labels: Vec<String> = sqlx::query_scalar(
-            "SELECT speaker_label FROM transcripts
+            "SELECT speaker_label FROM transcript_speakers
              WHERE meeting_id = 'meeting-1' AND speaker_id = 'speaker-1'
-             ORDER BY id",
+             ORDER BY transcript_id",
         )
         .fetch_all(&pool)
         .await
@@ -541,7 +668,7 @@ mod tests {
         assert_eq!(meeting_one_labels, vec!["Alice", "Alice"]);
 
         let meeting_two_label: String = sqlx::query_scalar(
-            "SELECT speaker_label FROM transcripts
+            "SELECT speaker_label FROM transcript_speakers
              WHERE meeting_id = 'meeting-2' AND speaker_id = 'speaker-1'",
         )
         .fetch_one(&pool)
@@ -560,5 +687,200 @@ mod tests {
         .expect("speaker segment labels should be fetched");
 
         assert_eq!(segment_labels, vec!["Alice", "Alice"]);
+    }
+
+    fn correction_window(id: &str, start: f64, end: f64) -> TranscriptCorrectionWindow {
+        TranscriptCorrectionWindow {
+            transcript_id: id.to_string(),
+            audio_start_time: Some(start),
+            audio_end_time: Some(end),
+            speaker_source: Some("mixed".to_string()),
+        }
+    }
+
+    #[tokio::test]
+    async fn reassign_transcripts_adds_missing_metadata_and_preserves_other_rows() {
+        let pool = speaker_test_pool().await;
+        let untouched_before =
+            DiarizationRepository::get_transcript_metadata(&pool, &["t-1".to_string()])
+                .await
+                .unwrap();
+
+        let updated = DiarizationRepository::reassign_transcripts(
+            &pool,
+            "meeting-1",
+            &[correction_window("missing-metadata", 10.0, 15.0)],
+            Some("speaker-2"),
+            Some("Bob"),
+            false,
+            &["speaker-1".to_string()],
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(updated, 1);
+        let rows = DiarizationRepository::get_transcript_metadata(
+            &pool,
+            &["missing-metadata".to_string()],
+        )
+        .await
+        .unwrap();
+        let row = &rows[0];
+        assert_eq!(row.meeting_id, "meeting-1");
+        assert_eq!(row.audio_start_time, Some(10.0));
+        assert_eq!(row.audio_end_time, Some(15.0));
+        assert_eq!(row.speaker_id.as_deref(), Some("speaker-2"));
+        assert_eq!(row.speaker_label.as_deref(), Some("Bob"));
+        assert_eq!(row.speaker_color.as_deref(), Some("#16a34a"));
+        assert_eq!(row.speaker_source.as_deref(), Some("mixed"));
+        assert_eq!(row.speaker_profile_id, None);
+        assert_eq!(row.diarization_method.as_deref(), Some("manual"));
+        assert_eq!(row.candidate_speaker_ids.as_deref(), Some("[]"));
+
+        let untouched_after =
+            DiarizationRepository::get_transcript_metadata(&pool, &["t-1".to_string()])
+                .await
+                .unwrap();
+        assert_eq!(
+            serde_json::to_value(untouched_before).unwrap(),
+            serde_json::to_value(untouched_after).unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn reassign_transcripts_clears_previous_profile_and_preserves_audio_source() {
+        let pool = speaker_test_pool().await;
+        sqlx::query(
+            "UPDATE transcript_speakers SET speaker_profile_id = 'alice-profile',
+                speaker_source = 'system' WHERE transcript_id = 't-1'",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let mut window = correction_window("t-1", 0.0, 1.0);
+        window.speaker_source = None;
+
+        DiarizationRepository::reassign_transcripts(
+            &pool,
+            "meeting-1",
+            &[window],
+            Some("speaker-2"),
+            Some("Bob"),
+            false,
+            &[],
+        )
+        .await
+        .unwrap();
+        let rows = DiarizationRepository::get_transcript_metadata(&pool, &["t-1".to_string()])
+            .await
+            .unwrap();
+        assert_eq!(rows[0].speaker_id.as_deref(), Some("speaker-2"));
+        assert_eq!(rows[0].speaker_profile_id, None);
+        assert_eq!(rows[0].speaker_source.as_deref(), Some("system"));
+        assert_eq!(rows[0].speaker_color.as_deref(), Some("#16a34a"));
+        let untouched_speaker: String = sqlx::query_scalar(
+            "SELECT speaker_id FROM transcript_speakers WHERE transcript_id = 't-2'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(untouched_speaker, "speaker-1");
+    }
+
+    #[tokio::test]
+    async fn overlap_correction_clears_single_speaker_fields() {
+        let pool = speaker_test_pool().await;
+        sqlx::query(
+            "UPDATE transcript_speakers SET speaker_profile_id = 'alice-profile'
+             WHERE transcript_id = 't-1'",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let candidates = vec!["speaker-1".to_string(), "speaker-2".to_string()];
+        DiarizationRepository::reassign_transcripts(
+            &pool,
+            "meeting-1",
+            &[correction_window("t-1", 0.0, 1.0)],
+            Some("speaker-1"),
+            Some("Alice"),
+            true,
+            &candidates,
+        )
+        .await
+        .unwrap();
+
+        let rows = DiarizationRepository::get_transcript_metadata(&pool, &["t-1".to_string()])
+            .await
+            .unwrap();
+        let row = &rows[0];
+        assert_eq!(row.speaker_id, None);
+        assert_eq!(row.speaker_profile_id, None);
+        assert_eq!(row.speaker_color, None);
+        assert_eq!(row.speaker_label.as_deref(), Some("Multiple speakers"));
+        assert_eq!(row.is_overlap, 1);
+        assert_eq!(
+            serde_json::from_str::<Vec<String>>(row.candidate_speaker_ids.as_ref().unwrap())
+                .unwrap(),
+            candidates
+        );
+    }
+
+    #[tokio::test]
+    async fn corrections_do_not_reassign_metadata_from_another_meeting() {
+        let pool = speaker_test_pool().await;
+        let updated = DiarizationRepository::reassign_transcripts(
+            &pool,
+            "meeting-1",
+            &[correction_window("t-4", 0.0, 1.0)],
+            Some("speaker-2"),
+            Some("Bob"),
+            false,
+            &[],
+        )
+        .await
+        .unwrap();
+        assert_eq!(updated, 0);
+        let rows = DiarizationRepository::get_transcript_metadata(&pool, &["t-4".to_string()])
+            .await
+            .unwrap();
+        assert_eq!(rows[0].meeting_id, "meeting-2");
+        assert_eq!(rows[0].speaker_id.as_deref(), Some("speaker-1"));
+    }
+
+    #[tokio::test]
+    async fn merge_clears_source_profile_and_marks_rename_as_manual() {
+        let pool = speaker_test_pool().await;
+        sqlx::query(
+            "UPDATE transcript_speakers SET speaker_profile_id = 'alice-profile'
+             WHERE meeting_id = 'meeting-1' AND speaker_id = 'speaker-1'",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        DiarizationRepository::merge_speakers(
+            &pool,
+            "meeting-1",
+            &["speaker-1".to_string()],
+            "speaker-2",
+            "Bob",
+        )
+        .await
+        .unwrap();
+        let rows = DiarizationRepository::get_transcript_metadata(&pool, &["t-1".to_string()])
+            .await
+            .unwrap();
+        assert_eq!(rows[0].speaker_profile_id, None);
+        assert_eq!(rows[0].speaker_color.as_deref(), Some("#16a34a"));
+        assert_eq!(rows[0].diarization_method.as_deref(), Some("manual"));
+
+        DiarizationRepository::rename_speaker(&pool, "meeting-1", "speaker-2", "Robert")
+            .await
+            .unwrap();
+        let rows = DiarizationRepository::get_transcript_metadata(&pool, &["t-3".to_string()])
+            .await
+            .unwrap();
+        assert_eq!(rows[0].speaker_label.as_deref(), Some("Robert"));
+        assert_eq!(rows[0].diarization_method.as_deref(), Some("manual"));
     }
 }

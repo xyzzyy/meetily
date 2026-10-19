@@ -149,6 +149,34 @@ pub struct MeetingTranscript {
     pub diarization_confidence: Option<f64>,
 }
 
+fn apply_speaker_metadata(
+    transcripts: &mut [MeetingTranscript],
+    metadata: Vec<crate::database::repositories::diarization::TranscriptSpeakerMetadata>,
+) {
+    let by_id: HashMap<_, _> = metadata
+        .into_iter()
+        .map(|item| (item.transcript_id.clone(), item))
+        .collect();
+    for transcript in transcripts {
+        let Some(item) = by_id.get(&transcript.id) else {
+            continue;
+        };
+        transcript.speaker_id = item.speaker_id.clone();
+        transcript.speaker_label = item.speaker_label.clone();
+        transcript.speaker_profile_id = item.speaker_profile_id.clone();
+        transcript.speaker_source = item.speaker_source.clone();
+        transcript.speaker_color = item.speaker_color.clone();
+        transcript.is_overlap = Some(item.is_overlap != 0);
+        transcript.candidate_speaker_ids = item
+            .candidate_speaker_ids
+            .as_ref()
+            .and_then(|value| serde_json::from_str(value).ok());
+        transcript.diarization_status = Some(item.diarization_status.clone());
+        transcript.diarization_method = item.diarization_method.clone();
+        transcript.diarization_confidence = item.diarization_confidence;
+    }
+}
+
 /// Meeting metadata without transcripts (for pagination)
 #[derive(Debug, Serialize, Deserialize)]
 pub struct MeetingMetadata {
@@ -777,6 +805,12 @@ pub async fn api_delete_meeting<R: Runtime>(
 
     match MeetingsRepository::delete_meeting(pool, &meeting_id).await {
         Ok(true) => {
+            crate::database::repositories::diarization::DiarizationRepository::delete_meeting_data(
+                state.speaker_store.pool(),
+                &meeting_id,
+            )
+            .await
+            .map_err(|error| format!("Meeting was deleted, but speaker metadata cleanup failed: {error}"))?;
             log_info!("Successfully deleted meeting {}", meeting_id);
             Ok(serde_json::json!({
                 "status": "success",
@@ -813,7 +847,19 @@ pub async fn api_get_meeting<R: Runtime>(
     let pool = state.db_manager.pool();
 
     match MeetingsRepository::get_meeting(pool, &meeting_id).await {
-        Ok(Some(meeting)) => {
+        Ok(Some(mut meeting)) => {
+            let ids = meeting
+                .transcripts
+                .iter()
+                .map(|transcript| transcript.id.clone())
+                .collect::<Vec<_>>();
+            let metadata = crate::database::repositories::diarization::DiarizationRepository::get_transcript_metadata(
+                state.speaker_store.pool(),
+                &ids,
+            )
+            .await
+            .map_err(|error| format!("Failed to retrieve speaker metadata: {error}"))?;
+            apply_speaker_metadata(&mut meeting.transcripts, metadata);
             log_info!("Successfully retrieved meeting {}", meeting_id);
             Ok(meeting)
         }
@@ -894,7 +940,7 @@ pub async fn api_get_meeting_transcripts<R: Runtime>(
             );
 
             // Convert Transcript to MeetingTranscript
-            let meeting_transcripts = transcripts
+            let mut meeting_transcripts = transcripts
                 .into_iter()
                 .map(|t| MeetingTranscript {
                     id: t.id,
@@ -903,20 +949,30 @@ pub async fn api_get_meeting_transcripts<R: Runtime>(
                     audio_start_time: t.audio_start_time,
                     audio_end_time: t.audio_end_time,
                     duration: t.duration,
-                    speaker_id: t.speaker_id,
-                    speaker_label: t.speaker_label,
-                    speaker_profile_id: t.speaker_profile_id,
-                    speaker_source: t.speaker_source,
-                    speaker_color: t.speaker_color,
-                    is_overlap: t.is_overlap.map(|value| value != 0),
-                    candidate_speaker_ids: t
-                        .candidate_speaker_ids
-                        .and_then(|value| serde_json::from_str(&value).ok()),
-                    diarization_status: t.diarization_status,
-                    diarization_method: t.diarization_method,
-                    diarization_confidence: t.diarization_confidence,
+                    speaker_id: None,
+                    speaker_label: None,
+                    speaker_profile_id: None,
+                    speaker_source: None,
+                    speaker_color: None,
+                    is_overlap: None,
+                    candidate_speaker_ids: None,
+                    diarization_status: None,
+                    diarization_method: None,
+                    diarization_confidence: None,
                 })
                 .collect::<Vec<_>>();
+
+            let ids = meeting_transcripts
+                .iter()
+                .map(|transcript| transcript.id.clone())
+                .collect::<Vec<_>>();
+            let metadata = crate::database::repositories::diarization::DiarizationRepository::get_transcript_metadata(
+                state.speaker_store.pool(),
+                &ids,
+            )
+            .await
+            .map_err(|error| format!("Failed to retrieve speaker metadata: {error}"))?;
+            apply_speaker_metadata(&mut meeting_transcripts, metadata);
 
             let has_more = (offset + meeting_transcripts.len() as i64) < total_count;
 
@@ -1026,6 +1082,23 @@ pub async fn api_save_transcript<R: Runtime>(
     .await
     {
         Ok(meeting_id) => {
+            // Speaker metadata is a feature-layer hook after the upstream core
+            // transaction commits. A feature-store error never rolls back or
+            // duplicates the successfully saved meeting.
+            if let Err(error) = persist_committed_speaker_metadata(
+                state.speaker_store.pool(),
+                pool,
+                &meeting_id,
+                &transcripts_to_save,
+            )
+            .await
+            {
+                log_error!(
+                    "Meeting {} was saved, but provisional speaker metadata was not: {}",
+                    meeting_id,
+                    error
+                );
+            }
             log_info!(
                 "Successfully saved transcript and created meeting with id: {}",
                 meeting_id
@@ -1045,6 +1118,55 @@ pub async fn api_save_transcript<R: Runtime>(
             Err(format!("Failed to save transcript: {}", e))
         }
     }
+}
+
+async fn persist_committed_speaker_metadata(
+    feature_pool: &sqlx::SqlitePool,
+    core_pool: &sqlx::SqlitePool,
+    meeting_id: &str,
+    source: &[TranscriptSegment],
+) -> Result<(), sqlx::Error> {
+    let committed: Vec<(String, Option<f64>, Option<f64>)> = sqlx::query_as(
+        "SELECT id, audio_start_time, audio_end_time FROM transcripts
+         WHERE meeting_id = ? ORDER BY rowid",
+    )
+    .bind(meeting_id)
+    .fetch_all(core_pool)
+    .await?;
+    let mut transaction = feature_pool.begin().await?;
+    for ((id, start, end), segment) in committed.into_iter().zip(source) {
+        if segment.speaker_id.is_none()
+            && segment.speaker_label.is_none()
+            && segment.diarization_status.is_none()
+        {
+            continue;
+        }
+        let status = match segment.diarization_status.as_deref() {
+            Some("provisional") => crate::diarization::types::DiarizationStatus::Provisional,
+            Some("final") => crate::diarization::types::DiarizationStatus::Final,
+            Some("fallback_to_live") => crate::diarization::types::DiarizationStatus::FallbackToLive,
+            Some("failed") => crate::diarization::types::DiarizationStatus::Failed,
+            Some("needs_review") => crate::diarization::types::DiarizationStatus::NeedsReview,
+            _ => crate::diarization::types::DiarizationStatus::None,
+        };
+        let assignment = crate::diarization::types::SpeakerAssignment {
+            speaker_id: segment.speaker_id.clone(),
+            speaker_label: segment.speaker_label.clone(),
+            speaker_profile_id: segment.speaker_profile_id.clone(),
+            speaker_source: segment.speaker_source.clone(),
+            speaker_color: segment.speaker_color.clone(),
+            is_overlap: segment.is_overlap.unwrap_or(false),
+            candidate_speaker_ids: segment.candidate_speaker_ids.clone().unwrap_or_default(),
+            diarization_status: status,
+            diarization_method: segment.diarization_method.clone(),
+            diarization_confidence: segment.diarization_confidence,
+        };
+        crate::database::repositories::diarization::DiarizationRepository::update_transcript_assignment(
+            &mut *transaction, &id, meeting_id, start, end, &assignment,
+        )
+        .await?;
+    }
+    transaction.commit().await
 }
 
 /// Opens the meeting's recording folder in the system file explorer

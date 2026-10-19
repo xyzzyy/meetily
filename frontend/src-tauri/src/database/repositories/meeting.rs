@@ -93,18 +93,16 @@ impl MeetingsRepository {
                     audio_start_time: t.audio_start_time,
                     audio_end_time: t.audio_end_time,
                     duration: t.duration,
-                    speaker_id: t.speaker_id,
-                    speaker_label: t.speaker_label,
-                    speaker_profile_id: t.speaker_profile_id,
-                    speaker_source: t.speaker_source,
-                    speaker_color: t.speaker_color,
-                    is_overlap: t.is_overlap.map(|value| value != 0),
-                    candidate_speaker_ids: t
-                        .candidate_speaker_ids
-                        .and_then(|value| serde_json::from_str(&value).ok()),
-                    diarization_status: t.diarization_status,
-                    diarization_method: t.diarization_method,
-                    diarization_confidence: t.diarization_confidence,
+                    speaker_id: None,
+                    speaker_label: None,
+                    speaker_profile_id: None,
+                    speaker_source: None,
+                    speaker_color: None,
+                    is_overlap: None,
+                    candidate_speaker_ids: None,
+                    diarization_status: None,
+                    diarization_method: None,
+                    diarization_confidence: None,
                 })
                 .collect::<Vec<_>>();
 

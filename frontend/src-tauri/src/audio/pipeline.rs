@@ -1130,16 +1130,19 @@ impl AudioPipeline {
     fn source_activity_for_interval(&self, start: f64, end: f64) -> SourceActivity {
         let mut microphone_active = false;
         let mut system_active = false;
+        let mut overlap_detected = false;
         for window in &self.source_activity {
             if window.end > start && window.start < end {
                 microphone_active |= window.microphone_active;
                 system_active |= window.system_active;
+                overlap_detected |= window.microphone_active && window.system_active;
             }
         }
         SourceActivity {
             microphone_active,
             system_active,
             system_available: self.system_available,
+            overlap_detected,
         }
     }
 }

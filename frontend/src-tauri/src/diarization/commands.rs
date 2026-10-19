@@ -7,6 +7,7 @@ use crate::{
         models::Transcript,
         repositories::diarization::{
             diarization_status_to_database_value, DiarizationRepository, MeetingSpeaker,
+            TranscriptCorrectionWindow, TranscriptSpeakerMetadata,
         },
         repositories::speaker_profile::SpeakerProfilesRepository,
     },
@@ -48,6 +49,7 @@ pub async fn get_diarization_model_status<R: Runtime>(
 
 #[tauri::command]
 pub async fn download_diarization_model<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
+    let _operation = super::operations::try_processing_slot()?;
     crate::diarization::models::download_embedding_model(&app).await?;
     super::finalize::prepare_offline_models(&app)
         .await
@@ -56,6 +58,7 @@ pub async fn download_diarization_model<R: Runtime>(app: AppHandle<R>) -> Result
 
 #[tauri::command]
 pub async fn delete_diarization_model<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
+    let _operation = super::operations::try_processing_slot()?;
     crate::diarization::models::delete_embedding_model(&app)?;
     super::finalize::delete_offline_models(&app).map_err(|error| error.to_string())
 }
@@ -110,7 +113,7 @@ pub async fn get_meeting_diarization_status(
          FROM meeting_diarization_status WHERE meeting_id = ?",
     )
     .bind(meeting_id)
-    .fetch_optional(state.db_manager.pool())
+    .fetch_optional(state.speaker_store.pool())
     .await
     .map_err(|error| error.to_string())
 }
@@ -130,7 +133,7 @@ pub struct DiarizationSettingsDto {
 pub async fn get_diarization_settings(
     state: State<'_, AppState>,
 ) -> Result<DiarizationSettingsDto, String> {
-    let settings = DiarizationRepository::get_settings(state.db_manager.pool())
+    let settings = DiarizationRepository::get_settings(state.speaker_store.pool())
         .await
         .map_err(|error| error.to_string())?;
 
@@ -146,7 +149,7 @@ pub async fn get_diarization_settings(
 
 pub(crate) async fn diarization_enabled_for_app<R: Runtime>(app: &AppHandle<R>) -> bool {
     let state = app.state::<AppState>();
-    DiarizationRepository::get_settings(state.db_manager.pool())
+    DiarizationRepository::get_settings(state.speaker_store.pool())
         .await
         .map(|settings| settings.enabled != 0)
         .unwrap_or(false)
@@ -158,7 +161,7 @@ pub async fn save_diarization_settings(
     settings: DiarizationSettingsDto,
 ) -> Result<(), String> {
     DiarizationRepository::save_settings(
-        state.db_manager.pool(),
+        state.speaker_store.pool(),
         settings.enabled,
         &settings.mode,
         settings.show_provisional_labels,
@@ -179,7 +182,20 @@ pub async fn get_meeting_speakers(
         return Err("Meeting id cannot be empty".to_string());
     }
 
-    DiarizationRepository::get_meeting_speakers(state.db_manager.pool(), &meeting_id)
+    DiarizationRepository::get_meeting_speakers(state.speaker_store.pool(), &meeting_id)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub async fn get_transcript_speaker_metadata(
+    state: State<'_, AppState>,
+    transcript_ids: Vec<String>,
+) -> Result<Vec<TranscriptSpeakerMetadata>, String> {
+    if transcript_ids.len() > 2_000 {
+        return Err("At most 2,000 transcript IDs may be requested at once".to_string());
+    }
+    DiarizationRepository::get_transcript_metadata(state.speaker_store.pool(), &transcript_ids)
         .await
         .map_err(|error| error.to_string())
 }
@@ -197,6 +213,7 @@ pub async fn rename_speaker(
     state: State<'_, AppState>,
     request: RenameSpeakerRequest,
 ) -> Result<(), String> {
+    let _edit = super::operations::try_meeting_edit(&request.meeting_id)?;
     let RenameSpeakerRequest {
         meeting_id,
         speaker_id,
@@ -213,7 +230,7 @@ pub async fn rename_speaker(
     }
 
     let updated_count = DiarizationRepository::rename_speaker(
-        state.db_manager.pool(),
+        state.speaker_store.pool(),
         &meeting_id,
         &speaker_id,
         &label,
@@ -242,9 +259,10 @@ pub async fn merge_speakers(
     state: State<'_, AppState>,
     request: MergeSpeakersRequest,
 ) -> Result<u64, String> {
+    let _edit = super::operations::try_meeting_edit(&request.meeting_id)?;
     let label = normalize_speaker_label(&request.target_label)?;
     DiarizationRepository::merge_speakers(
-        state.db_manager.pool(),
+        state.speaker_store.pool(),
         &request.meeting_id,
         &request.source_speaker_ids,
         &request.target_speaker_id,
@@ -272,15 +290,61 @@ pub async fn reassign_transcripts(
     state: State<'_, AppState>,
     request: ReassignTranscriptsRequest,
 ) -> Result<u64, String> {
+    let _edit = super::operations::try_meeting_edit(&request.meeting_id)?;
     if request.transcript_ids.is_empty() {
         return Err("Select at least one transcript segment".to_string());
     }
+    if request.transcript_ids.len() > 2_000 {
+        return Err("Select at most 2,000 transcript rows".to_string());
+    }
+    let requested = request
+        .transcript_ids
+        .iter()
+        .cloned()
+        .collect::<std::collections::HashSet<_>>();
+    let rows = sqlx::query_as::<_, Transcript>(
+        "SELECT * FROM transcripts WHERE meeting_id = ? ORDER BY audio_start_time, id",
+    )
+    .bind(&request.meeting_id)
+    .fetch_all(state.db_manager.pool())
+    .await
+    .map_err(|error| error.to_string())?;
+    let windows = rows
+        .into_iter()
+        .filter(|row| requested.contains(&row.id))
+        .map(|row| TranscriptCorrectionWindow {
+            transcript_id: row.id,
+            audio_start_time: row.audio_start_time,
+            audio_end_time: row.audio_end_time,
+            speaker_source: None, // Preserve the existing channel; missing metadata uses mixed audio.
+        })
+        .collect::<Vec<_>>();
+    if windows.len() != requested.len() {
+        return Err(
+            "Some selected rows no longer exist in this meeting. Reload the transcript."
+                .to_string(),
+        );
+    }
+    let label = request
+        .speaker_label
+        .as_deref()
+        .map(normalize_speaker_label)
+        .transpose()?;
+    if !request.is_overlap
+        && (request
+            .speaker_id
+            .as_ref()
+            .map_or(true, |id| id.trim().is_empty())
+            || label.is_none())
+    {
+        return Err("Choose a speaker or enter a new speaker name".to_string());
+    }
     DiarizationRepository::reassign_transcripts(
-        state.db_manager.pool(),
+        state.speaker_store.pool(),
         &request.meeting_id,
-        &request.transcript_ids,
+        &windows,
         request.speaker_id.as_deref(),
-        request.speaker_label.as_deref(),
+        label.as_deref(),
         request.is_overlap,
         &request.candidate_speaker_ids,
     )
@@ -302,7 +366,7 @@ pub struct SpeakerProfileDto {
 pub async fn list_speaker_profiles(
     state: State<'_, AppState>,
 ) -> Result<Vec<SpeakerProfileDto>, String> {
-    SpeakerProfilesRepository::list(state.db_manager.pool())
+    SpeakerProfilesRepository::list(state.speaker_store.pool())
         .await
         .map(|profiles| {
             profiles
@@ -332,7 +396,7 @@ pub async fn update_speaker_profile(
     request: UpdateSpeakerProfileRequest,
 ) -> Result<(), String> {
     let name = normalize_speaker_label(&request.name)?;
-    SpeakerProfilesRepository::rename(state.db_manager.pool(), &request.profile_id, &name)
+    SpeakerProfilesRepository::rename(state.speaker_store.pool(), &request.profile_id, &name)
         .await
         .map_err(|error| error.to_string())
 }
@@ -342,7 +406,7 @@ pub async fn delete_speaker_profile(
     state: State<'_, AppState>,
     profile_id: String,
 ) -> Result<(), String> {
-    SpeakerProfilesRepository::delete(state.db_manager.pool(), &profile_id)
+    SpeakerProfilesRepository::delete(state.speaker_store.pool(), &profile_id)
         .await
         .map_err(|error| error.to_string())
 }
@@ -361,6 +425,7 @@ pub async fn remember_speaker<R: Runtime>(
     state: State<'_, AppState>,
     request: RememberSpeakerRequest,
 ) -> Result<String, String> {
+    let _edit = super::operations::try_meeting_edit(&request.meeting_id)?;
     const MIN_PROFILE_SPEECH_SECONDS: f64 = 8.0;
     let executable = std::env::current_exe()
         .map_err(|error| format!("Unable to locate the running Meetily app: {error}"))?;
@@ -385,76 +450,82 @@ pub async fn remember_speaker<R: Runtime>(
         folder_path.ok_or_else(|| "This meeting has no retained audio folder".to_string())?,
     );
 
-    let segments: Vec<(String, f64, f64, Option<f64>, i64)> = sqlx::query_as(
-        "SELECT source, start_time, end_time, confidence, is_overlap
-         FROM speaker_segments
-         WHERE meeting_id = ? AND speaker_id = ?
-         ORDER BY start_time",
+    let current_ids: std::collections::HashSet<String> =
+        sqlx::query_scalar("SELECT id FROM transcripts WHERE meeting_id = ?")
+            .bind(&request.meeting_id)
+            .fetch_all(state.db_manager.pool())
+            .await
+            .map_err(|error| error.to_string())?
+            .into_iter()
+            .collect();
+    let segments: Vec<(String, String, f64, f64, Option<f64>, i64)> = sqlx::query_as(
+        "SELECT transcript_id, COALESCE(speaker_source, 'mixed'), audio_start_time,
+                audio_end_time, diarization_confidence, is_overlap
+         FROM transcript_speakers
+         WHERE meeting_id = ? AND speaker_id = ? AND published = 1
+           AND audio_start_time IS NOT NULL AND audio_end_time IS NOT NULL
+         ORDER BY audio_start_time",
     )
     .bind(&request.meeting_id)
     .bind(&request.speaker_id)
-    .fetch_all(state.db_manager.pool())
+    .fetch_all(state.speaker_store.pool())
     .await
     .map_err(|error| error.to_string())?;
-
-    let clean_segments: Vec<_> = segments
+    let clean_segments = segments
         .into_iter()
-        .filter(|(_, start, end, confidence, overlap)| {
-            *overlap == 0 && end > start && confidence.unwrap_or(0.0) >= 0.8
+        .filter(|(id, _, start, end, confidence, overlap)| {
+            current_ids.contains(id)
+                && *overlap == 0
+                && start.is_finite()
+                && end.is_finite()
+                && end > start
+                && confidence.unwrap_or(0.0) >= 0.8
         })
-        .collect();
-    let speech_seconds: f64 = clean_segments
-        .iter()
-        .map(|(_, start, end, _, _)| end - start)
-        .sum();
-    if speech_seconds < MIN_PROFILE_SPEECH_SECONDS {
-        return Err(format!(
-            "At least {MIN_PROFILE_SPEECH_SECONDS:.0} seconds of clean, non-overlapping speech is required"
-        ));
-    }
-
-    let source = clean_segments
-        .first()
-        .map(|segment| segment.0.as_str())
-        .unwrap_or("mixed");
-    let preferred_path = match source {
-        "microphone" => folder.join(".diarization/microphone.flac"),
-        "system" => folder.join(".diarization/system.flac"),
-        _ => folder.join("audio.mp4"),
-    };
-    let audio_path = if preferred_path.exists() {
-        preferred_path
-    } else {
-        folder.join("audio.mp4")
-    };
-    if !audio_path.exists() {
-        return Err("The audio needed to remember this voice is unavailable".to_string());
-    }
-
-    let sample_count = clean_segments.len() as i64;
-    let embedding = tokio::task::spawn_blocking(move || -> Result<Vec<f32>, String> {
-        let decoded = crate::audio::decoder::decode_audio_file(&audio_path)
-            .map_err(|error| error.to_string())?;
-        let audio = decoded.to_whisper_format();
+        .collect::<Vec<_>>();
+    let fallback_audio = super::finalize::find_meeting_audio(&folder).ok();
+    let (embedding, speech_seconds, sample_count) = tokio::task::spawn_blocking(move || -> Result<(Vec<f32>, f64, i64), String> {
+        let mut ranges = std::collections::BTreeMap::<std::path::PathBuf, Vec<(f64, f64)>>::new();
+        for (_, source, start, end, _, _) in clean_segments {
+            let stem = match source.as_str() {
+                "microphone" => Some(folder.join(".diarization/microphone.flac")),
+                "system" => Some(folder.join(".diarization/system.flac")),
+                _ => None,
+            };
+            let path = stem.filter(|path| path.exists()).or_else(|| fallback_audio.clone())
+                .ok_or_else(|| "The audio needed to remember this voice is unavailable".to_string())?;
+            ranges.entry(path).or_default().push((start, end));
+        }
         let mut selected = Vec::new();
-        for (_, start, end, _, _) in clean_segments {
-            let start_sample = (start.max(0.0) * 16_000.0) as usize;
-            let end_sample = (end.max(start) * 16_000.0) as usize;
-            if start_sample < audio.len() {
-                selected.extend_from_slice(&audio[start_sample..end_sample.min(audio.len())]);
+        let mut sample_count = 0i64;
+        let max_samples = 30 * 16_000;
+        for (path, mut intervals) in ranges {
+            let audio = crate::audio::decoder::decode_audio_file(&path)
+                .map_err(|error| error.to_string())?.to_whisper_format();
+            intervals.sort_by(|a, b| a.0.total_cmp(&b.0));
+            let mut previous_end = 0usize;
+            for (start, end) in intervals {
+                let start = ((start.max(0.0) * 16_000.0) as usize).max(previous_end);
+                let end = ((end.max(0.0) * 16_000.0) as usize).min(audio.len());
+                previous_end = previous_end.max(end);
+                if start >= end || selected.len() >= max_samples { continue; }
+                let end = end.min(start + max_samples - selected.len());
+                selected.extend_from_slice(&audio[start..end]);
+                sample_count += 1;
             }
+            if selected.len() >= max_samples { break; }
+        }
+        let speech_seconds = selected.len() as f64 / 16_000.0;
+        if speech_seconds < MIN_PROFILE_SPEECH_SECONDS {
+            return Err(format!("At least {MIN_PROFILE_SPEECH_SECONDS:.0} seconds of clean, non-overlapping speech is required"));
         }
         let mut extractor = crate::diarization::embedding::EmbeddingExtractor::new(&model_path)
             .map_err(|error| error.to_string())?;
-        extractor
-            .compute(&selected)
-            .map_err(|error| error.to_string())
-    })
-    .await
-    .map_err(|error| error.to_string())??;
+        let embedding = extractor.compute(&selected).map_err(|error| error.to_string())?;
+        Ok((embedding, speech_seconds, sample_count))
+    }).await.map_err(|error| error.to_string())??;
 
     let profile_id = SpeakerProfilesRepository::create(
-        state.db_manager.pool(),
+        state.speaker_store.pool(),
         &name,
         &embedding,
         crate::diarization::models::EMBEDDING_MODEL_VERSION,
@@ -465,14 +536,15 @@ pub async fn remember_speaker<R: Runtime>(
     .map_err(|error| error.to_string())?;
 
     sqlx::query(
-        "UPDATE transcripts SET speaker_profile_id = ?, speaker_label = ?
+        "UPDATE transcript_speakers SET speaker_profile_id = ?, speaker_label = ?,
+            diarization_method = 'manual', updated_at = CURRENT_TIMESTAMP
          WHERE meeting_id = ? AND speaker_id = ?",
     )
     .bind(&profile_id)
     .bind(&name)
     .bind(&request.meeting_id)
     .bind(&request.speaker_id)
-    .execute(state.db_manager.pool())
+    .execute(state.speaker_store.pool())
     .await
     .map_err(|error| error.to_string())?;
 
@@ -496,7 +568,9 @@ pub async fn apply_diarization_segments(
     state: State<'_, AppState>,
     request: ApplyDiarizationRequest,
 ) -> Result<(), String> {
-    let pool = state.db_manager.pool();
+    let _edit = super::operations::try_meeting_edit(&request.meeting_id)?;
+    let core_pool = state.db_manager.pool();
+    let feature_pool = state.speaker_store.pool();
     let ApplyDiarizationRequest {
         meeting_id,
         method,
@@ -504,7 +578,18 @@ pub async fn apply_diarization_segments(
     } = request;
     let segments = segments_for_meeting(segments, &meeting_id);
 
-    let mut transaction = pool.begin().await.map_err(|error| error.to_string())?;
+    let transcripts = sqlx::query_as::<_, Transcript>(
+        "SELECT * FROM transcripts WHERE meeting_id = ? ORDER BY audio_start_time ASC",
+    )
+    .bind(&meeting_id)
+    .fetch_all(core_pool)
+    .await
+    .map_err(|error| error.to_string())?;
+
+    let mut transaction = feature_pool
+        .begin()
+        .await
+        .map_err(|error| error.to_string())?;
 
     replace_speaker_segments(&mut transaction, &meeting_id, &method, &segments)
         .await
@@ -512,14 +597,6 @@ pub async fn apply_diarization_segments(
     upsert_meeting_diarization_status(&mut transaction, &meeting_id, &method, &segments)
         .await
         .map_err(|error| error.to_string())?;
-
-    let transcripts = sqlx::query_as::<_, Transcript>(
-        "SELECT * FROM transcripts WHERE meeting_id = ? ORDER BY audio_start_time ASC",
-    )
-    .bind(&meeting_id)
-    .fetch_all(&mut *transaction)
-    .await
-    .map_err(|error| error.to_string())?;
 
     for transcript in transcripts {
         let window = TranscriptWindow {
@@ -533,6 +610,9 @@ pub async fn apply_diarization_segments(
         DiarizationRepository::update_transcript_assignment(
             &mut *transaction,
             &transcript.id,
+            &meeting_id,
+            transcript.audio_start_time,
+            transcript.audio_end_time,
             &assignment,
         )
         .await

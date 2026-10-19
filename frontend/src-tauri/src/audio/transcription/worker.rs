@@ -74,14 +74,34 @@ struct LiveSpeakerAssignment {
     confidence: Option<f32>,
 }
 
+async fn live_labels_enabled_for_app<R: Runtime>(app: &AppHandle<R>) -> bool {
+    let state = app.state::<crate::state::AppState>();
+    crate::database::repositories::diarization::DiarizationRepository::get_settings(
+        state.speaker_store.pool(),
+    )
+    .await
+    .map(|settings| {
+        crate::diarization::types::should_show_live_labels(
+            settings.enabled != 0,
+            &settings.mode,
+            settings.show_provisional_labels != 0,
+        )
+    })
+    .unwrap_or(false)
+}
+
 async fn initialize_live_diarization<R: Runtime>(app: &AppHandle<R>) -> Option<DiarizationSession> {
     let state = app.state::<crate::state::AppState>();
     let settings = crate::database::repositories::diarization::DiarizationRepository::get_settings(
-        state.db_manager.pool(),
+        state.speaker_store.pool(),
     )
     .await
     .ok()?;
-    if settings.enabled == 0 || settings.show_provisional_labels == 0 {
+    if !crate::diarization::types::should_show_live_labels(
+        settings.enabled != 0,
+        &settings.mode,
+        settings.show_provisional_labels != 0,
+    ) {
         return None;
     }
 
@@ -90,7 +110,7 @@ async fn initialize_live_diarization<R: Runtime>(app: &AppHandle<R>) -> Option<D
         warn!("Live speaker labels disabled because the WeSpeaker model is unavailable");
         return None;
     }
-    let profiles = SpeakerProfilesRepository::list(state.db_manager.pool())
+    let profiles = SpeakerProfilesRepository::list(state.speaker_store.pool())
         .await
         .unwrap_or_default()
         .into_iter()
@@ -127,9 +147,14 @@ fn assign_live_speaker(
     };
 
     match (activity.microphone_active, activity.system_active) {
-        (true, true) => {
+        (true, true) if activity.overlap_detected => {
             let mut assignment = base("multiple-speakers", "Multiple speakers", "mixed", true);
             assignment.candidate_speaker_ids = Some(vec!["local-you".to_string()]);
+            assignment
+        }
+        (true, true) => {
+            let mut assignment = base("unknown-speaker", "Unknown speaker", "mixed", false);
+            assignment.diarization_status = Some("needs_review".to_string());
             assignment
         }
         (true, false) if activity.system_available => base("local-you", "You", "microphone", false),
@@ -265,6 +290,7 @@ pub fn start_transcription_task<R: Runtime>(
             let worker_handle = tokio::spawn(async move {
                 info!("👷 Worker {} started", worker_id);
                 let mut diarization_session = initialize_live_diarization(&app_clone).await;
+                let mut live_labels_enabled = live_labels_enabled_for_app(&app_clone).await;
 
                 // PRE-VALIDATE model state to avoid repeated async calls per chunk
                 let initial_model_loaded = engine_clone.is_model_loaded().await;
@@ -319,11 +345,25 @@ pub fn start_transcription_task<R: Runtime>(
 
                             let (audio_start_time, audio_end_time, chunk_duration) =
                                 resolve_transcript_timing(&chunk);
-                            let live_speaker = assign_live_speaker(
-                                chunk.source_activity.as_ref(),
-                                &chunk.data,
-                                &mut diarization_session,
-                            );
+                            let current_live_labels_enabled =
+                                live_labels_enabled_for_app(&app_clone).await;
+                            if current_live_labels_enabled != live_labels_enabled {
+                                diarization_session = if current_live_labels_enabled {
+                                    initialize_live_diarization(&app_clone).await
+                                } else {
+                                    None
+                                };
+                                live_labels_enabled = current_live_labels_enabled;
+                            }
+                            let live_speaker = if live_labels_enabled {
+                                assign_live_speaker(
+                                    chunk.source_activity.as_ref(),
+                                    &chunk.data,
+                                    &mut diarization_session,
+                                )
+                            } else {
+                                LiveSpeakerAssignment::default()
+                            };
 
                             // Transcribe with provider-agnostic approach
                             match transcribe_chunk_with_provider(&engine_clone, chunk, &app_clone)
@@ -835,6 +875,7 @@ fn format_recording_time(seconds: f64) -> String {
                 microphone_active: true,
                 system_active: false,
                 system_available: true,
+                overlap_detected: false,
             };
             let assignment = assign_live_speaker(Some(&activity), &[], &mut None);
             assert_eq!(assignment.speaker_id.as_deref(), Some("local-you"));
@@ -847,6 +888,7 @@ fn format_recording_time(seconds: f64) -> String {
                 microphone_active: true,
                 system_active: true,
                 system_available: true,
+                overlap_detected: true,
             };
             let assignment = assign_live_speaker(Some(&activity), &[], &mut None);
             assert_eq!(assignment.speaker_label.as_deref(), Some("Multiple speakers"));
@@ -859,8 +901,25 @@ fn format_recording_time(seconds: f64) -> String {
                 microphone_active: true,
                 system_active: false,
                 system_available: false,
+                overlap_detected: false,
             };
             let assignment = assign_live_speaker(Some(&activity), &[], &mut None);
             assert_eq!(assignment.speaker_label.as_deref(), Some("Unknown speaker"));
+        }
+
+        #[test]
+        fn alternating_sources_do_not_claim_simultaneous_overlap() {
+            let activity = SourceActivity {
+                microphone_active: true,
+                system_active: true,
+                system_available: true,
+                overlap_detected: false,
+            };
+            let assignment = assign_live_speaker(Some(&activity), &[], &mut None);
+            assert_eq!(assignment.is_overlap, Some(false));
+            assert_eq!(
+                assignment.diarization_status.as_deref(),
+                Some("needs_review")
+            );
         }
     }

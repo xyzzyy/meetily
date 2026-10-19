@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use tauri::{AppHandle, Emitter, Manager};
 
 use super::manager::DatabaseManager;
+use super::speaker_store::SpeakerFeatureStore;
 use crate::state::AppState;
 
 #[derive(Serialize)]
@@ -158,7 +159,13 @@ pub async fn import_and_initialize_database(
         })?;
 
     // Update app state with the new manager
-    app.manage(AppState { db_manager });
+    let speaker_store = SpeakerFeatureStore::new_from_app_handle(&app)
+        .await
+        .map_err(|e| format!("Failed to initialize speaker feature store: {e}"))?;
+    app.manage(AppState {
+        db_manager,
+        speaker_store,
+    });
 
     info!("Legacy database imported and initialized successfully");
 
@@ -182,7 +189,13 @@ pub async fn initialize_fresh_database(app: AppHandle) -> Result<(), String> {
         })?;
 
     // Update app state with the new manager
-    app.manage(AppState { db_manager: db_manager.clone() });
+    let speaker_store = SpeakerFeatureStore::new_from_app_handle(&app)
+        .await
+        .map_err(|e| format!("Failed to initialize speaker feature store: {e}"))?;
+    app.manage(AppState {
+        db_manager: db_manager.clone(),
+        speaker_store,
+    });
 
     // Set default model configuration for fresh installs
     let pool = db_manager.pool();

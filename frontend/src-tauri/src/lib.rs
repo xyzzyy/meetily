@@ -785,6 +785,7 @@ pub fn run() {
             diarization::commands::cancel_final_diarization,
             diarization::commands::get_meeting_diarization_status,
             diarization::commands::get_meeting_speakers,
+            diarization::commands::get_transcript_speaker_metadata,
             diarization::commands::rename_speaker,
             diarization::commands::merge_speakers,
             diarization::commands::reassign_transcripts,

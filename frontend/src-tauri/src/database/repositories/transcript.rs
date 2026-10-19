@@ -47,14 +47,8 @@ impl TranscriptsRepository {
         for segment in transcripts {
             let transcript_id = format!("transcript-{}", Uuid::new_v4());
             let result = sqlx::query(
-                "INSERT INTO transcripts (
-                    id, meeting_id, transcript, timestamp,
-                    audio_start_time, audio_end_time, duration,
-                    speaker_id, speaker_label, speaker_profile_id, speaker_source,
-                    speaker_color, is_overlap, candidate_speaker_ids,
-                    diarization_status, diarization_method, diarization_confidence
-                 )
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO transcripts (id, meeting_id, transcript, timestamp, audio_start_time, audio_end_time, duration)
+                 VALUES (?, ?, ?, ?, ?, ?, ?)",
             )
             .bind(&transcript_id)
             .bind(&meeting_id)
@@ -63,21 +57,6 @@ impl TranscriptsRepository {
             .bind(segment.audio_start_time)
             .bind(segment.audio_end_time)
             .bind(segment.duration)
-            .bind(&segment.speaker_id)
-            .bind(&segment.speaker_label)
-            .bind(&segment.speaker_profile_id)
-            .bind(&segment.speaker_source)
-            .bind(&segment.speaker_color)
-            .bind(segment.is_overlap.unwrap_or(false) as i64)
-            .bind(
-                segment
-                    .candidate_speaker_ids
-                    .as_ref()
-                    .and_then(|ids| serde_json::to_string(ids).ok()),
-            )
-            .bind(segment.diarization_status.as_deref().unwrap_or("none"))
-            .bind(&segment.diarization_method)
-            .bind(segment.diarization_confidence)
             .execute(&mut *transaction)
             .await;
 
@@ -185,7 +164,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn saves_transcript_with_all_diarization_fields() {
+    async fn saves_only_upstream_transcript_fields() {
         let pool = migrated_test_pool().await;
 
         let segment = TranscriptSegment {
@@ -216,15 +195,24 @@ mod tests {
         .await
         .expect("meeting and transcript should save atomically");
 
-        let saved: (String, String, String) = sqlx::query_as(
-            "SELECT speaker_label, speaker_source, diarization_status
+        let saved: (String, Option<f64>, Option<f64>, Option<f64>) = sqlx::query_as(
+            "SELECT transcript, audio_start_time, audio_end_time, duration
              FROM transcripts WHERE meeting_id = ?",
         )
         .bind(meeting_id)
         .fetch_one(&pool)
         .await
         .expect("saved transcript should be readable");
-        assert_eq!(saved, ("Alice".to_string(), "system".to_string(), "provisional".to_string()));
+        assert_eq!(saved, ("Hello from Alice".to_string(), Some(1.0), Some(2.5), Some(1.5)));
+
+        let custom_columns: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM pragma_table_info('transcripts')
+             WHERE name IN ('speaker_id', 'speaker_label', 'diarization_status')",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("schema should be inspectable");
+        assert_eq!(custom_columns, 0);
     }
 
     #[tokio::test]

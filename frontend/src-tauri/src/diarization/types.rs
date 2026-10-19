@@ -1,5 +1,9 @@
 use serde::{Deserialize, Serialize};
 
+pub fn should_show_live_labels(enabled: bool, mode: &str, show_labels: bool) -> bool {
+    enabled && mode == "live_plus_post_call" && show_labels
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DiarizationStatus {
@@ -91,6 +95,15 @@ impl SpeakerAssignment {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn live_labels_require_all_three_settings() {
+        assert!(should_show_live_labels(true, "live_plus_post_call", true));
+        assert!(!should_show_live_labels(false, "live_plus_post_call", true));
+        assert!(!should_show_live_labels(true, "post_call_only", true));
+        assert!(!should_show_live_labels(true, "off", true));
+        assert!(!should_show_live_labels(true, "live_plus_post_call", false));
+    }
 
     #[test]
     fn diarization_status_serializes_as_snake_case() {

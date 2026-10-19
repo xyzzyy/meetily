@@ -5,5 +5,6 @@ pub mod embedding;
 pub mod fbank;
 pub mod finalize;
 pub mod models;
+pub mod operations;
 pub mod session;
 pub mod types;

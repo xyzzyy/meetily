@@ -96,6 +96,8 @@ pub async fn start_retranscription<R: Runtime>(
     model: Option<String>,
     provider: Option<String>,
 ) -> Result<RetranscriptionResult> {
+    let _speaker_operation = crate::diarization::operations::try_meeting_edit(&meeting_id)
+        .map_err(|error| anyhow!(error))?;
     // Acquire guard - ensures flag is cleared even on panic/early return
     let _guard = RetranscriptionGuard::acquire().map_err(|e| anyhow!(e))?;
 

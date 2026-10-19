@@ -7,23 +7,13 @@ use std::{
 
 use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use sqlx::Connection;
 use tauri::{AppHandle, Emitter, Manager, Runtime};
 use tokio::{io::AsyncWriteExt, process::Command};
 use uuid::Uuid;
 
-use crate::{
-    audio::{
-        decoder::decode_audio_file,
-        recording_state::{AudioChunk, DeviceType},
-        transcription::{
-            engine::{get_or_init_transcription_engine, validate_transcription_model_ready},
-            worker::transcribe_chunk_with_provider,
-        },
-    },
-    database::models::Transcript,
-    state::AppState,
-};
+use crate::{audio::decoder::decode_audio_file, database::models::Transcript, state::AppState};
 
 static CANCEL_REQUESTED: AtomicBool = AtomicBool::new(false);
 
@@ -86,7 +76,7 @@ struct SidecarResponse {
     error: Option<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct FinalWindow {
     source: String,
     start: f64,
@@ -98,7 +88,7 @@ struct FinalWindow {
     is_overlap: bool,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct FinalTranscript {
     id: String,
     text: String,
@@ -111,6 +101,21 @@ struct FinalTranscript {
     is_overlap: bool,
     candidates: Vec<String>,
     confidence: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+struct CoreTranscriptBackup {
+    id: String,
+    meeting_id: String,
+    transcript: String,
+    timestamp: String,
+    summary: Option<String>,
+    action_items: Option<String>,
+    key_points: Option<String>,
+    audio_start_time: Option<f64>,
+    audio_end_time: Option<f64>,
+    duration: Option<f64>,
+    speaker: Option<String>,
 }
 
 pub fn cancel() {
@@ -134,7 +139,9 @@ pub fn offline_models_present<R: Runtime>(app: &AppHandle<R>) -> bool {
             if path.is_dir() {
                 contains_nonempty_model(&path)
             } else {
-                path.metadata().map(|metadata| metadata.len() > 0).unwrap_or(false)
+                path.metadata()
+                    .map(|metadata| metadata.len() > 0)
+                    .unwrap_or(false)
                     && path
                         .extension()
                         .and_then(|extension| extension.to_str())
@@ -155,7 +162,10 @@ pub async fn prepare_offline_models<R: Runtime>(app: &AppHandle<R>) -> Result<()
         action: "prepare".to_string(),
         meeting_id: "model-preparation".to_string(),
         model_cache_path: cache.to_string_lossy().into_owned(),
-        output_path: cache.join("prepare-result.json").to_string_lossy().into_owned(),
+        output_path: cache
+            .join("prepare-result.json")
+            .to_string_lossy()
+            .into_owned(),
         sources: Vec::new(),
     };
     let response = invoke_sidecar(&request).await?;
@@ -164,7 +174,9 @@ pub async fn prepare_offline_models<R: Runtime>(app: &AppHandle<R>) -> Result<()
     } else {
         Err(anyhow!(
             "Offline model preparation failed: {}",
-            response.error.unwrap_or_else(|| "unknown error".to_string())
+            response
+                .error
+                .unwrap_or_else(|| "unknown error".to_string())
         ))
     }
 }
@@ -181,21 +193,26 @@ pub async fn run<R: Runtime>(
     app: AppHandle<R>,
     request: StartFinalDiarizationRequest,
 ) -> Result<FinalDiarizationResult> {
+    let _processing = super::operations::try_processing_slot().map_err(|error| anyhow!(error))?;
+    let _meeting =
+        super::operations::try_meeting_edit(&request.meeting_id).map_err(|error| anyhow!(error))?;
     CANCEL_REQUESTED.store(false, Ordering::SeqCst);
     let state = app.state::<AppState>();
-    let pool = state.db_manager.pool();
-    let settings =
-        crate::database::repositories::diarization::DiarizationRepository::get_settings(pool)
-            .await?;
-    if settings.enabled == 0 || settings.post_call_refinement_enabled == 0 {
+    let core_pool = state.db_manager.pool();
+    let feature_pool = state.speaker_store.pool();
+    let settings = crate::database::repositories::diarization::DiarizationRepository::get_settings(
+        feature_pool,
+    )
+    .await?;
+    if settings.enabled == 0 || settings.mode == "off" {
         return Err(anyhow!("Final speaker refinement is disabled"));
     }
 
     let manual_count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM transcripts WHERE meeting_id = ? AND diarization_method = 'manual'",
+        "SELECT COUNT(*) FROM transcript_speakers WHERE meeting_id = ? AND diarization_method = 'manual'",
     )
     .bind(&request.meeting_id)
-    .fetch_one(pool)
+    .fetch_one(feature_pool)
     .await?;
     if manual_count > 0 && !request.overwrite_manual_edits {
         return Err(anyhow!(
@@ -206,29 +223,42 @@ pub async fn run<R: Runtime>(
     let folder_path: Option<String> =
         sqlx::query_scalar("SELECT folder_path FROM meetings WHERE id = ?")
             .bind(&request.meeting_id)
-            .fetch_optional(pool)
+            .fetch_optional(core_pool)
             .await?
             .flatten();
     let folder =
         PathBuf::from(folder_path.ok_or_else(|| anyhow!("This meeting has no retained audio"))?);
     let (sources, quality_flags) = discover_sources(&folder)?;
-    let live_transcripts = load_transcripts(pool, &request.meeting_id).await?;
-    let backup = serde_json::to_string(&live_transcripts)?;
+    let live_transcripts = load_transcripts(core_pool, &request.meeting_id).await?;
+    let live_ids = live_transcripts
+        .iter()
+        .map(|row| row.id.clone())
+        .collect::<Vec<_>>();
+    let live_speakers =
+        crate::database::repositories::diarization::DiarizationRepository::get_transcript_metadata(
+            feature_pool,
+            &live_ids,
+        )
+        .await?;
+    let live_backup = load_core_backup(core_pool, &request.meeting_id).await?;
+    let backup = serde_json::to_string(&live_backup)?;
     let run_id = format!("diarization-run-{}", Uuid::new_v4());
 
     sqlx::query(
         "INSERT INTO diarization_runs (
-            id, meeting_id, status, method, progress, quality_flags, transcript_backup
-         ) VALUES (?, ?, 'running', 'fluid_audio_offline_0.12.4', 1, ?, ?)",
+            id, meeting_id, status, method, progress, quality_flags, transcript_backup,
+            live_rows_hash
+         ) VALUES (?, ?, 'prepared', 'fluid_audio_offline_0.12.4', 1, ?, ?, ?)",
     )
     .bind(&run_id)
     .bind(&request.meeting_id)
     .bind(serde_json::to_string(&quality_flags)?)
-    .bind(backup)
-    .execute(pool)
+    .bind(&backup)
+    .bind(hash_json(&backup))
+    .execute(feature_pool)
     .await?;
     set_status(
-        pool,
+        feature_pool,
         &request.meeting_id,
         &run_id,
         "processing",
@@ -248,6 +278,7 @@ pub async fn run<R: Runtime>(
         &folder,
         sources,
         &live_transcripts,
+        &live_speakers,
         quality_flags.clone(),
     )
     .await;
@@ -257,10 +288,11 @@ pub async fn run<R: Runtime>(
         Err(error) => {
             let cancelled = CANCEL_REQUESTED.load(Ordering::SeqCst);
             let status = if cancelled {
-                "cancelled"
+                "failed"
             } else {
                 "fallback_to_live"
             };
+            let display_status = if cancelled { "cancelled" } else { status };
             sqlx::query(
                 "UPDATE diarization_runs SET status = ?, error = ?, completed_at = CURRENT_TIMESTAMP
                  WHERE id = ?",
@@ -268,13 +300,13 @@ pub async fn run<R: Runtime>(
             .bind(status)
             .bind(error.to_string())
             .bind(&run_id)
-            .execute(pool)
+            .execute(feature_pool)
             .await?;
             set_status(
-                pool,
+                feature_pool,
                 &request.meeting_id,
                 &run_id,
-                status,
+                display_status,
                 100,
                 Some(&error.to_string()),
                 &quality_flags,
@@ -285,7 +317,7 @@ pub async fn run<R: Runtime>(
             emit_progress(
                 &app,
                 &request.meeting_id,
-                status,
+                display_status,
                 100,
                 Some(error.to_string()),
             );
@@ -301,6 +333,7 @@ async fn run_inner<R: Runtime>(
     folder: &Path,
     sources: Vec<SidecarSource>,
     live_transcripts: &[Transcript],
+    live_speakers: &[crate::database::repositories::diarization::TranscriptSpeakerMetadata],
     mut quality_flags: Vec<String>,
 ) -> Result<FinalDiarizationResult> {
     check_cancelled()?;
@@ -330,7 +363,7 @@ async fn run_inner<R: Runtime>(
 
     emit_progress(app, meeting_id, "rebuilding_windows", 45, None);
     let mut windows = rebuild_windows(&response.intervals);
-    stabilize_speaker_ids(&mut windows, live_transcripts);
+    stabilize_speaker_ids(&mut windows, live_speakers);
     let assigned_coverage = assignment_coverage(&windows, live_transcripts);
     if windows.iter().any(|window| window.is_overlap) {
         quality_flags.push("overlap_detected".to_string());
@@ -339,83 +372,26 @@ async fn run_inner<R: Runtime>(
     check_cancelled()?;
     let audio = load_source_audio(&sidecar_request.sources).await?;
     let profile_labels = recognize_final_profiles(app, &mut windows, &audio).await;
-    validate_transcription_model_ready(app)
-        .await
-        .map_err(|error| anyhow!("Unable to load the selected transcription model: {error}"))?;
-    let engine = get_or_init_transcription_engine(app)
-        .await
-        .map_err(|error| anyhow!(error))?;
-    let labels = speaker_labels(&windows, live_transcripts, &profile_labels);
-    let mut transcripts = Vec::new();
-    let mut attempted = 0usize;
-    let mut successful = 0usize;
-    for (index, window) in windows.iter().enumerate() {
-        check_cancelled()?;
-        attempted += 1;
-        let Some(samples) = slice_window(&audio, window) else {
-            continue;
-        };
-        let chunk = AudioChunk {
-            data: samples,
-            sample_rate: 16_000,
-            timestamp: window.start,
-            end_timestamp: Some(window.end),
-            chunk_id: index as u64,
-            device_type: DeviceType::Microphone,
-            source_activity: None,
-        };
-        match transcribe_chunk_with_provider(&engine, chunk, app).await {
-            Ok((text, _, _)) if !text.trim().is_empty() => {
-                successful += 1;
-                let speaker_label = if window.speaker_id.is_none() {
-                    "Multiple speakers".to_string()
-                } else {
-                    labels
-                        .get(window.speaker_id.as_deref().unwrap_or_default())
-                        .cloned()
-                        .unwrap_or_else(|| "Unknown speaker".to_string())
-                };
-                transcripts.push(FinalTranscript {
-                    id: format!("transcript-{}", Uuid::new_v4()),
-                    text,
-                    start: window.start,
-                    end: window.end,
-                    speaker_id: window.speaker_id.clone(),
-                    speaker_profile_id: window.speaker_profile_id.clone(),
-                    speaker_label,
-                    source: window.source.clone(),
-                    is_overlap: window.is_overlap,
-                    candidates: window.candidate_speaker_ids.clone(),
-                    confidence: window.confidence,
-                });
-            }
-            Ok(_) | Err(_) => {}
-        }
-        let progress = 50 + (((index + 1) as f64 / windows.len() as f64) * 40.0) as u32;
-        emit_progress(app, meeting_id, "transcribing_windows", progress, None);
-    }
-    let transcription_success_rate = if attempted == 0 {
-        0.0
-    } else {
-        successful as f64 / attempted as f64
-    };
-
+    let labels = speaker_labels(&windows, live_speakers, &profile_labels);
+    // Speaker identification must not rewrite, remove, or renumber transcript text.
+    let transcripts = label_existing_transcripts(live_transcripts, &windows, &labels);
+    let transcription_success_rate = 1.0; // All existing transcript rows are retained.
     if !passes_quality_gates(assigned_coverage, transcription_success_rate) {
-        quality_flags.push("quality_gate_failed".to_string());
         return Err(anyhow!(
-            "Final result did not meet quality gates (coverage {:.0}%, transcription {:.0}%)",
-            assigned_coverage * 100.0,
-            transcription_success_rate * 100.0
+            "Speaker analysis did not cover enough of the existing transcript"
         ));
     }
+    check_cancelled()?;
 
     emit_progress(app, meeting_id, "saving", 95, None);
-    replace_atomically(
+    publish_labels_atomically(
         app.state::<AppState>().db_manager.pool(),
+        app.state::<AppState>().speaker_store.pool(),
         meeting_id,
         run_id,
         &windows,
         &transcripts,
+        live_transcripts,
         &quality_flags,
         assigned_coverage,
         transcription_success_rate,
@@ -434,6 +410,104 @@ async fn run_inner<R: Runtime>(
     })
 }
 
+fn label_existing_transcripts(
+    live: &[Transcript],
+    windows: &[FinalWindow],
+    labels: &HashMap<String, String>,
+) -> Vec<FinalTranscript> {
+    live.iter()
+        .map(|row| {
+            let start = row.audio_start_time.unwrap_or(0.0);
+            let end = row.audio_end_time.unwrap_or(start);
+            let duration = (end - start).max(0.0);
+            let matching = windows
+                .iter()
+                .filter(|window| window.end > start && window.start < end)
+                .collect::<Vec<_>>();
+            let mut speakers: HashMap<&str, (f64, &FinalWindow)> = HashMap::new();
+            let mut overlap_ranges = Vec::new();
+            let mut candidates = BTreeSet::new();
+            for window in &matching {
+                let overlap = (end.min(window.end) - start.max(window.start)).max(0.0);
+                if window.is_overlap {
+                    overlap_ranges.push((start.max(window.start), end.min(window.end)));
+                    candidates.extend(window.candidate_speaker_ids.iter().cloned());
+                }
+                if let Some(id) = window.speaker_id.as_deref() {
+                    speakers.entry(id).or_insert((0.0, window)).0 += overlap;
+                }
+            }
+            overlap_ranges.sort_by(|a, b| a.0.total_cmp(&b.0));
+            let mut overlap_seconds = 0.0;
+            let mut cursor = start;
+            for (a, b) in overlap_ranges {
+                overlap_seconds += (b - cursor.max(a)).max(0.0);
+                cursor = cursor.max(b);
+            }
+            let is_overlap = duration > 0.0 && overlap_seconds / duration >= 0.5;
+            let best = speakers
+                .into_iter()
+                .max_by(|a, b| a.1 .0.total_cmp(&b.1 .0).then_with(|| b.0.cmp(a.0)))
+                .filter(|(_, (seconds, _))| duration > 0.0 && seconds / duration >= 0.5);
+            let window = best.as_ref().map(|(_, (_, window))| *window);
+            let speaker_id = if is_overlap {
+                None
+            } else {
+                best.as_ref().map(|(id, _)| (*id).to_string())
+            };
+            let speaker_label = if is_overlap {
+                "Multiple speakers".to_string()
+            } else {
+                speaker_id
+                    .as_ref()
+                    .and_then(|id| labels.get(id))
+                    .cloned()
+                    .unwrap_or_else(|| "Unknown speaker".to_string())
+            };
+            let clean_for_enrollment = duration > 0.0
+                && !matching.is_empty()
+                && matching.iter().all(|window| {
+                    !window.is_overlap && window.speaker_id.as_ref() == speaker_id.as_ref()
+                })
+                && best
+                    .as_ref()
+                    .map(|(_, (seconds, _))| seconds / duration >= 0.95)
+                    .unwrap_or(false);
+            let confidence = if clean_for_enrollment {
+                matching
+                    .iter()
+                    .map(|window| window.confidence)
+                    .fold(1.0, f64::min)
+            } else {
+                0.0
+            };
+            FinalTranscript {
+                id: row.id.clone(),
+                text: row.transcript.clone(),
+                start,
+                end,
+                speaker_id,
+                speaker_profile_id: if is_overlap {
+                    None
+                } else {
+                    window.and_then(|w| w.speaker_profile_id.clone())
+                },
+                speaker_label,
+                source: window
+                    .map(|w| w.source.clone())
+                    .unwrap_or_else(|| "mixed".to_string()),
+                is_overlap,
+                candidates: if is_overlap {
+                    candidates.into_iter().collect()
+                } else {
+                    Vec::new()
+                },
+                confidence,
+            }
+        })
+        .collect()
+}
+
 fn cleanup_temporary_stems(folder: &Path) {
     if folder.join("audio.mp4").exists() {
         return;
@@ -444,7 +518,10 @@ fn cleanup_temporary_stems(folder: &Path) {
     ] {
         if let Err(error) = std::fs::remove_file(&stem) {
             if error.kind() != std::io::ErrorKind::NotFound {
-                log::warn!("Failed to remove temporary diarization stem {}: {error}", stem.display());
+                log::warn!(
+                    "Failed to remove temporary diarization stem {}: {error}",
+                    stem.display()
+                );
             }
         }
     }
@@ -495,7 +572,7 @@ fn discover_sources(folder: &Path) -> Result<(Vec<SidecarSource>, Vec<String>)> 
     ))
 }
 
-fn find_meeting_audio(folder: &Path) -> Result<PathBuf> {
+pub(super) fn find_meeting_audio(folder: &Path) -> Result<PathBuf> {
     let preferred = folder.join("audio.mp4");
     if preferred.exists() {
         return Ok(preferred);
@@ -523,6 +600,7 @@ async fn invoke_sidecar(request: &SidecarRequest) -> Result<SidecarResponse> {
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
+        .kill_on_drop(true)
         .spawn()
         .with_context(|| format!("Unable to launch {}", binary.display()))?;
     let payload = serde_json::to_vec(request)?;
@@ -532,7 +610,19 @@ async fn invoke_sidecar(request: &SidecarRequest) -> Result<SidecarResponse> {
         .ok_or_else(|| anyhow!("Sidecar stdin unavailable"))?
         .write_all(&payload)
         .await?;
-    let output = child.wait_with_output().await?;
+    let output = if request.action == "process" {
+        tokio::select! {
+            output = child.wait_with_output() => output?,
+            _ = async {
+                loop {
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                    if CANCEL_REQUESTED.load(Ordering::SeqCst) { break; }
+                }
+            } => return Err(anyhow!("Final speaker refinement was cancelled")),
+        }
+    } else {
+        child.wait_with_output().await?
+    };
     let stdout = String::from_utf8_lossy(&output.stdout);
     let json = stdout
         .lines()
@@ -576,75 +666,64 @@ fn resolve_sidecar_binary() -> Result<PathBuf> {
 }
 
 fn rebuild_windows(intervals: &[SidecarInterval]) -> Vec<FinalWindow> {
-    let mut by_source: BTreeMap<&str, Vec<&SidecarInterval>> = BTreeMap::new();
-    for interval in intervals {
-        if interval.end - interval.start >= 0.25 {
-            by_source
-                .entry(&interval.source)
-                .or_default()
-                .push(interval);
-        }
-    }
+    let valid = intervals
+        .iter()
+        .filter(|interval| {
+            interval.start.is_finite() && interval.end.is_finite() && interval.end > interval.start
+        })
+        .collect::<Vec<_>>();
+    let mut boundaries = valid
+        .iter()
+        .flat_map(|interval| [interval.start, interval.end])
+        .collect::<Vec<_>>();
+    boundaries.sort_by(f64::total_cmp);
+    boundaries.dedup_by(|a, b| (*a - *b).abs() < 0.000001);
     let mut windows = Vec::new();
-    for (source, source_intervals) in by_source {
-        let mut boundaries: Vec<f64> = source_intervals
+    for pair in boundaries.windows(2) {
+        let (start, end) = (pair[0], pair[1]);
+        let midpoint = (start + end) / 2.0;
+        let active = valid
             .iter()
-            .flat_map(|interval| [interval.start, interval.end])
-            .collect();
-        boundaries.sort_by(|a, b| a.total_cmp(b));
-        boundaries.dedup_by(|a, b| (*a - *b).abs() < 0.001);
-        for pair in boundaries.windows(2) {
-            let (start, end) = (pair[0], pair[1]);
-            if end - start < 0.25 {
-                continue;
-            }
-            let midpoint = (start + end) / 2.0;
-            let active: Vec<_> = source_intervals
-                .iter()
-                .filter(|interval| interval.start <= midpoint && interval.end >= midpoint)
-                .collect();
-            if active.is_empty() {
-                continue;
-            }
-            let candidates: BTreeSet<String> = active
+            .copied()
+            .filter(|interval| interval.start <= midpoint && interval.end > midpoint)
+            .collect::<Vec<_>>();
+        let all_speakers = active
+            .iter()
+            .map(|interval| interval.speaker_id.clone())
+            .collect::<BTreeSet<_>>();
+        let mut by_source: BTreeMap<&str, Vec<&SidecarInterval>> = BTreeMap::new();
+        for interval in &active {
+            by_source
+                .entry(interval.source.as_str())
+                .or_default()
+                .push(*interval);
+        }
+        for (source, source_intervals) in by_source {
+            let candidates = source_intervals
                 .iter()
                 .map(|interval| interval.speaker_id.clone())
-                .collect();
-            let speaker_id = if candidates.len() == 1 {
-                candidates.first().cloned()
-            } else {
-                None
-            };
+                .collect::<BTreeSet<_>>();
             windows.push(FinalWindow {
                 source: source.to_string(),
                 start,
                 end,
-                speaker_id,
+                speaker_id: if candidates.len() == 1 {
+                    candidates.first().cloned()
+                } else {
+                    None
+                },
                 speaker_profile_id: None,
-                candidate_speaker_ids: candidates.into_iter().collect(),
-                confidence: active
+                candidate_speaker_ids: all_speakers.iter().cloned().collect(),
+                confidence: source_intervals
                     .iter()
                     .map(|interval| interval.confidence)
                     .sum::<f64>()
-                    / active.len() as f64,
-                is_overlap: active.len() > 1
-                    || active.iter().any(|interval| {
-                        interval.is_overlap || !interval.candidate_speaker_ids.is_empty()
-                    }),
+                    / source_intervals.len() as f64,
+                is_overlap: all_speakers.len() > 1,
             });
         }
     }
-    windows.sort_by(|a, b| a.start.total_cmp(&b.start));
-    for index in 0..windows.len() {
-        if windows.iter().enumerate().any(|(other_index, other)| {
-            index != other_index
-                && windows[index].source != other.source
-                && other.end > windows[index].start
-                && other.start < windows[index].end
-        }) {
-            windows[index].is_overlap = true;
-        }
-    }
+    windows.sort_by(|a, b| a.start.total_cmp(&b.start).then(a.source.cmp(&b.source)));
     merge_adjacent_windows(windows)
 }
 
@@ -669,7 +748,10 @@ fn merge_adjacent_windows(windows: Vec<FinalWindow>) -> Vec<FinalWindow> {
     output
 }
 
-fn stabilize_speaker_ids(windows: &mut [FinalWindow], live: &[Transcript]) {
+fn stabilize_speaker_ids(
+    windows: &mut [FinalWindow],
+    live: &[crate::database::repositories::diarization::TranscriptSpeakerMetadata],
+) {
     let mut mapping: HashMap<String, (String, f64)> = HashMap::new();
     for window in windows.iter() {
         let Some(final_id) = &window.speaker_id else {
@@ -712,7 +794,7 @@ fn stabilize_speaker_ids(windows: &mut [FinalWindow], live: &[Transcript]) {
 
 fn speaker_labels(
     windows: &[FinalWindow],
-    live: &[Transcript],
+    live: &[crate::database::repositories::diarization::TranscriptSpeakerMetadata],
     profile_labels: &HashMap<String, String>,
 ) -> HashMap<String, String> {
     let mut labels = HashMap::new();
@@ -747,14 +829,12 @@ async fn recognize_final_profiles<R: Runtime>(
 ) -> HashMap<String, String> {
     let state = app.state::<AppState>();
     let profiles = crate::database::repositories::speaker_profile::SpeakerProfilesRepository::list(
-        state.db_manager.pool(),
+        state.speaker_store.pool(),
     )
     .await
     .unwrap_or_default()
     .into_iter()
-    .filter(|profile| {
-        profile.model_version == crate::diarization::models::EMBEDDING_MODEL_VERSION
-    })
+    .filter(|profile| profile.model_version == crate::diarization::models::EMBEDDING_MODEL_VERSION)
     .collect::<Vec<_>>();
     if profiles.is_empty() {
         return HashMap::new();
@@ -872,10 +952,19 @@ fn assignment_coverage(windows: &[FinalWindow], live: &[Transcript]) -> f64 {
         .map(|transcript| {
             let start = transcript.audio_start_time.unwrap_or(0.0);
             let end = transcript.audio_end_time.unwrap_or(start);
-            windows
+            let mut ranges = windows
                 .iter()
-                .map(|window| (end.min(window.end) - start.max(window.start)).max(0.0))
-                .fold(0.0, f64::max)
+                .map(|window| (start.max(window.start), end.min(window.end)))
+                .filter(|(start, end)| end > start)
+                .collect::<Vec<_>>();
+            ranges.sort_by(|a, b| a.0.total_cmp(&b.0));
+            let mut covered = 0.0;
+            let mut cursor = start;
+            for (range_start, range_end) in ranges {
+                covered += (range_end - cursor.max(range_start)).max(0.0);
+                cursor = cursor.max(range_end);
+            }
+            covered
         })
         .sum();
     (covered / voiced).clamp(0.0, 1.0)
@@ -884,10 +973,21 @@ fn assignment_coverage(windows: &[FinalWindow], live: &[Transcript]) -> f64 {
 async fn load_transcripts(pool: &sqlx::SqlitePool, meeting_id: &str) -> Result<Vec<Transcript>> {
     Ok(sqlx::query_as::<_, Transcript>(
         "SELECT id, meeting_id, transcript, timestamp, summary, action_items, key_points,
-                audio_start_time, audio_end_time, duration, speaker_id, speaker_label,
-                speaker_profile_id, speaker_source, speaker_color, is_overlap,
-                candidate_speaker_ids, diarization_status, diarization_method,
-                diarization_confidence
+                audio_start_time, audio_end_time, duration
+         FROM transcripts WHERE meeting_id = ? ORDER BY audio_start_time, id",
+    )
+    .bind(meeting_id)
+    .fetch_all(pool)
+    .await?)
+}
+
+async fn load_core_backup(
+    pool: &sqlx::SqlitePool,
+    meeting_id: &str,
+) -> Result<Vec<CoreTranscriptBackup>> {
+    Ok(sqlx::query_as::<_, CoreTranscriptBackup>(
+        "SELECT id, meeting_id, transcript, timestamp, summary, action_items, key_points,
+                audio_start_time, audio_end_time, duration, speaker
          FROM transcripts WHERE meeting_id = ? ORDER BY audio_start_time, id",
     )
     .bind(meeting_id)
@@ -896,29 +996,40 @@ async fn load_transcripts(pool: &sqlx::SqlitePool, meeting_id: &str) -> Result<V
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn replace_atomically(
-    pool: &sqlx::SqlitePool,
+async fn publish_labels_atomically(
+    core_pool: &sqlx::SqlitePool,
+    feature_pool: &sqlx::SqlitePool,
     meeting_id: &str,
     run_id: &str,
     windows: &[FinalWindow],
     transcripts: &[FinalTranscript],
+    original_transcripts: &[Transcript],
     quality_flags: &[String],
     coverage: f64,
     success_rate: f64,
 ) -> Result<()> {
-    let mut connection = pool.acquire().await?;
-    let mut transaction = connection.begin().await?;
+    // Abort if another transcript operation changed the meeting while analysis ran.
+    // This function never writes to the core transcript database.
+    let current = load_transcripts(core_pool, meeting_id).await?;
+    if serde_json::to_string(&current)? != serde_json::to_string(original_transcripts)? {
+        return Err(anyhow!(
+            "The transcript changed during speaker analysis. Run speaker identification again."
+        ));
+    }
+    let mut feature_connection = feature_pool.acquire().await?;
+    let mut feature_transaction = feature_connection.begin().await?;
     sqlx::query("DELETE FROM speaker_segments WHERE meeting_id = ?")
         .bind(meeting_id)
-        .execute(&mut *transaction)
+        .execute(&mut *feature_transaction)
         .await?;
     for window in windows {
         sqlx::query(
             "INSERT INTO speaker_segments (
                 id, meeting_id, source, start_time, end_time, speaker_id, speaker_label,
-                speaker_profile_id, confidence, is_overlap, diarization_status, diarization_method,
-                candidate_speaker_ids
-             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'final', 'fluid_audio_offline_0.12.4', ?)",
+                speaker_profile_id, confidence, is_overlap, diarization_status,
+                diarization_method, candidate_speaker_ids
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'final',
+                       'fluid_audio_offline_0.12.4', ?)",
         )
         .bind(format!("speaker-segment-{}", Uuid::new_v4()))
         .bind(meeting_id)
@@ -935,54 +1046,53 @@ async fn replace_atomically(
         .bind(window.confidence)
         .bind(window.is_overlap as i64)
         .bind(serde_json::to_string(&window.candidate_speaker_ids)?)
-        .execute(&mut *transaction)
+        .execute(&mut *feature_transaction)
         .await?;
     }
-    sqlx::query("DELETE FROM transcripts WHERE meeting_id = ?")
+    sqlx::query("DELETE FROM transcript_speakers WHERE meeting_id = ?")
         .bind(meeting_id)
-        .execute(&mut *transaction)
+        .execute(&mut *feature_transaction)
         .await?;
     for transcript in transcripts {
         sqlx::query(
-            "INSERT INTO transcripts (
-                id, meeting_id, transcript, timestamp, audio_start_time, audio_end_time,
-                duration, speaker_id, speaker_label, speaker_source, speaker_color,
-                speaker_profile_id, is_overlap, candidate_speaker_ids, diarization_status,
-                diarization_method, diarization_confidence
-             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'final',
-                       'fluid_audio_offline_0.12.4', ?)",
+            "INSERT INTO transcript_speakers (
+                transcript_id, meeting_id, audio_start_time, audio_end_time,
+                speaker_id, speaker_label, speaker_profile_id, speaker_source,
+                speaker_color, is_overlap, candidate_speaker_ids,
+                diarization_status, diarization_method, diarization_confidence,
+                run_id, published
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'final',
+                       'fluid_audio_offline_0.12.4', ?, ?, 1)",
         )
         .bind(&transcript.id)
         .bind(meeting_id)
-        .bind(&transcript.text)
-        .bind(format_timestamp(transcript.start))
         .bind(transcript.start)
         .bind(transcript.end)
-        .bind(transcript.end - transcript.start)
         .bind(&transcript.speaker_id)
         .bind(&transcript.speaker_label)
+        .bind(&transcript.speaker_profile_id)
         .bind(&transcript.source)
         .bind(if transcript.is_overlap {
             "#f97316"
         } else {
             "#3b82f6"
         })
-        .bind(&transcript.speaker_profile_id)
         .bind(transcript.is_overlap as i64)
         .bind(serde_json::to_string(&transcript.candidates)?)
         .bind(transcript.confidence)
-        .execute(&mut *transaction)
+        .bind(run_id)
+        .execute(&mut *feature_transaction)
         .await?;
     }
     sqlx::query(
-        "UPDATE diarization_runs SET status = 'completed', progress = 100,
+        "UPDATE diarization_runs SET status = 'applied', progress = 100,
             assigned_coverage = ?, transcription_success_rate = ?, completed_at = CURRENT_TIMESTAMP
          WHERE id = ?",
     )
     .bind(coverage)
     .bind(success_rate)
     .bind(run_id)
-    .execute(&mut *transaction)
+    .execute(&mut *feature_transaction)
     .await?;
     sqlx::query(
         "INSERT INTO meeting_diarization_status (
@@ -1003,9 +1113,9 @@ async fn replace_atomically(
     .bind(run_id)
     .bind(coverage)
     .bind(success_rate)
-    .execute(&mut *transaction)
+    .execute(&mut *feature_transaction)
     .await?;
-    transaction.commit().await?;
+    feature_transaction.commit().await?;
     Ok(())
 }
 
@@ -1084,6 +1194,268 @@ fn format_timestamp(seconds: f64) -> String {
     )
 }
 
+fn hash_json(value: &str) -> String {
+    format!("{:x}", Sha256::digest(value.as_bytes()))
+}
+
+#[derive(sqlx::FromRow)]
+struct InterruptedRun {
+    id: String,
+    meeting_id: String,
+    transcript_backup: String,
+    proposed_transcripts: String,
+    proposed_speaker_metadata: String,
+    live_rows_hash: String,
+    final_rows_hash: String,
+    quality_flags: Option<String>,
+    assigned_coverage: Option<f64>,
+    transcription_success_rate: Option<f64>,
+}
+
+/// Reconcile the only cross-database transition before transcript UI data is
+/// served. The core database is compared with both staged hashes; no guess is
+/// made when neither hash matches.
+pub async fn reconcile_interrupted_runs(
+    core_pool: &sqlx::SqlitePool,
+    feature_pool: &sqlx::SqlitePool,
+) -> Result<()> {
+    let prepared: Vec<(String, String)> =
+        sqlx::query_as("SELECT id, meeting_id FROM diarization_runs WHERE status = 'prepared'")
+            .fetch_all(feature_pool)
+            .await?;
+    for (run_id, meeting_id) in prepared {
+        if !is_current_recovery_run(feature_pool, &meeting_id, &run_id).await? {
+            mark_stale_run(feature_pool, &run_id).await?;
+            continue;
+        }
+        sqlx::query(
+            "UPDATE diarization_runs SET status = 'fallback_to_live',
+                error = 'Interrupted before transcript apply',
+                completed_at = CURRENT_TIMESTAMP WHERE id = ?",
+        )
+        .bind(&run_id)
+        .execute(feature_pool)
+        .await?;
+        set_status(
+            feature_pool,
+            &meeting_id,
+            &run_id,
+            "fallback_to_live",
+            100,
+            Some("Final speaker refinement was interrupted; the live transcript was retained."),
+            &[],
+            None,
+            None,
+        )
+        .await?;
+    }
+
+    let runs = sqlx::query_as::<_, InterruptedRun>(
+        "SELECT id, meeting_id, transcript_backup, proposed_transcripts,
+                proposed_speaker_metadata, live_rows_hash, final_rows_hash,
+                quality_flags, assigned_coverage, transcription_success_rate
+         FROM diarization_runs
+         WHERE status IN ('applying', 'recovery_required', 'fallback_to_live', 'failed')
+           AND transcript_backup IS NOT NULL
+           AND proposed_transcripts IS NOT NULL
+           AND proposed_speaker_metadata IS NOT NULL
+           AND live_rows_hash IS NOT NULL
+           AND final_rows_hash IS NOT NULL",
+    )
+    .fetch_all(feature_pool)
+    .await?;
+
+    for run in runs {
+        if !is_current_recovery_run(feature_pool, &run.meeting_id, &run.id).await? {
+            mark_stale_run(feature_pool, &run.id).await?;
+            continue;
+        }
+        let actual = load_core_backup(core_pool, &run.meeting_id).await?;
+        let actual_hash = hash_json(&serde_json::to_string(&actual)?);
+        if actual_hash == run.final_rows_hash {
+            let manual_count: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM transcript_speakers WHERE meeting_id = ? AND published = 1 AND diarization_method = 'manual'",
+            ).bind(&run.meeting_id).fetch_one(feature_pool).await?;
+            if manual_count > 0 {
+                mark_stale_run(feature_pool, &run.id).await?;
+                set_status(feature_pool, &run.meeting_id, &run.id, "needs_review", 100,
+                    Some("Manual speaker corrections were retained. Run speaker identification again only if you want to replace them."),
+                    &[], None, None).await?;
+                continue;
+            }
+            let transcripts: Vec<FinalTranscript> =
+                serde_json::from_str(&run.proposed_transcripts)?;
+            let windows: Vec<FinalWindow> = serde_json::from_str(&run.proposed_speaker_metadata)?;
+            publish_recovered_metadata(feature_pool, &run, &windows, &transcripts).await?;
+        } else if actual_hash == run.live_rows_hash {
+            sqlx::query(
+                "UPDATE diarization_runs SET status = 'fallback_to_live',
+                    error = 'Interrupted before core transcript replacement',
+                    final_rows_hash = NULL, completed_at = CURRENT_TIMESTAMP WHERE id = ?",
+            )
+            .bind(&run.id)
+            .execute(feature_pool)
+            .await?;
+            set_status(
+                feature_pool,
+                &run.meeting_id,
+                &run.id,
+                "fallback_to_live",
+                100,
+                Some("Final speaker refinement was interrupted; the live transcript was retained."),
+                &quality_flags_from_json(run.quality_flags.as_deref()),
+                None,
+                None,
+            )
+            .await?;
+        } else {
+            // A later edit or retranscription can legitimately match neither old hash.
+            // Keep current text and retain the backup for explicit recovery.
+            sqlx::query(
+                "UPDATE diarization_runs SET status = 'needs_review',
+                    error = 'Current transcript differs from both staged versions; current text retained',
+                    completed_at = CURRENT_TIMESTAMP WHERE id = ?",
+            )
+            .bind(&run.id)
+            .execute(feature_pool)
+            .await?;
+            set_status(
+                feature_pool, &run.meeting_id, &run.id, "needs_review", 100,
+                Some("An older speaker update does not match the current transcript. Current text was retained; identify speakers again to update labels."),
+                &quality_flags_from_json(run.quality_flags.as_deref()), None, None,
+            ).await?;
+        }
+    }
+    Ok(())
+}
+
+async fn is_current_recovery_run(
+    pool: &sqlx::SqlitePool,
+    meeting_id: &str,
+    run_id: &str,
+) -> Result<bool> {
+    let current: Option<String> =
+        sqlx::query_scalar("SELECT run_id FROM meeting_diarization_status WHERE meeting_id = ?")
+            .bind(meeting_id)
+            .fetch_optional(pool)
+            .await?
+            .flatten();
+    if let Some(current) = current {
+        return Ok(current == run_id);
+    }
+    let latest: Option<String> = sqlx::query_scalar(
+        "SELECT id FROM diarization_runs WHERE meeting_id = ? ORDER BY started_at DESC, rowid DESC LIMIT 1",
+    ).bind(meeting_id).fetch_optional(pool).await?;
+    Ok(latest.as_deref() == Some(run_id))
+}
+
+async fn mark_stale_run(pool: &sqlx::SqlitePool, run_id: &str) -> Result<()> {
+    sqlx::query(
+        "UPDATE diarization_runs SET status = 'needs_review',
+        error = 'A newer run or manual correction takes precedence; current data retained',
+        completed_at = CURRENT_TIMESTAMP WHERE id = ?",
+    )
+    .bind(run_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+async fn publish_recovered_metadata(
+    pool: &sqlx::SqlitePool,
+    run: &InterruptedRun,
+    windows: &[FinalWindow],
+    transcripts: &[FinalTranscript],
+) -> Result<()> {
+    let mut transaction = pool.begin().await?;
+    sqlx::query("DELETE FROM speaker_segments WHERE meeting_id = ?")
+        .bind(&run.meeting_id)
+        .execute(&mut *transaction)
+        .await?;
+    for window in windows {
+        sqlx::query(
+            "INSERT INTO speaker_segments (
+                id, meeting_id, source, start_time, end_time, speaker_id,
+                speaker_profile_id, confidence, is_overlap, diarization_status,
+                diarization_method, candidate_speaker_ids
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'final',
+                       'fluid_audio_offline_0.12.4', ?)",
+        )
+        .bind(format!("speaker-segment-{}", Uuid::new_v4()))
+        .bind(&run.meeting_id)
+        .bind(&window.source)
+        .bind(window.start)
+        .bind(window.end)
+        .bind(&window.speaker_id)
+        .bind(&window.speaker_profile_id)
+        .bind(window.confidence)
+        .bind(window.is_overlap as i64)
+        .bind(serde_json::to_string(&window.candidate_speaker_ids)?)
+        .execute(&mut *transaction)
+        .await?;
+    }
+    sqlx::query("DELETE FROM transcript_speakers WHERE meeting_id = ?")
+        .bind(&run.meeting_id)
+        .execute(&mut *transaction)
+        .await?;
+    for transcript in transcripts {
+        sqlx::query(
+            "INSERT INTO transcript_speakers (
+                transcript_id, meeting_id, audio_start_time, audio_end_time, speaker_id,
+                speaker_label, speaker_profile_id, speaker_source, speaker_color, is_overlap,
+                candidate_speaker_ids, diarization_status, diarization_method,
+                diarization_confidence, run_id, published
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'final',
+                       'fluid_audio_offline_0.12.4', ?, ?, 1)",
+        )
+        .bind(&transcript.id)
+        .bind(&run.meeting_id)
+        .bind(transcript.start)
+        .bind(transcript.end)
+        .bind(&transcript.speaker_id)
+        .bind(&transcript.speaker_label)
+        .bind(&transcript.speaker_profile_id)
+        .bind(&transcript.source)
+        .bind(if transcript.is_overlap {
+            "#f97316"
+        } else {
+            "#3b82f6"
+        })
+        .bind(transcript.is_overlap as i64)
+        .bind(serde_json::to_string(&transcript.candidates)?)
+        .bind(transcript.confidence)
+        .bind(&run.id)
+        .execute(&mut *transaction)
+        .await?;
+    }
+    sqlx::query(
+        "UPDATE diarization_runs SET status = 'applied', progress = 100,
+            completed_at = CURRENT_TIMESTAMP WHERE id = ?",
+    )
+    .bind(&run.id)
+    .execute(&mut *transaction)
+    .await?;
+    transaction.commit().await?;
+    set_status(
+        pool,
+        &run.meeting_id,
+        &run.id,
+        "completed",
+        100,
+        None,
+        &quality_flags_from_json(run.quality_flags.as_deref()),
+        run.assigned_coverage,
+        run.transcription_success_rate,
+    )
+    .await
+}
+
+fn quality_flags_from_json(value: Option<&str>) -> Vec<String> {
+    value
+        .and_then(|json| serde_json::from_str(json).ok())
+        .unwrap_or_default()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1142,8 +1514,15 @@ mod tests {
             },
         ];
         let windows = rebuild_windows(&intervals);
-        assert_eq!(windows.len(), 2);
-        assert!(windows.iter().all(|window| window.is_overlap));
+        assert_eq!(windows.len(), 4);
+        assert!(windows
+            .iter()
+            .filter(|window| window.start == 1.0 && window.end == 2.0)
+            .all(|window| window.is_overlap));
+        assert!(windows
+            .iter()
+            .filter(|window| window.end <= 1.0 || window.start >= 2.0)
+            .all(|window| !window.is_overlap));
     }
 
     #[test]
@@ -1151,5 +1530,398 @@ mod tests {
         assert!(passes_quality_gates(0.80, 0.95));
         assert!(!passes_quality_gates(0.799, 1.0));
         assert!(!passes_quality_gates(1.0, 0.949));
+    }
+
+    #[tokio::test]
+    async fn interrupted_apply_with_final_core_rows_publishes_metadata() {
+        use sqlx::sqlite::SqlitePoolOptions;
+        for (interrupted_status, has_manual_correction) in [
+            ("applying", false),
+            ("fallback_to_live", false),
+            ("failed", false),
+            ("recovery_required", false),
+            ("applying", true),
+            ("fallback_to_live", true),
+            ("failed", true),
+            ("recovery_required", true),
+        ] {
+            let core = SqlitePoolOptions::new()
+                .max_connections(1)
+                .connect("sqlite::memory:")
+                .await
+                .unwrap();
+            sqlx::migrate!("./migrations").run(&core).await.unwrap();
+            sqlx::query(
+            "INSERT INTO meetings (id, title, created_at, updated_at) VALUES ('m1', 'Test', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+        ).execute(&core).await.unwrap();
+            sqlx::query(
+            "INSERT INTO transcripts (id, meeting_id, transcript, timestamp, audio_start_time, audio_end_time, duration)
+             VALUES ('final-1', 'm1', 'final text', '00:00:01', 1.0, 2.0, 1.0)",
+        ).execute(&core).await.unwrap();
+
+            let feature = SqlitePoolOptions::new()
+                .max_connections(1)
+                .connect("sqlite::memory:")
+                .await
+                .unwrap();
+            sqlx::migrate!("./speaker-migrations")
+                .run(&feature)
+                .await
+                .unwrap();
+            let final_transcripts = vec![FinalTranscript {
+                id: "final-1".to_string(),
+                text: "final text".to_string(),
+                start: 1.0,
+                end: 2.0,
+                speaker_id: Some("speaker-1".to_string()),
+                speaker_profile_id: None,
+                speaker_label: "Alice".to_string(),
+                source: "system".to_string(),
+                is_overlap: false,
+                candidates: Vec::new(),
+                confidence: 0.9,
+            }];
+            let windows = vec![FinalWindow {
+                source: "system".to_string(),
+                start: 1.0,
+                end: 2.0,
+                speaker_id: Some("speaker-1".to_string()),
+                speaker_profile_id: None,
+                candidate_speaker_ids: Vec::new(),
+                confidence: 0.9,
+                is_overlap: false,
+            }];
+            let actual = load_core_backup(&core, "m1").await.unwrap();
+            let live_backup = serde_json::to_string(&Vec::<CoreTranscriptBackup>::new()).unwrap();
+            sqlx::query(
+                "INSERT INTO diarization_runs (
+                id, meeting_id, status, method, transcript_backup, proposed_transcripts,
+                proposed_speaker_metadata, live_rows_hash, final_rows_hash
+             ) VALUES ('r1', 'm1', ?, 'test', ?, ?, ?, ?, ?)",
+            )
+            .bind(interrupted_status)
+            .bind(&live_backup)
+            .bind(serde_json::to_string(&final_transcripts).unwrap())
+            .bind(serde_json::to_string(&windows).unwrap())
+            .bind(hash_json(&live_backup))
+            .bind(hash_json(&serde_json::to_string(&actual).unwrap()))
+            .execute(&feature)
+            .await
+            .unwrap();
+
+            if has_manual_correction {
+                sqlx::query("INSERT INTO transcript_speakers (transcript_id, meeting_id, speaker_id, speaker_label, diarization_method, published) VALUES ('final-1', 'm1', 'corrected', 'User correction', 'manual', 1)")
+                    .execute(&feature).await.unwrap();
+            }
+            reconcile_interrupted_runs(&core, &feature).await.unwrap();
+
+            let status: String =
+                sqlx::query_scalar("SELECT status FROM diarization_runs WHERE id='r1'")
+                    .fetch_one(&feature)
+                    .await
+                    .unwrap();
+            assert_eq!(
+                status,
+                if has_manual_correction {
+                    "needs_review"
+                } else {
+                    "applied"
+                }
+            );
+            let label: String = sqlx::query_scalar(
+            "SELECT speaker_label FROM transcript_speakers WHERE transcript_id='final-1' AND published=1",
+        ).fetch_one(&feature).await.unwrap();
+            assert_eq!(
+                label,
+                if has_manual_correction {
+                    "User correction"
+                } else {
+                    "Alice"
+                }
+            );
+        }
+    }
+    fn live_row(id: &str, start: f64, end: f64) -> Transcript {
+        Transcript {
+            id: id.to_string(),
+            meeting_id: "m1".to_string(),
+            transcript: format!("Original words for {id}"),
+            timestamp: "wall-clock".to_string(),
+            summary: Some("Keep summary".to_string()),
+            action_items: None,
+            key_points: None,
+            audio_start_time: Some(start),
+            audio_end_time: Some(end),
+            duration: Some(end - start),
+        }
+    }
+
+    #[test]
+    fn speaker_labels_keep_unmatched_words_and_transcript_ids() {
+        let rows = vec![live_row("t1", 0.0, 10.0), live_row("t2", 10.0, 20.0)];
+        let windows = rebuild_windows(&[SidecarInterval {
+            speaker_id: "a".into(),
+            source: "system".into(),
+            start: 0.0,
+            end: 10.0,
+            confidence: 0.9,
+            is_overlap: false,
+            candidate_speaker_ids: vec![],
+        }]);
+        let labels = HashMap::from([("a".to_string(), "Alice".to_string())]);
+        let result = label_existing_transcripts(&rows, &windows, &labels);
+        assert_eq!(result.len(), rows.len());
+        for (old, new) in rows.iter().zip(&result) {
+            assert_eq!(old.id, new.id);
+            assert_eq!(old.transcript, new.text);
+        }
+        assert_eq!(result[0].speaker_label, "Alice");
+        assert_eq!(result[1].speaker_label, "Unknown speaker");
+    }
+
+    #[test]
+    fn a_short_interruption_does_not_mark_the_whole_turn_as_overlap() {
+        let windows = rebuild_windows(&[
+            SidecarInterval {
+                speaker_id: "a".into(),
+                source: "system".into(),
+                start: 0.0,
+                end: 60.0,
+                confidence: 1.0,
+                is_overlap: true,
+                candidate_speaker_ids: vec!["b".into()],
+            },
+            SidecarInterval {
+                speaker_id: "b".into(),
+                source: "system".into(),
+                start: 10.0,
+                end: 11.0,
+                confidence: 1.0,
+                is_overlap: true,
+                candidate_speaker_ids: vec!["a".into()],
+            },
+        ]);
+        assert_eq!(windows.len(), 3);
+        assert!(!windows[0].is_overlap);
+        assert!(windows[1].is_overlap);
+        assert!(!windows[2].is_overlap);
+        let labels = HashMap::from([("a".to_string(), "Alice".to_string())]);
+        let result = label_existing_transcripts(&[live_row("t1", 0.0, 60.0)], &windows, &labels);
+        assert!(!result[0].is_overlap);
+        assert_eq!(result[0].speaker_label, "Alice");
+    }
+
+    #[test]
+    fn coverage_counts_all_slices_without_counting_sources_twice() {
+        let windows = rebuild_windows(&[
+            SidecarInterval {
+                speaker_id: "a".into(),
+                source: "microphone".into(),
+                start: 0.0,
+                end: 10.0,
+                confidence: 1.0,
+                is_overlap: false,
+                candidate_speaker_ids: vec![],
+            },
+            SidecarInterval {
+                speaker_id: "b".into(),
+                source: "system".into(),
+                start: 4.0,
+                end: 6.0,
+                confidence: 1.0,
+                is_overlap: false,
+                candidate_speaker_ids: vec![],
+            },
+        ]);
+        assert_eq!(
+            assignment_coverage(&windows, &[live_row("t1", 0.0, 10.0)]),
+            1.0
+        );
+    }
+
+    #[tokio::test]
+    async fn metadata_publish_failure_never_changes_transcript_text() {
+        use sqlx::sqlite::SqlitePoolOptions;
+        let core = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::migrate!("./migrations").run(&core).await.unwrap();
+        sqlx::query("INSERT INTO meetings(id,title,created_at,updated_at) VALUES ('m1','Test',CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)")
+            .execute(&core).await.unwrap();
+        sqlx::query("INSERT INTO transcripts(id,meeting_id,transcript,timestamp,summary,audio_start_time,audio_end_time,duration) VALUES ('t1','m1','Keep these words','original time','Keep summary',0,10,10)")
+            .execute(&core).await.unwrap();
+        let feature = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::migrate!("./speaker-migrations")
+            .run(&feature)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO diarization_runs(id,meeting_id,status,method) VALUES ('r1','m1','prepared','test')")
+            .execute(&feature).await.unwrap();
+        sqlx::query("CREATE TRIGGER fail_publish BEFORE INSERT ON speaker_segments BEGIN SELECT RAISE(ABORT, 'test failure'); END")
+            .execute(&feature).await.unwrap();
+        let before = load_core_backup(&core, "m1").await.unwrap();
+        let original = load_transcripts(&core, "m1").await.unwrap();
+        let windows = rebuild_windows(&[SidecarInterval {
+            speaker_id: "a".into(),
+            source: "mixed".into(),
+            start: 0.0,
+            end: 10.0,
+            confidence: 1.0,
+            is_overlap: false,
+            candidate_speaker_ids: vec![],
+        }]);
+        let result = label_existing_transcripts(&original, &windows, &HashMap::new());
+        assert!(publish_labels_atomically(
+            &core,
+            &feature,
+            "m1",
+            "r1",
+            &windows,
+            &result,
+            &original,
+            &[],
+            1.0,
+            1.0
+        )
+        .await
+        .is_err());
+        let after = load_core_backup(&core, "m1").await.unwrap();
+        assert_eq!(
+            serde_json::to_string(&before).unwrap(),
+            serde_json::to_string(&after).unwrap()
+        );
+        sqlx::query("DROP TRIGGER fail_publish")
+            .execute(&feature)
+            .await
+            .unwrap();
+        publish_labels_atomically(
+            &core,
+            &feature,
+            "m1",
+            "r1",
+            &windows,
+            &result,
+            &original,
+            &[],
+            1.0,
+            1.0,
+        )
+        .await
+        .unwrap();
+        let after = load_core_backup(&core, "m1").await.unwrap();
+        assert_eq!(
+            serde_json::to_string(&before).unwrap(),
+            serde_json::to_string(&after).unwrap()
+        );
+        let count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM transcript_speakers WHERE transcript_id='t1'")
+                .fetch_one(&feature)
+                .await
+                .unwrap();
+        assert_eq!(count, 1);
+    }
+    #[tokio::test]
+    async fn an_old_failed_run_never_restores_over_newer_transcript_text() {
+        use sqlx::sqlite::SqlitePoolOptions;
+        let core = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::migrate!("./migrations").run(&core).await.unwrap();
+        sqlx::query("INSERT INTO meetings(id,title,created_at,updated_at) VALUES ('m1','Test',CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)")
+            .execute(&core).await.unwrap();
+        sqlx::query("INSERT INTO transcripts(id,meeting_id,transcript,timestamp) VALUES ('newer','m1','Newer text must stay','original time')")
+            .execute(&core).await.unwrap();
+        let feature = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::migrate!("./speaker-migrations")
+            .run(&feature)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO diarization_runs(id,meeting_id,status,method,transcript_backup,proposed_transcripts,proposed_speaker_metadata,live_rows_hash,final_rows_hash) VALUES ('r1','m1','fallback_to_live','test','[]','[]','[]','old-live-hash','old-final-hash')")
+            .execute(&feature).await.unwrap();
+        let before = serde_json::to_string(&load_core_backup(&core, "m1").await.unwrap()).unwrap();
+        reconcile_interrupted_runs(&core, &feature).await.unwrap();
+        let after = serde_json::to_string(&load_core_backup(&core, "m1").await.unwrap()).unwrap();
+        assert_eq!(before, after);
+        let status: String =
+            sqlx::query_scalar("SELECT status FROM diarization_runs WHERE id='r1'")
+                .fetch_one(&feature)
+                .await
+                .unwrap();
+        assert_eq!(status, "needs_review");
+    }
+
+    #[test]
+    fn mixed_speaker_rows_are_not_clean_voice_samples() {
+        let windows = rebuild_windows(&[
+            SidecarInterval {
+                speaker_id: "a".into(),
+                source: "system".into(),
+                start: 0.0,
+                end: 6.0,
+                confidence: 0.95,
+                is_overlap: false,
+                candidate_speaker_ids: vec![],
+            },
+            SidecarInterval {
+                speaker_id: "b".into(),
+                source: "system".into(),
+                start: 6.0,
+                end: 10.0,
+                confidence: 0.95,
+                is_overlap: false,
+                candidate_speaker_ids: vec![],
+            },
+        ]);
+        let result = label_existing_transcripts(
+            &[live_row("t1", 0.0, 10.0)],
+            &windows,
+            &HashMap::from([("a".to_string(), "Alice".to_string())]),
+        );
+        assert_eq!(result[0].speaker_label, "Alice");
+        assert!(result[0].confidence < 0.8);
+    }
+
+    #[tokio::test]
+    async fn legacy_recovery_does_not_change_a_newer_run_status() {
+        use sqlx::sqlite::SqlitePoolOptions;
+        let core = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::migrate!("./migrations").run(&core).await.unwrap();
+        let feature = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::migrate!("./speaker-migrations")
+            .run(&feature)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO diarization_runs(id,meeting_id,status,method) VALUES ('old','m1','prepared','test'),('new','m1','applied','test')")
+            .execute(&feature).await.unwrap();
+        sqlx::query("INSERT INTO meeting_diarization_status(meeting_id,run_id,current_status) VALUES ('m1','new','completed')")
+            .execute(&feature).await.unwrap();
+        reconcile_interrupted_runs(&core, &feature).await.unwrap();
+        let status: String = sqlx::query_scalar(
+            "SELECT current_status FROM meeting_diarization_status WHERE meeting_id='m1'",
+        )
+        .fetch_one(&feature)
+        .await
+        .unwrap();
+        assert_eq!(status, "completed");
     }
 }

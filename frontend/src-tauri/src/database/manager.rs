@@ -29,6 +29,10 @@ impl DatabaseManager {
             }
         }
 
+        super::compatibility::prepare_upstream_compatible_core(Path::new(tauri_db_path))
+            .await
+            .map_err(sqlx::Error::Protocol)?;
+
         let pool = SqlitePool::connect(tauri_db_path).await?;
 
         sqlx::migrate!("./migrations").run(&pool).await?;

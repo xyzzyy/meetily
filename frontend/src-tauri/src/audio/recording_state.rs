@@ -19,6 +19,8 @@ pub struct SourceActivity {
     pub microphone_active: bool,
     pub system_active: bool,
     pub system_available: bool,
+    /// Both sources were active in the same audio window.
+    pub overlap_detected: bool,
 }
 
 /// Audio chunk with metadata for processing
