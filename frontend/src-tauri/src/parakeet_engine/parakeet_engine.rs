@@ -352,7 +352,7 @@ impl ParakeetEngine {
                     &self.models_dir,
                     self.shared_models_dir.as_deref(),
                     spec.name,
-                );
+                ).map_err(anyhow::Error::msg)?;
                 let status = if model_path.exists() {
                     match Self::validate_model_directory(&model_path, spec.artifacts) {
                         Ok(()) => ModelStatus::Available,

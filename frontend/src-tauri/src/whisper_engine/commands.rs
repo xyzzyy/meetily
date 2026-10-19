@@ -87,7 +87,7 @@ fn discover_models_standalone() -> Result<Vec<ModelInfo>, String> {
             &whisper_dir,
             SHARED_MODELS_DIR.lock().unwrap().as_deref(),
             filename,
-        );
+        )?;
         let status = if model_path.exists() {
             match std::fs::metadata(&model_path) {
                 Ok(metadata) => {
