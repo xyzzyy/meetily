@@ -9,22 +9,16 @@ pub static WHISPER_ENGINE: Mutex<Option<Arc<WhisperEngine>>> = Mutex::new(None);
 
 // Global models directory path (set during app initialization)
 static MODELS_DIR: Mutex<Option<PathBuf>> = Mutex::new(None);
+static SHARED_MODELS_DIR: Mutex<Option<PathBuf>> = Mutex::new(None);
 
 /// Initialize the models directory path using app_data_dir
 /// This should be called during app setup before whisper_init
 pub fn set_models_directory<R: Runtime>(app: &AppHandle<R>) {
-    let app_data_dir = app.path().app_data_dir()
-        .expect("Failed to get app data dir");
-
-    let models_dir = app_data_dir.join("models");
-
-    // Create directory if it doesn't exist
-    if !models_dir.exists() {
-        if let Err(e) = std::fs::create_dir_all(&models_dir) {
-            log::error!("Failed to create models directory: {}", e);
-            return;
-        }
-    }
+    let models_dir = crate::model_storage::owned_models_root(app)
+        .expect("Failed to resolve branch-owned models directory");
+    let shared_models_dir = crate::model_storage::official_models_root(app)
+        .expect("Failed to resolve shared models directory");
+    *SHARED_MODELS_DIR.lock().unwrap() = shared_models_dir;
 
     log::info!("Models directory set to: {}", models_dir.display());
 
@@ -46,7 +40,8 @@ pub async fn whisper_init() -> Result<(), String> {
 
     let models_dir = get_models_directory();
     let engine = WhisperEngine::new_with_models_dir(models_dir)
-        .map_err(|e| format!("Failed to initialize whisper engine: {}", e))?;
+        .map_err(|e| format!("Failed to initialize whisper engine: {}", e))?
+        .with_shared_models_dir(SHARED_MODELS_DIR.lock().unwrap().clone());
     *guard = Some(Arc::new(engine));
     Ok(())
 }
@@ -89,7 +84,11 @@ fn discover_models_standalone() -> Result<Vec<ModelInfo>, String> {
     let mut models = Vec::new();
 
     for &(name, filename, size_mb, accuracy, speed, description) in model_configs {
-        let model_path = whisper_dir.join(filename);
+        let model_path = crate::model_storage::resolve_model_for_read(
+            &whisper_dir,
+            SHARED_MODELS_DIR.lock().unwrap().as_deref(),
+            filename,
+        );
         let status = if model_path.exists() {
             match std::fs::metadata(&model_path) {
                 Ok(metadata) => {

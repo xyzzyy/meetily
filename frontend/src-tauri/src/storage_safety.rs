@@ -36,13 +36,33 @@ pub fn branch_app_data_dir<R: Runtime>(app: &AppHandle<R>) -> Result<PathBuf, St
         .app_data_dir()
         .map_err(|error| format!("Failed to resolve Meetily Branch storage: {error}"))?;
 
+    validate_branch_directory(&path)?;
+    Ok(path)
+}
+
+fn reject_symlink(path: &Path) -> Result<(), String> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => Err(format!(
+            "Meetily Branch storage must not be a symbolic link: {}. No files were opened.",
+            path.display()
+        )),
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!(
+            "Failed to inspect Meetily Branch storage {}: {error}",
+            path.display()
+        )),
+    }
+}
+
+pub(crate) fn validate_branch_directory(path: &Path) -> Result<(), String> {
     if path.file_name().and_then(|name| name.to_str()) != Some(BRANCH_IDENTIFIER) {
         return Err(format!(
             "Meetily Branch resolved an unexpected storage directory: {}. No files were opened.",
             path.display()
         ));
     }
-    Ok(path)
+    reject_symlink(path)
 }
 
 fn legacy_and_branch_dirs(branch_dir: &Path) -> Result<(PathBuf, PathBuf), String> {
@@ -64,7 +84,13 @@ pub fn adopt_legacy_speaker_test_installation<R: Runtime>(
     app: &AppHandle<R>,
 ) -> Result<PathBuf, String> {
     let resolved_branch_dir = branch_app_data_dir(app)?;
-    let (legacy_dir, branch_dir) = legacy_and_branch_dirs(&resolved_branch_dir)?;
+    adopt_legacy_installation(&resolved_branch_dir)
+}
+
+fn adopt_legacy_installation(resolved_branch_dir: &Path) -> Result<PathBuf, String> {
+    validate_branch_directory(resolved_branch_dir)?;
+    let (legacy_dir, branch_dir) = legacy_and_branch_dirs(resolved_branch_dir)?;
+    reject_symlink(&legacy_dir)?;
     let legacy_exists = legacy_dir.exists();
     let branch_exists = branch_dir.exists();
 
@@ -107,5 +133,63 @@ mod tests {
         assert_eq!(resolved.file_name().unwrap(), BRANCH_IDENTIFIER);
         assert_ne!(legacy.file_name().unwrap(), OFFICIAL_IDENTIFIER);
         assert_ne!(resolved.file_name().unwrap(), OFFICIAL_IDENTIFIER);
+    }
+    #[test]
+    fn legacy_adoption_moves_only_isolated_data_and_refuses_conflicts() {
+        let temp = tempfile::tempdir().unwrap();
+        let branch = temp.path().join(BRANCH_IDENTIFIER);
+        let legacy = temp.path().join(LEGACY_SPEAKER_TEST_IDENTIFIER);
+        let official = temp.path().join(OFFICIAL_IDENTIFIER);
+        std::fs::create_dir(&official).unwrap();
+        std::fs::write(official.join("data"), b"official").unwrap();
+        assert!(validate_branch_directory(&branch).is_ok());
+        assert_eq!(adopt_legacy_installation(&branch).unwrap(), branch);
+        assert!(!branch.exists());
+
+        std::fs::create_dir(&legacy).unwrap();
+        std::fs::write(legacy.join("data"), b"legacy").unwrap();
+        assert_eq!(adopt_legacy_installation(&branch).unwrap(), branch);
+        assert_eq!(std::fs::read(branch.join("data")).unwrap(), b"legacy");
+        assert!(!legacy.exists());
+
+        std::fs::create_dir(&legacy).unwrap();
+        assert!(adopt_legacy_installation(&branch).is_err());
+        assert!(legacy.exists());
+        assert_eq!(std::fs::read(branch.join("data")).unwrap(), b"legacy");
+        assert_eq!(std::fs::read(official.join("data")).unwrap(), b"official");
+        assert!(validate_branch_directory(&official).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn branch_and_legacy_symlinks_are_rejected_including_dangling_links() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let branch = temp.path().join(BRANCH_IDENTIFIER);
+        let legacy = temp.path().join(LEGACY_SPEAKER_TEST_IDENTIFIER);
+        let official = temp.path().join(OFFICIAL_IDENTIFIER);
+        std::fs::create_dir(&official).unwrap();
+        std::fs::write(official.join("data"), b"official").unwrap();
+
+        for link in [&branch, &legacy] {
+            for target in [&official, &temp.path().join("missing")] {
+                symlink(target, link).unwrap();
+                assert!(adopt_legacy_installation(&branch)
+                    .unwrap_err()
+                    .contains("symbolic link"));
+                if link == &branch {
+                    assert!(validate_branch_directory(&branch).is_err());
+                } else {
+                    assert!(!branch.exists());
+                }
+                assert!(std::fs::symlink_metadata(link)
+                    .unwrap()
+                    .file_type()
+                    .is_symlink());
+                assert_eq!(std::fs::read(official.join("data")).unwrap(), b"official");
+                std::fs::remove_file(link).unwrap();
+            }
+        }
     }
 }

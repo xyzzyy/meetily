@@ -78,12 +78,13 @@ async fn get_sidecar_manager() -> Result<Arc<SidecarManager>> {
 
 /// Get cached model path with read-through caching to avoid repeated filesystem I/O
 fn get_cached_model_path(app_data_dir: &PathBuf, model_name: &str) -> Result<PathBuf> {
+    let resolved_path = models::get_model_path(app_data_dir, model_name)?;
     // Try read lock first (fast path for cache hits)
     {
         let cache = MODEL_PATH_CACHE.read().unwrap();
         if let Some(path) = cache.get(model_name) {
             // Verify file still exists before returning cached path
-            if path.exists() {
+            if path == &resolved_path && path.exists() {
                 return Ok(path.clone());
             }
         }
@@ -94,13 +95,13 @@ fn get_cached_model_path(app_data_dir: &PathBuf, model_name: &str) -> Result<Pat
 
     // Double-check after acquiring write lock (another thread may have updated it)
     if let Some(path) = cache.get(model_name) {
-        if path.exists() {
+        if path == &resolved_path && path.exists() {
             return Ok(path.clone());
         }
     }
 
     // Resolve model path (involves model lookup + filesystem operations)
-    let model_path = models::get_model_path(app_data_dir, model_name)?;
+    let model_path = resolved_path;
 
     if !model_path.exists() {
         return Err(anyhow!(
@@ -301,6 +302,41 @@ pub async fn is_sidecar_healthy() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shared_model_path_cache_switches_to_owned_and_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let branch = dir.path().join(crate::storage_safety::BRANCH_IDENTIFIER);
+        let owned = models::get_models_directory(&branch);
+        let shared = dir
+            .path()
+            .join(crate::storage_safety::OFFICIAL_IDENTIFIER)
+            .join("models/summary");
+        std::fs::create_dir_all(&owned).unwrap();
+        std::fs::create_dir_all(&shared).unwrap();
+        let model = models::get_model_by_name("gemma3:1b").unwrap();
+        let shared_path = shared.join(&model.gguf_file);
+        let owned_path = owned.join(&model.gguf_file);
+        std::fs::write(&shared_path, b"shared").unwrap();
+
+        assert_eq!(
+            get_cached_model_path(&branch, &model.name).unwrap(),
+            shared_path
+        );
+        std::fs::write(&owned_path, b"owned").unwrap();
+        assert_eq!(
+            get_cached_model_path(&branch, &model.name).unwrap(),
+            owned_path
+        );
+        std::fs::remove_file(&owned_path).unwrap();
+        assert_eq!(
+            get_cached_model_path(&branch, &model.name).unwrap(),
+            shared_path
+        );
+        std::fs::remove_file(&shared_path).unwrap();
+        assert!(get_cached_model_path(&branch, &model.name).is_err());
+        MODEL_PATH_CACHE.write().unwrap().remove(&model.name);
+    }
 
     #[test]
     fn test_request_serialization() {

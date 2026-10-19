@@ -110,6 +110,7 @@ pub struct ModelInfo {
 pub struct ModelManager {
     /// Directory where models are stored
     models_dir: PathBuf,
+    shared_models_dir: Option<PathBuf>,
 
     /// Currently available models with their status
     available_models: Arc<RwLock<HashMap<String, ModelInfo>>>,
@@ -158,10 +159,17 @@ impl ModelManager {
 
         Ok(Self {
             models_dir,
+            shared_models_dir: None,
             available_models: Arc::new(RwLock::new(HashMap::new())),
             active_downloads: Arc::new(RwLock::new(HashSet::new())),
             cancel_download_flag: Arc::new(RwLock::new(None)),
         })
+    }
+
+    /// Add an optional shared directory used only for model reads.
+    pub fn with_shared_models_dir(mut self, shared_models_dir: Option<PathBuf>) -> Self {
+        self.shared_models_dir = shared_models_dir;
+        self
     }
 
     /// Initialize and scan for existing models
@@ -191,7 +199,11 @@ impl ModelManager {
         let mut models_map = HashMap::new();
 
         for model_def in model_defs {
-            let model_path = self.models_dir.join(&model_def.gguf_file);
+            let model_path = crate::model_storage::resolve_model_for_read(
+                &self.models_dir,
+                self.shared_models_dir.as_deref(),
+                &model_def.gguf_file,
+            );
             log::debug!(
                 "Checking model '{}' at path: {}",
                 model_def.name,
@@ -826,6 +838,12 @@ impl ModelManager {
         let model_def = get_model_by_name(model_name)
             .ok_or_else(|| anyhow!("Unknown model: {}", model_name))?;
 
+        if let Some(info) = self.get_model_info(model_name).await {
+            if !info.path.starts_with(&self.models_dir) {
+                return Err(anyhow!("Shared models are read-only and cannot be deleted"));
+            }
+        }
+
         let file_path = self.models_dir.join(&model_def.gguf_file);
 
         if file_path.exists() {
@@ -847,5 +865,54 @@ impl ModelManager {
     /// Get models directory path
     pub fn get_models_directory(&self) -> PathBuf {
         self.models_dir.clone()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn shared_model_discovery_prefers_owned_and_protects_shared_deletion() {
+        let dir = tempfile::tempdir().unwrap();
+        let owned = dir.path().join("owned");
+        let shared = dir.path().join("shared");
+        std::fs::create_dir_all(&shared).unwrap();
+        let model_def = get_model_by_name("gemma3:1b").unwrap();
+        let shared_model = shared.join(&model_def.gguf_file);
+        let expected_size = model_def.size_mb * 1024 * 1024;
+        std::fs::File::create(&shared_model)
+            .unwrap()
+            .set_len(expected_size)
+            .unwrap();
+        let manager = ModelManager::new_with_models_dir(Some(owned.clone()))
+            .unwrap()
+            .with_shared_models_dir(Some(shared));
+        manager.init().await.unwrap();
+
+        let info = manager.get_model_info(&model_def.name).await.unwrap();
+        assert_eq!(info.path, shared_model);
+        assert_eq!(info.status, ModelStatus::Available);
+        assert!(manager.is_model_ready(&model_def.name, true).await);
+        assert!(manager
+            .delete_model(&model_def.name)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("read-only"));
+        assert_eq!(manager.get_models_directory(), owned);
+
+        let owned_model = owned.join(&model_def.gguf_file);
+        std::fs::write(&owned_model, b"incomplete branch model").unwrap();
+        manager.scan_models().await.unwrap();
+        let info = manager.get_model_info(&model_def.name).await.unwrap();
+        assert_eq!(info.path, owned_model);
+        assert!(matches!(info.status, ModelStatus::Corrupted { .. }));
+        manager.delete_model(&model_def.name).await.unwrap();
+        assert!(!owned_model.exists());
+        assert_eq!(
+            std::fs::metadata(&shared_model).unwrap().len(),
+            expected_size
+        );
     }
 }

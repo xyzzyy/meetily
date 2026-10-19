@@ -67,6 +67,7 @@ const CANCEL_DOWNLOAD_CLEANUP_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub struct WhisperEngine {
     models_dir: PathBuf,
+    shared_models_dir: Option<PathBuf>,
     current_context: Arc<RwLock<Option<WhisperContext>>>,
     current_model: Arc<RwLock<Option<String>>>,
     available_models: Arc<RwLock<HashMap<String, ModelInfo>>>,
@@ -183,6 +184,7 @@ impl WhisperEngine {
         
         let engine = Self {
             models_dir,
+            shared_models_dir: None,
             current_context: Arc::new(RwLock::new(None)),
             current_model: Arc::new(RwLock::new(None)),
             available_models: Arc::new(RwLock::new(HashMap::new())),
@@ -199,6 +201,12 @@ impl WhisperEngine {
         Ok(engine)
     }
 
+    /// Add an optional shared directory used only for model reads.
+    pub fn with_shared_models_dir(mut self, shared_models_dir: Option<PathBuf>) -> Self {
+        self.shared_models_dir = shared_models_dir;
+        self
+    }
+
     #[cfg(test)]
     fn test_hook(&self) -> Option<Arc<DownloadStateTestHook>> {
         self.download_state_test_hook
@@ -208,13 +216,16 @@ impl WhisperEngine {
     }
     
     pub async fn discover_models(&self) -> Result<Vec<ModelInfo>> {
-        let models_dir = &self.models_dir;
         let mut models = Vec::new();
         // Use centralized model catalog from config.rs
         let model_configs = WHISPER_MODEL_CATALOG;
 
         for &(name, filename, size_mb, accuracy, speed, description) in model_configs {
-            let model_path = models_dir.join(filename);
+            let model_path = crate::model_storage::resolve_model_for_read(
+                &self.models_dir,
+                self.shared_models_dir.as_deref(),
+                filename,
+            );
             let status = if model_path.exists() {
                 // Check if file size is reasonable (at least 1MB for a valid model)
                 match std::fs::metadata(&model_path) {
@@ -876,6 +887,10 @@ impl WhisperEngine {
         let model_info = model_info.ok_or_else(|| anyhow!("Model '{}' not found", model_name))?;
 
         // Check if model is corrupted before allowing deletion
+        if !model_info.path.starts_with(&self.models_dir) {
+            return Err(anyhow!("Shared models are read-only and cannot be deleted"));
+        }
+
         log::info!("Model '{}' has status: {:?}", model_name, model_info.status);
         match &model_info.status {
             ModelStatus::Corrupted { file_size, expected_min_size } => {
@@ -1284,6 +1299,54 @@ mod tests {
             .iter()
             .find(|model| model.name == "tiny")
             .expect("tiny should be present in the Whisper model catalog")
+    }
+
+    #[tokio::test]
+    async fn shared_model_discovery_prefers_owned_and_protects_shared_deletion() {
+        use std::io::Write;
+
+        let dir = tempfile::tempdir().unwrap();
+        let owned = dir.path().join("owned");
+        let shared = dir.path().join("shared");
+        std::fs::create_dir_all(&shared).unwrap();
+        let shared_model = shared.join("ggml-tiny.bin");
+        let mut file = std::fs::File::create(&shared_model).unwrap();
+        file.write_all(b"ggml\0\0\0\0").unwrap();
+        file.set_len(75 * 1024 * 1024).unwrap();
+        drop(file);
+        let engine = WhisperEngine::new_with_models_dir(Some(owned.clone()))
+            .unwrap()
+            .with_shared_models_dir(Some(shared));
+
+        let models = engine.discover_models().await.unwrap();
+        assert_eq!(tiny_model(&models).path, shared_model);
+        assert!(matches!(tiny_model(&models).status, ModelStatus::Available));
+        assert!(engine
+            .delete_model("tiny")
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("read-only"));
+        assert_eq!(engine.get_models_directory().await, owned);
+
+        std::fs::create_dir_all(&owned).unwrap();
+        let owned_model = owned.join("ggml-tiny.bin");
+        std::fs::File::create(&owned_model)
+            .unwrap()
+            .set_len(2 * 1024 * 1024)
+            .unwrap();
+        let models = engine.discover_models().await.unwrap();
+        assert_eq!(tiny_model(&models).path, owned_model);
+        assert!(!matches!(
+            tiny_model(&models).status,
+            ModelStatus::Available
+        ));
+        engine.delete_model("tiny").await.unwrap();
+        assert!(!owned_model.exists());
+        assert_eq!(
+            std::fs::metadata(&shared_model).unwrap().len(),
+            75 * 1024 * 1024
+        );
     }
 
     #[tokio::test]
