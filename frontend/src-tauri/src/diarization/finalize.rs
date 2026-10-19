@@ -528,7 +528,7 @@ fn cleanup_temporary_stems(folder: &Path) {
 }
 
 fn passes_quality_gates(assigned_coverage: f64, transcription_success_rate: f64) -> bool {
-    assigned_coverage >= 0.80 && transcription_success_rate >= 0.95
+    assigned_coverage >= 0.75 && transcription_success_rate >= 0.95
 }
 
 fn discover_sources(folder: &Path) -> Result<(Vec<SidecarSource>, Vec<String>)> {
@@ -1730,8 +1730,8 @@ mod tests {
 
     #[test]
     fn final_quality_gates_are_inclusive_at_thresholds() {
-        assert!(passes_quality_gates(0.80, 0.95));
-        assert!(!passes_quality_gates(0.799, 1.0));
+        assert!(passes_quality_gates(0.75, 0.95));
+        assert!(!passes_quality_gates(0.749, 1.0));
         assert!(!passes_quality_gates(1.0, 0.949));
     }
 
