@@ -44,6 +44,31 @@ pub struct TranscriptUpdate {
     pub duration: f64,          // Segment duration in seconds (e.g., 3.3)
 }
 
+/// Resolve stable recording-relative timing for a transcription chunk.
+///
+/// VAD boundaries are authoritative because they describe where speech was
+/// detected on the recording timeline. Sample-derived duration is retained as
+/// a fallback for providers and older producers that do not supply an end.
+fn resolve_transcript_timing(chunk: &AudioChunk) -> (f64, f64, f64) {
+    let start = if chunk.timestamp.is_finite() {
+        chunk.timestamp.max(0.0)
+    } else {
+        0.0
+    };
+    let sample_duration = if chunk.sample_rate > 0 {
+        chunk.data.len() as f64 / chunk.sample_rate as f64
+    } else {
+        0.0
+    };
+    let fallback_end = start + sample_duration;
+    let end = chunk
+        .end_timestamp
+        .filter(|end| end.is_finite() && *end >= start)
+        .unwrap_or(fallback_end);
+
+    (start, end, end - start)
+}
+
 // NOTE: get_transcript_history and get_recording_meeting_name functions
 // have been moved to recording_commands.rs where they have access to RECORDING_MANAGER
 
@@ -147,8 +172,8 @@ pub fn start_transcription_task<R: Runtime>(
                                 continue;
                             }
 
-                            let chunk_timestamp = chunk.timestamp;
-                            let chunk_duration = chunk.data.len() as f64 / chunk.sample_rate as f64;
+                            let (audio_start_time, audio_end_time, chunk_duration) =
+                                resolve_transcript_timing(&chunk);
 
                             // Transcribe with provider-agnostic approach
                             match transcribe_chunk_with_provider(
@@ -191,9 +216,6 @@ pub fn start_transcription_task<R: Runtime>(
 
                                         // Generate sequence ID and calculate timestamps FIRST
                                         let sequence_id = SEQUENCE_COUNTER.fetch_add(1, Ordering::SeqCst);
-                                        let audio_start_time = chunk_timestamp; // Already in seconds from recording start
-                                        let audio_end_time = chunk_timestamp + chunk_duration;
-
                                         // Save structured transcript segment to recording manager (only final results)
                                         // Save ALL segments (partial and final) to ensure complete JSON
                                         // Create structured segment with full timestamp data
@@ -208,7 +230,7 @@ pub fn start_transcription_task<R: Runtime>(
                                             timestamp: format_current_timestamp(), // Wall-clock for reference
                                             source: "Audio".to_string(),
                                             sequence_id,
-                                            chunk_start_time: chunk_timestamp, // Legacy compatibility
+                                            chunk_start_time: audio_start_time, // Legacy compatibility
                                             is_partial,
                                             confidence: confidence_opt.unwrap_or(0.85), // Default for providers without confidence
                                             // NEW: Recording-relative timestamps for sync
@@ -593,6 +615,7 @@ fn format_recording_time(seconds: f64) -> String {
     #[cfg(test)]
     mod tests {
         use super::*;
+        use crate::audio::recording_state::{AudioChunk, DeviceType};
 
         #[test]
         fn keeps_short_acknowledgements() {
@@ -604,5 +627,38 @@ fn format_recording_time(seconds: f64) -> String {
         fn drops_empty_and_whitespace_only() {
             assert!(!should_emit_transcript(""));
             assert!(!should_emit_transcript("   "));
+        }
+
+        /// Build a chunk with only the fields timing resolution reads.
+        fn chunk(start: f64, end: Option<f64>, samples: usize, sample_rate: u32) -> AudioChunk {
+            AudioChunk {
+                data: vec![0.0; samples],
+                sample_rate,
+                timestamp: start,
+                end_timestamp: end,
+                chunk_id: 1,
+                device_type: DeviceType::Microphone,
+            }
+        }
+
+        /// A valid VAD end wins over the sample-derived duration.
+        #[test]
+        fn timing_prefers_vad_boundaries() {
+            let timing = resolve_transcript_timing(&chunk(12.25, Some(14.75), 16_000, 16_000));
+            assert_eq!(timing, (12.25, 14.75, 2.5));
+        }
+
+        /// Producers without a VAD end fall back to samples divided by sample rate.
+        #[test]
+        fn timing_falls_back_to_sample_duration_without_vad_end() {
+            let timing = resolve_transcript_timing(&chunk(3.0, None, 24_000, 16_000));
+            assert_eq!(timing, (3.0, 4.5, 1.5));
+        }
+
+        /// An end before the start is ignored in favour of the sample duration.
+        #[test]
+        fn timing_rejects_an_end_before_the_start() {
+            let timing = resolve_transcript_timing(&chunk(8.0, Some(7.0), 8_000, 16_000));
+            assert_eq!(timing, (8.0, 8.5, 0.5));
         }
     }

@@ -624,6 +624,7 @@ impl AudioCapture {
             data: mono_data,  // Raw audio (resampled if needed), no gain yet
             sample_rate: if self.needs_resampling { 48000 } else { self.sample_rate },
             timestamp,
+            end_timestamp: None,
             chunk_id,
             device_type: self.device_type.clone(),
         };
@@ -870,6 +871,7 @@ impl AudioPipeline {
                                                 data: segment.samples,
                                                 sample_rate: 16000,
                                                 timestamp: segment.start_timestamp_ms / 1000.0,
+                                                end_timestamp: Some(segment.end_timestamp_ms / 1000.0),
                                                 chunk_id: self.chunk_id_counter,
                                                 device_type: DeviceType::Microphone,  // Mixed audio
                                             };
@@ -896,6 +898,7 @@ impl AudioPipeline {
                                     data: mixed_with_gain.clone(),
                                     sample_rate: self.sample_rate,
                                     timestamp: chunk.timestamp,
+                                    end_timestamp: None,
                                     chunk_id: self.chunk_id_counter,
                                     device_type: DeviceType::Microphone,  // Mixed audio
                                 };
@@ -940,6 +943,7 @@ impl AudioPipeline {
                             data: segment.samples,
                             sample_rate: 16000,
                             timestamp: segment.start_timestamp_ms / 1000.0,
+                            end_timestamp: Some(segment.end_timestamp_ms / 1000.0),
                             chunk_id: self.chunk_id_counter,
                             device_type: DeviceType::Microphone,
                         };
@@ -1061,6 +1065,7 @@ impl AudioPipelineManager {
                 data: vec![], // Empty data signals flush
                 sample_rate: 16000,
                 timestamp: 0.0,
+                end_timestamp: None,
                 chunk_id: u64::MAX, // Special ID to indicate flush
                 device_type: super::recording_state::DeviceType::Microphone,
             };
@@ -1081,6 +1086,7 @@ impl AudioPipelineManager {
                         data: vec![],
                         sample_rate: 16000,
                         timestamp: 0.0,
+                        end_timestamp: None,
                         chunk_id: u64::MAX - (i as u64),
                         device_type: super::recording_state::DeviceType::Microphone,
                     };

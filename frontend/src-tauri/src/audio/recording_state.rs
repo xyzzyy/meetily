@@ -19,7 +19,11 @@ pub enum DeviceType {
 pub struct AudioChunk {
     pub data: Vec<f32>,
     pub sample_rate: u32,
+    /// Recording-relative start time in seconds when this is a VAD segment.
     pub timestamp: f64,
+    /// Recording-relative end time supplied by VAD. Raw capture chunks do not
+    /// have a speech boundary, so they leave this unset.
+    pub end_timestamp: Option<f64>,
     pub chunk_id: u64,
     pub device_type: DeviceType,
 }
