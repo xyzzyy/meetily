@@ -1,0 +1,7 @@
+{
+    "productName": "Meetily Branch",
+    "identifier": "com.meetily.ai.branch",
+    "bundle": {
+        "createUpdaterArtifacts": false
+    }
+}

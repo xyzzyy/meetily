@@ -47,9 +47,11 @@ pub mod onboarding;
 pub mod openai;
 pub mod anthropic;
 pub mod groq;
+pub mod model_storage;
 pub mod openrouter;
 pub mod parakeet_engine;
 pub mod state;
+pub mod storage_safety;
 pub mod summary;
 pub mod tray;
 pub mod utils;
@@ -409,7 +411,6 @@ pub fn run() {
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_store::Builder::default().build())
         .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
         .manage(whisper_engine::parallel_commands::ParallelProcessorState::new())
         .manage(Arc::new(RwLock::new(
@@ -418,6 +419,32 @@ pub fn run() {
         .manage(audio::init_system_audio_state())
         .manage(summary::summary_engine::ModelManagerState(Arc::new(tokio::sync::Mutex::new(None))))
         .setup(|_app| {
+            // This is the first operation in setup. Do not move any app-data,
+            // database, settings, notification, recovery, or model work above it.
+            if let Err(message) = storage_safety::validate_runtime_identity(_app.handle()) {
+                use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
+                _app.dialog()
+                    .message(&message)
+                    .title("Meetily Branch safety check")
+                    .kind(MessageDialogKind::Error)
+                    .buttons(MessageDialogButtons::Ok)
+                    .blocking_show();
+                return Err(message.into());
+            }
+
+            if let Err(message) =
+                storage_safety::adopt_legacy_speaker_test_installation(_app.handle())
+            {
+                use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
+                _app.dialog()
+                    .message(&message)
+                    .title("Meetily Branch storage needs attention")
+                    .kind(MessageDialogKind::Error)
+                    .buttons(MessageDialogButtons::Ok)
+                    .blocking_show();
+                return Err(message.into());
+            }
+
             log::info!("Application setup complete");
 
             // Initialize system tray
@@ -497,7 +524,16 @@ pub fn run() {
             tauri::async_runtime::block_on(async {
                 database::setup::initialize_database_on_startup(&_app.handle()).await
             })
-            .expect("Failed to initialize database");
+            .map_err(|message| {
+                use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
+                _app.dialog()
+                    .message(&message)
+                    .title("Meetily Branch could not open its data")
+                    .kind(MessageDialogKind::Error)
+                    .buttons(MessageDialogButtons::Ok)
+                    .blocking_show();
+                message
+            })?;
 
             // Initialize bundled templates directory for dynamic template discovery
             log::info!("Initializing bundled templates directory...");
