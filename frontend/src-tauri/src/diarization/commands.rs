@@ -202,6 +202,55 @@ pub async fn get_transcript_speaker_metadata(
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct SpeakerColorRequest {
+    pub meeting_id: String,
+    pub speaker_id: String,
+    pub color: String,
+}
+
+#[tauri::command]
+pub async fn set_speaker_color(
+    state: State<'_, AppState>,
+    request: SpeakerColorRequest,
+) -> Result<(), String> {
+    if request.meeting_id.trim().is_empty() || request.speaker_id.trim().is_empty() {
+        return Err("Meeting and speaker IDs are required".into());
+    }
+    if !super::colors::PALETTE
+        .iter()
+        .any(|choice| choice.value == request.color)
+    {
+        return Err("Choose a color from the speaker palette".into());
+    }
+    let _edit = super::operations::try_meeting_edit(&request.meeting_id)?;
+    let speakers = DiarizationRepository::get_meeting_speakers(
+        state.speaker_store.pool(),
+        &request.meeting_id,
+    )
+    .await
+    .map_err(|error| error.to_string())?;
+    if speakers.iter().any(|speaker| {
+        speaker.speaker_id != request.speaker_id
+            && speaker.speaker_color.as_deref() == Some(request.color.as_str())
+    }) {
+        return Err("Another speaker already uses this color".into());
+    }
+    let updated = DiarizationRepository::set_speaker_color(
+        state.speaker_store.pool(),
+        &request.meeting_id,
+        &request.speaker_id,
+        &request.color,
+    )
+    .await
+    .map_err(|error| error.to_string())?;
+    if updated == 0 {
+        return Err("Speaker not found for meeting".into());
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct RenameSpeakerRequest {
     pub meeting_id: String,
     pub speaker_id: String,

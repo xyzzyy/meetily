@@ -156,6 +156,7 @@ for (const currentStatus of ['processing', 'preparing_models', 'rebuilding_windo
   });
   const tree = panel.render();
   assert.ok(text(tree).includes('Refining speakers locally…'));
+  assert.equal(nodes(tree).find(node => node.type === 'SpeakerColorPicker').props.disabled, true);
   for (const label of ['Rename', 'Remember voice', 'Merge', 'Apply (1)']) {
     const action = button(tree, label);
     assert.equal(action.props.disabled, true, `${label} enabled during ${currentStatus}`);
@@ -239,5 +240,28 @@ for (const currentStatus of ['processing', 'preparing_models', 'rebuilding_windo
   button(collapsed, 'Correct rows').props.onClick();
   assert.equal(body(panel.render()).props.hidden, false);
   assert.equal(panel.states.get('correctionMode'), true);
+}
+// A saved color updates both the list and the visible transcript, without renaming.
+{
+  const blueAlice = { ...alice, speakerColor: '#2563eb' };
+  const panel = makePanel({ speakers: [blueAlice] }, async () => [], {
+    transcripts: [{ id: 'r1', text: 'Example', speaker_id: 'alice', speaker_color: '#2563eb' }],
+  });
+  const picker = tree => nodes(tree).find(node => node.type === 'SpeakerColorPicker');
+  assert.equal(await picker(panel.render()).props.onChange('#be185d'), true);
+  assert.equal(picker(panel.render()).props.color, '#be185d');
+  const transcript = nodes(panel.render()).find(node => node.type === 'VirtualizedTranscriptView');
+  assert.equal(transcript.props.segments[0].speaker_color, '#be185d');
+  assert.equal(panel.calls[0].name, 'set_speaker_color');
+  assert.equal(panel.calls[0].args.request.speakerId, 'alice');
+  assert.equal(panel.calls.some(call => call.name === 'rename_speaker'), false);
+}
+{
+  const panel = makePanel({ speakers: [{ ...alice, speakerColor: '#2563eb' }] },
+    async () => { throw new Error('Save failed'); });
+  const picker = nodes(panel.render()).find(node => node.type === 'SpeakerColorPicker');
+  assert.equal(await picker.props.onChange('#be185d'), false);
+  assert.equal(panel.states.get('speakers')[0].speakerColor, '#2563eb');
+  assert.equal(panel.states.get('savingSpeakerId'), null);
 }
 console.log('Speaker review controls: all checks passed');

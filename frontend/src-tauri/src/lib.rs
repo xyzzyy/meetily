@@ -787,6 +787,7 @@ pub fn run() {
             diarization::commands::get_meeting_speakers,
             diarization::commands::get_transcript_speaker_metadata,
             diarization::commands::rename_speaker,
+            diarization::commands::set_speaker_color,
             diarization::commands::merge_speakers,
             diarization::commands::reassign_transcripts,
             diarization::commands::remember_speaker,

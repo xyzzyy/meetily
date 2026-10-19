@@ -2,6 +2,7 @@
 
 import { MeetingSpeaker, Transcript, TranscriptSegmentData } from '@/types';
 import { VirtualizedTranscriptView } from '@/components/VirtualizedTranscriptView';
+import { SpeakerColorPicker } from './SpeakerColorPicker';
 import { TranscriptButtonGroup } from './TranscriptButtonGroup';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -88,6 +89,12 @@ export function TranscriptPanel({
 
   const [speakersExpanded, setSpeakersExpanded] = useState(true);
   const [speakers, setSpeakers] = useState<MeetingSpeaker[]>([]);
+  const displaySegments = useMemo(() => {
+    const colors = new Map(speakers.map(speaker => [speaker.speakerId, speaker.speakerColor]));
+    return convertedSegments.map(segment => ({ ...segment,
+      speaker_color: colors.get(segment.speaker_id ?? '') ?? segment.speaker_color,
+    }));
+  }, [convertedSegments, speakers]);
   const [isLoadingSpeakers, setIsLoadingSpeakers] = useState(false);
   const [editingSpeakerId, setEditingSpeakerId] = useState<string | null>(null);
   const [draftSpeakerLabel, setDraftSpeakerLabel] = useState('');
@@ -372,6 +379,24 @@ export function TranscriptPanel({
     }
   };
 
+  const changeSpeakerColor = async (speaker: MeetingSpeaker, color: string) => {
+    if (!meetingId || !beginEdit()) return false;
+    setSavingSpeakerId(speaker.speakerId);
+    try {
+      await invoke('set_speaker_color', { request: { meetingId, speakerId: speaker.speakerId, color } });
+      setSpeakers(current => current.map(item => item.speakerId === speaker.speakerId
+        ? { ...item, speakerColor: color } : item));
+      await onRefetchTranscripts?.();
+      return true;
+    } catch (error) {
+      toast.error('Could not change speaker color', { description: String(error) });
+      return false;
+    } finally {
+      setSavingSpeakerId(null);
+      mutationInFlight.current = false;
+    }
+  };
+
   const rememberSpeaker = async (speaker: MeetingSpeaker) => {
     if (!meetingId || !beginEdit()) return;
     setRememberingSpeakerId(speaker.speakerId);
@@ -510,9 +535,14 @@ export function TranscriptPanel({
                     className="py-1"
                   >
                     <div className="flex items-center gap-1">
-                      <span
-                        className="h-2 w-2 rounded-full border border-border shrink-0"
-                        style={{ backgroundColor: speaker.speakerColor || '#94a3b8' }}
+                      <SpeakerColorPicker
+                        name={speaker.speakerLabel}
+                        color={speaker.speakerColor || '#2563eb'}
+                        disabled={editsDisabled}
+                        usedColors={new Map(speakers.filter(other => other.speakerId !== speaker.speakerId)
+                          .filter(other => !!other.speakerColor)
+                          .map(other => [other.speakerColor!, other.speakerLabel]))}
+                        onChange={color => changeSpeakerColor(speaker, color)}
                       />
 
                       {isEditing ? (
@@ -666,7 +696,7 @@ export function TranscriptPanel({
       {/* Transcript content - use virtualized view for better performance */}
       <div className="flex-1 overflow-hidden pb-4">
         <VirtualizedTranscriptView
-          segments={convertedSegments}
+          segments={displaySegments}
           isRecording={isRecording}
           isPaused={false}
           isProcessing={false}

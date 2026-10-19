@@ -163,7 +163,7 @@ impl DiarizationRepository {
         pool: &SqlitePool,
         meeting_id: &str,
     ) -> Result<Vec<MeetingSpeaker>, sqlx::Error> {
-        sqlx::query_as::<_, MeetingSpeaker>(
+        let mut speakers = sqlx::query_as::<_, MeetingSpeaker>(
             "SELECT
                 speaker_id AS speaker_id,
                 COALESCE(NULLIF(TRIM(MAX(speaker_label)), ''), speaker_id) AS speaker_label,
@@ -179,7 +179,38 @@ impl DiarizationRepository {
         )
         .bind(meeting_id)
         .fetch_all(pool)
-        .await
+        .await?;
+        let choices: Vec<(String, String)> = sqlx::query_as(
+            "SELECT speaker_id, color FROM meeting_speaker_colors WHERE meeting_id = ?",
+        )
+        .bind(meeting_id)
+        .fetch_all(pool)
+        .await?;
+        crate::diarization::colors::apply_colors(&mut speakers, &choices.into_iter().collect());
+        Ok(speakers)
+    }
+
+    pub async fn set_speaker_color(
+        pool: &SqlitePool,
+        meeting_id: &str,
+        speaker_id: &str,
+        color: &str,
+    ) -> Result<u64, sqlx::Error> {
+        Ok(sqlx::query(
+            "INSERT INTO meeting_speaker_colors (meeting_id, speaker_id, color)
+             SELECT ?, ?, ? WHERE EXISTS (
+                 SELECT 1 FROM transcript_speakers
+                 WHERE meeting_id = ? AND speaker_id = ? AND published = 1
+             ) ON CONFLICT(meeting_id, speaker_id) DO UPDATE SET color = excluded.color",
+        )
+        .bind(meeting_id)
+        .bind(speaker_id)
+        .bind(color)
+        .bind(meeting_id)
+        .bind(speaker_id)
+        .execute(pool)
+        .await?
+        .rows_affected())
     }
 
     pub async fn rename_speaker(
@@ -375,7 +406,24 @@ impl DiarizationRepository {
             separated.push_bind(id);
         }
         separated.push_unseparated(")");
-        builder.build_query_as().fetch_all(pool).await
+        let mut rows: Vec<TranscriptSpeakerMetadata> =
+            builder.build_query_as().fetch_all(pool).await?;
+        let meetings: std::collections::BTreeSet<_> =
+            rows.iter().map(|row| row.meeting_id.clone()).collect();
+        for meeting_id in meetings {
+            let colors: std::collections::HashMap<_, _> =
+                Self::get_meeting_speakers(pool, &meeting_id)
+                    .await?
+                    .into_iter()
+                    .map(|speaker| (speaker.speaker_id, speaker.speaker_color))
+                    .collect();
+            for row in rows.iter_mut().filter(|row| row.meeting_id == meeting_id) {
+                if let Some(color) = row.speaker_id.as_ref().and_then(|id| colors.get(id)) {
+                    row.speaker_color = color.clone();
+                }
+            }
+        }
+        Ok(rows)
     }
 
     pub async fn delete_meeting_data(
@@ -385,6 +433,7 @@ impl DiarizationRepository {
         let mut transaction = pool.begin().await?;
         for table in [
             "transcript_speakers",
+            "meeting_speaker_colors",
             "speaker_segments",
             "meeting_diarization_status",
             "diarization_runs",
@@ -445,6 +494,12 @@ mod tests {
         .await
         .expect("transcripts table should be created");
 
+        sqlx::raw_sql(include_str!(
+            "../../../speaker-migrations/20261019000000_speaker_colors.sql"
+        ))
+        .execute(&pool)
+        .await
+        .unwrap();
         pool
     }
 
@@ -643,6 +698,55 @@ mod tests {
         assert_eq!(speakers[1].speaker_id, "speaker-2");
         assert_eq!(speakers[1].speaker_label, "Speaker 2");
         assert_eq!(speakers[1].segment_count, 1);
+    }
+
+    #[tokio::test]
+    async fn color_choices_are_scoped_and_survive_new_analysis_rows() {
+        let pool = speaker_test_pool().await;
+        let before = DiarizationRepository::get_meeting_speakers(&pool, "meeting-1")
+            .await
+            .unwrap();
+        assert_eq!(
+            DiarizationRepository::set_speaker_color(&pool, "meeting-1", "speaker-1", "#be185d")
+                .await
+                .unwrap(),
+            1
+        );
+        let after = DiarizationRepository::get_meeting_speakers(&pool, "meeting-1")
+            .await
+            .unwrap();
+        assert_eq!(after[0].speaker_color.as_deref(), Some("#be185d"));
+        assert_eq!(after[1].speaker_color, before[1].speaker_color);
+        // A rerun replaces metadata with the analysis default, but keeps the choice table.
+        sqlx::query("UPDATE transcript_speakers SET speaker_color = '#3b82f6' WHERE meeting_id = 'meeting-1' AND speaker_id = 'speaker-1'")
+            .execute(&pool).await.unwrap();
+        let metadata =
+            DiarizationRepository::get_transcript_metadata(&pool, &["t-1".into(), "t-2".into()])
+                .await
+                .unwrap();
+        assert!(metadata
+            .iter()
+            .filter(|row| row.speaker_id.as_deref() == Some("speaker-1"))
+            .all(|row| row.speaker_color.as_deref() == Some("#be185d")));
+        let other = DiarizationRepository::get_meeting_speakers(&pool, "meeting-2")
+            .await
+            .unwrap();
+        assert!(other
+            .iter()
+            .all(|row| row.speaker_color.as_deref() != Some("#be185d")));
+        assert_eq!(
+            DiarizationRepository::set_speaker_color(&pool, "meeting-1", "absent", "#be185d")
+                .await
+                .unwrap(),
+            0
+        );
+        let methods: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM transcript_speakers WHERE diarization_method = 'manual'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(methods, 0);
     }
 
     #[tokio::test]

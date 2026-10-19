@@ -1,6 +1,7 @@
 pub mod alignment;
 pub mod clustering;
 pub mod commands;
+pub mod colors;
 pub mod embedding;
 pub mod fbank;
 pub mod finalize;
