@@ -7,6 +7,16 @@ private struct Request: Codable {
     let modelCachePath: String
     let outputPath: String?
     let sources: [AudioSource]?
+    let tuning: Tuning?
+}
+
+private struct Tuning: Codable {
+    let clusteringThreshold: Double?
+    let warmStartFa: Double?
+    let warmStartFb: Double?
+    let minSpeakers: Int?
+    let maxSpeakers: Int?
+    let numSpeakers: Int?
 }
 
 private struct AudioSource: Codable {
@@ -33,7 +43,7 @@ private enum MeetilyDiarizationSidecar {
                 Request.self,
                 from: FileHandle.standardInput.readDataToEndOfFile()
             )
-            let manager = OfflineDiarizerManager()
+            let manager = OfflineDiarizerManager(config: try configuration(from: request.tuning))
             let cache = URL(fileURLWithPath: request.modelCachePath, isDirectory: true)
             try FileManager.default.createDirectory(at: cache, withIntermediateDirectories: true)
             try await manager.prepareModels(directory: cache)
@@ -89,6 +99,26 @@ private enum MeetilyDiarizationSidecar {
             try? emit(response)
             Foundation.exit(1)
         }
+    }
+
+    private static func configuration(from tuning: Tuning?) throws -> OfflineDiarizerConfig {
+        var config = OfflineDiarizerConfig()
+        // FluidAudio 0.12.4 interprets this as cosine similarity, despite its
+        // distance comment. Its 0.6 default merged distinct meeting voices.
+        // Keep speaker count automatic; the benchmark compares labels, not counts.
+        config.clustering.threshold = 0.90
+        guard let tuning else {
+            try config.validate()
+            return config
+        }
+        if let value = tuning.clusteringThreshold { config.clustering.threshold = value }
+        if let value = tuning.warmStartFa { config.clustering.warmStartFa = value }
+        if let value = tuning.warmStartFb { config.clustering.warmStartFb = value }
+        if let value = tuning.minSpeakers { config.clustering.minSpeakers = value }
+        if let value = tuning.maxSpeakers { config.clustering.maxSpeakers = value }
+        if let value = tuning.numSpeakers { config.clustering.numSpeakers = value }
+        try config.validate()
+        return config
     }
 
     private static func encoded(_ response: Response) throws -> Data {
