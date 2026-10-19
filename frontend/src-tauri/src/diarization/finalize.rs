@@ -410,6 +410,150 @@ async fn run_inner<R: Runtime>(
     })
 }
 
+/// Speaker output staged before Enhance changes any saved transcript rows.
+pub(crate) struct EnhancementSpeakerAnalysis {
+    windows: Vec<FinalWindow>,
+    labels: HashMap<String, String>,
+    quality_flags: Vec<String>,
+}
+
+pub(crate) struct EnhancementSpeakerLabels {
+    windows: Vec<FinalWindow>,
+    transcripts: Vec<FinalTranscript>,
+    quality_flags: Vec<String>,
+    coverage: f64,
+}
+
+pub(crate) async fn prepare_enhancement<R: Runtime>(
+    app: &AppHandle<R>,
+    meeting_id: &str,
+    folder: &Path,
+) -> Result<EnhancementSpeakerAnalysis> {
+    CANCEL_REQUESTED.store(false, Ordering::SeqCst);
+    let state = app.state::<AppState>();
+    let old_rows = load_transcripts(state.db_manager.pool(), meeting_id).await?;
+    let ids = old_rows
+        .iter()
+        .map(|row| row.id.clone())
+        .collect::<Vec<_>>();
+    let old_speakers =
+        crate::database::repositories::diarization::DiarizationRepository::get_transcript_metadata(
+            state.speaker_store.pool(),
+            &ids,
+        )
+        .await?;
+    let (sources, mut quality_flags) = discover_sources(folder)?;
+    let directory = folder.join(".diarization");
+    std::fs::create_dir_all(&directory)?;
+    let request = SidecarRequest {
+        action: "process".into(),
+        meeting_id: meeting_id.into(),
+        model_cache_path: fluid_model_cache(app)?.to_string_lossy().into_owned(),
+        output_path: directory
+            .join("final-intervals.json")
+            .to_string_lossy()
+            .into_owned(),
+        sources,
+    };
+    let response = invoke_sidecar(&request).await?;
+    if !response.ok || response.intervals.is_empty() {
+        return Err(anyhow!(
+            "Speaker analysis failed: {}",
+            response.error.unwrap_or_else(|| "no speech found".into())
+        ));
+    }
+    let mut windows = rebuild_windows(&response.intervals);
+    stabilize_speaker_ids(&mut windows, &old_speakers);
+    if windows.iter().any(|window| window.is_overlap) {
+        quality_flags.push("overlap_detected".into());
+    }
+    check_cancelled()?;
+    let audio = load_source_audio(&request.sources).await?;
+    let names = recognize_final_profiles(app, &mut windows, &audio).await;
+    let labels = speaker_labels(&windows, &old_speakers, &names);
+    Ok(EnhancementSpeakerAnalysis {
+        windows,
+        labels,
+        quality_flags,
+    })
+}
+
+impl EnhancementSpeakerAnalysis {
+    pub(crate) fn speaker_key(&self, start: f64, end: f64) -> Option<String> {
+        self.windows
+            .iter()
+            .filter_map(|window| {
+                let overlap = (end.min(window.end) - start.max(window.start)).max(0.0);
+                (overlap > 0.0).then(|| {
+                    (
+                        overlap,
+                        if window.is_overlap {
+                            format!("overlap:{}", window.candidate_speaker_ids.join(","))
+                        } else {
+                            window.speaker_id.clone().unwrap_or_default()
+                        },
+                    )
+                })
+            })
+            .max_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)))
+            .map(|(_, key)| key)
+    }
+
+    pub(crate) fn turn_boundaries(&self) -> Vec<f64> {
+        self.windows
+            .windows(2)
+            .filter(|pair| pair[0].speaker_id != pair[1].speaker_id)
+            .map(|pair| (pair[0].end + pair[1].start) / 2.0)
+            .collect()
+    }
+
+    pub(crate) fn label(self, rows: &[Transcript]) -> Result<EnhancementSpeakerLabels> {
+        let coverage = assignment_coverage(&self.windows, rows);
+        if !passes_quality_gates(coverage, 1.0) {
+            return Err(anyhow!("Speaker analysis covered {:.1}% of the new transcript; at least 75% is required. The saved transcript was kept.", coverage * 100.0));
+        }
+        let transcripts = label_existing_transcripts(rows, &self.windows, &self.labels);
+        Ok(EnhancementSpeakerLabels {
+            windows: self.windows,
+            transcripts,
+            quality_flags: self.quality_flags,
+            coverage,
+        })
+    }
+}
+
+impl EnhancementSpeakerLabels {
+    pub(crate) async fn write(
+        &self,
+        connection: &mut sqlx::SqliteConnection,
+        meeting_id: &str,
+    ) -> Result<()> {
+        let run_id = format!("diarization-run-{}", Uuid::new_v4());
+        sqlx::query("INSERT INTO speaker_feature.diarization_runs (id, meeting_id, status, method, progress)
+            VALUES (?, ?, 'prepared', 'fluid_audio_offline_0.12.4', 95)")
+            .bind(&run_id).bind(meeting_id).execute(&mut *connection).await?;
+        write_speaker_rows(
+            connection,
+            "speaker_feature",
+            meeting_id,
+            &run_id,
+            &self.windows,
+            &self.transcripts,
+        )
+        .await?;
+        finish_speaker_run(
+            connection,
+            "speaker_feature",
+            meeting_id,
+            &run_id,
+            &self.quality_flags,
+            self.coverage,
+            1.0,
+        )
+        .await
+    }
+}
+
 fn label_existing_transcripts(
     live: &[Transcript],
     windows: &[FinalWindow],
@@ -1024,7 +1168,10 @@ fn assignment_coverage(windows: &[FinalWindow], live: &[Transcript]) -> f64 {
     (covered / voiced).clamp(0.0, 1.0)
 }
 
-async fn load_transcripts(pool: &sqlx::SqlitePool, meeting_id: &str) -> Result<Vec<Transcript>> {
+pub(crate) async fn load_transcripts(
+    pool: &sqlx::SqlitePool,
+    meeting_id: &str,
+) -> Result<Vec<Transcript>> {
     Ok(sqlx::query_as::<_, Transcript>(
         "SELECT id, meeting_id, transcript, timestamp, summary, action_items, key_points,
                 audio_start_time, audio_end_time, duration
@@ -1072,19 +1219,54 @@ async fn publish_labels_atomically(
     }
     let mut feature_connection = feature_pool.acquire().await?;
     let mut feature_transaction = feature_connection.begin().await?;
-    sqlx::query("DELETE FROM speaker_segments WHERE meeting_id = ?")
-        .bind(meeting_id)
-        .execute(&mut *feature_transaction)
-        .await?;
+    write_speaker_rows(
+        &mut feature_transaction,
+        "main",
+        meeting_id,
+        run_id,
+        windows,
+        transcripts,
+    )
+    .await?;
+    finish_speaker_run(
+        &mut feature_transaction,
+        "main",
+        meeting_id,
+        run_id,
+        quality_flags,
+        coverage,
+        success_rate,
+    )
+    .await?;
+    feature_transaction.commit().await?;
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn write_speaker_rows(
+    connection: &mut sqlx::SqliteConnection,
+    schema: &str,
+    meeting_id: &str,
+    run_id: &str,
+    windows: &[FinalWindow],
+    transcripts: &[FinalTranscript],
+) -> Result<()> {
+    assert!(matches!(schema, "main" | "speaker_feature"));
+    sqlx::query(&format!(
+        "DELETE FROM {schema}.speaker_segments WHERE meeting_id = ?"
+    ))
+    .bind(meeting_id)
+    .execute(&mut *connection)
+    .await?;
     for window in windows {
-        sqlx::query(
-            "INSERT INTO speaker_segments (
+        sqlx::query(&format!(
+            "INSERT INTO {schema}.speaker_segments (
                 id, meeting_id, source, start_time, end_time, speaker_id, speaker_label,
                 speaker_profile_id, confidence, is_overlap, diarization_status,
                 diarization_method, candidate_speaker_ids
              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'final',
-                       'fluid_audio_offline_0.12.4', ?)",
-        )
+                       'fluid_audio_offline_0.12.4', ?)"
+        ))
         .bind(format!("speaker-segment-{}", Uuid::new_v4()))
         .bind(meeting_id)
         .bind(&window.source)
@@ -1100,24 +1282,26 @@ async fn publish_labels_atomically(
         .bind(window.confidence)
         .bind(window.is_overlap as i64)
         .bind(serde_json::to_string(&window.candidate_speaker_ids)?)
-        .execute(&mut *feature_transaction)
+        .execute(&mut *connection)
         .await?;
     }
-    sqlx::query("DELETE FROM transcript_speakers WHERE meeting_id = ?")
-        .bind(meeting_id)
-        .execute(&mut *feature_transaction)
-        .await?;
+    sqlx::query(&format!(
+        "DELETE FROM {schema}.transcript_speakers WHERE meeting_id = ?"
+    ))
+    .bind(meeting_id)
+    .execute(&mut *connection)
+    .await?;
     for transcript in transcripts {
-        sqlx::query(
-            "INSERT INTO transcript_speakers (
+        sqlx::query(&format!(
+            "INSERT INTO {schema}.transcript_speakers (
                 transcript_id, meeting_id, audio_start_time, audio_end_time,
                 speaker_id, speaker_label, speaker_profile_id, speaker_source,
                 speaker_color, is_overlap, candidate_speaker_ids,
                 diarization_status, diarization_method, diarization_confidence,
                 run_id, published
              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'final',
-                       'fluid_audio_offline_0.12.4', ?, ?, 1)",
-        )
+                       'fluid_audio_offline_0.12.4', ?, ?, 1)"
+        ))
         .bind(&transcript.id)
         .bind(meeting_id)
         .bind(transcript.start)
@@ -1135,21 +1319,34 @@ async fn publish_labels_atomically(
         .bind(serde_json::to_string(&transcript.candidates)?)
         .bind(transcript.confidence)
         .bind(run_id)
-        .execute(&mut *feature_transaction)
+        .execute(&mut *connection)
         .await?;
     }
-    sqlx::query(
-        "UPDATE diarization_runs SET status = 'applied', progress = 100,
+    Ok(())
+}
+
+async fn finish_speaker_run(
+    connection: &mut sqlx::SqliteConnection,
+    schema: &str,
+    meeting_id: &str,
+    run_id: &str,
+    quality_flags: &[String],
+    coverage: f64,
+    success_rate: f64,
+) -> Result<()> {
+    assert!(matches!(schema, "main" | "speaker_feature"));
+    sqlx::query(&format!(
+        "UPDATE {schema}.diarization_runs SET status = 'applied', progress = 100,
             assigned_coverage = ?, transcription_success_rate = ?, completed_at = CURRENT_TIMESTAMP
-         WHERE id = ?",
-    )
+         WHERE id = ?"
+    ))
     .bind(coverage)
     .bind(success_rate)
     .bind(run_id)
-    .execute(&mut *feature_transaction)
+    .execute(&mut *connection)
     .await?;
-    sqlx::query(
-        "INSERT INTO meeting_diarization_status (
+    sqlx::query(&format!(
+        "INSERT INTO {schema}.meeting_diarization_status (
             meeting_id, enabled, live_enabled, post_call_enabled, current_status,
             quality_flags, run_id, progress, method, assigned_coverage,
             transcription_success_rate, processed_at, updated_at
@@ -1160,20 +1357,18 @@ async fn publish_labels_atomically(
             run_id = excluded.run_id, progress = 100, method = excluded.method,
             failure_reason = NULL, assigned_coverage = excluded.assigned_coverage,
             transcription_success_rate = excluded.transcription_success_rate,
-            processed_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP",
-    )
+            processed_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP"
+    ))
     .bind(meeting_id)
     .bind(serde_json::to_string(quality_flags)?)
     .bind(run_id)
     .bind(coverage)
     .bind(success_rate)
-    .execute(&mut *feature_transaction)
+    .execute(&mut *connection)
     .await?;
-    feature_transaction.commit().await?;
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn set_status(
     pool: &sqlx::SqlitePool,
     meeting_id: &str,

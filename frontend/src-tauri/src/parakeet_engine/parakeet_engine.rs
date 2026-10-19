@@ -553,6 +553,14 @@ impl ParakeetEngine {
 
     /// Transcribe audio samples using the loaded Parakeet model
     pub async fn transcribe_audio(&self, audio_data: Vec<f32>) -> Result<String> {
+        Ok(self.transcribe_audio_timed(audio_data).await?.text)
+    }
+
+    /// Transcribe audio samples and keep the token emission times.
+    pub async fn transcribe_audio_timed(
+        &self,
+        audio_data: Vec<f32>,
+    ) -> Result<super::model::TimestampedResult> {
         let mut model_guard = self.current_model.write().await;
         let model = model_guard
             .as_mut()
@@ -572,7 +580,7 @@ impl ParakeetEngine {
 
         log::debug!("Parakeet transcription result: '{}'", result.text);
 
-        Ok(result.text)
+        Ok(result)
     }
 
     /// Get the models directory path
