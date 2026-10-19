@@ -39,40 +39,45 @@ impl Default for RecordingPreferences {
     }
 }
 
+/// Default recordings folder name. It differs from official Meetily's
+/// `meetily-recordings` so the branch build never writes into, re-processes, or
+/// cleans up recordings owned by the official installation.
+pub const DEFAULT_RECORDINGS_FOLDER_NAME: &str = "meetily-branch-recordings";
+
 /// Get the default recordings folder based on platform
 pub fn get_default_recordings_folder() -> PathBuf {
     #[cfg(target_os = "windows")]
     {
-        // Windows: %USERPROFILE%\Music\meetily-recordings
+        // Windows: %USERPROFILE%\Music\meetily-branch-recordings
         if let Some(music_dir) = dirs::audio_dir() {
-            music_dir.join("meetily-recordings")
+            music_dir.join(DEFAULT_RECORDINGS_FOLDER_NAME)
         } else {
             // Fallback to Documents if Music folder is not available
             dirs::document_dir()
                 .unwrap_or_else(|| PathBuf::from("."))
-                .join("meetily-recordings")
+                .join(DEFAULT_RECORDINGS_FOLDER_NAME)
         }
     }
 
     #[cfg(target_os = "macos")]
     {
-        // macOS: ~/Movies/meetily-recordings
+        // macOS: ~/Movies/meetily-branch-recordings
         if let Some(movies_dir) = dirs::video_dir() {
-            movies_dir.join("meetily-recordings")
+            movies_dir.join(DEFAULT_RECORDINGS_FOLDER_NAME)
         } else {
             // Fallback to Documents if Movies folder is not available
             dirs::document_dir()
                 .unwrap_or_else(|| PathBuf::from("."))
-                .join("meetily-recordings")
+                .join(DEFAULT_RECORDINGS_FOLDER_NAME)
         }
     }
 
     #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     {
-        // Linux/Others: ~/Documents/meetily-recordings
+        // Linux/Others: ~/Documents/meetily-branch-recordings
         dirs::document_dir()
             .unwrap_or_else(|| PathBuf::from("."))
-            .join("meetily-recordings")
+            .join(DEFAULT_RECORDINGS_FOLDER_NAME)
     }
 }
 
@@ -385,3 +390,18 @@ pub async fn get_audio_backend_info() -> Result<Vec<BackendInfo>, String> {
     }
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_recordings_folder_is_branch_owned() {
+        let folder = get_default_recordings_folder();
+        assert_eq!(
+            folder.file_name().and_then(|name| name.to_str()),
+            Some(DEFAULT_RECORDINGS_FOLDER_NAME)
+        );
+        assert_ne!(DEFAULT_RECORDINGS_FOLDER_NAME, "meetily-recordings");
+    }
+}
