@@ -1,0 +1,51 @@
+name: opencode-review
+
+# Automatic PR review by OpenCode running inside this workflow's runner.
+# Uses the OpenCode Console gateway. Swap `model` for any provider/model you have keys for.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+concurrency:
+  group: opencode-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
+    env:
+      OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      # Skipped until the OPENCODE_API_KEY secret is configured, so the check
+      # stays green instead of failing on every pull request.
+      - name: Run OpenCode review
+        if: ${{ env.OPENCODE_API_KEY != '' }}
+        uses: anomalyco/opencode/github@latest
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          model: opencode/deepseek-v4.1-flash-free
+          use_github_token: true
+          prompt: |
+            Review this pull request.
+
+            Report only real defects:
+            - bugs and logic errors
+            - security vulnerabilities
+            - broken edge cases (null/empty input, error paths, concurrency)
+            - resource leaks
+
+            Cite the file and line for every finding, and explain concretely why it
+            is wrong. Do not report style preferences, naming, or formatting.
+            If you find nothing worth fixing, say so briefly.
