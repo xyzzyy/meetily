@@ -39,40 +39,55 @@ impl Default for RecordingPreferences {
     }
 }
 
+/// Default recordings folder name. It differs from official Meetily's
+/// `meetily-recordings` so the branch build never writes into, re-processes, or
+/// cleans up recordings owned by the official installation.
+pub const DEFAULT_RECORDINGS_FOLDER_NAME: &str = "meetily-branch-recordings";
+
+/// Folder name official Meetily uses, and earlier branch builds defaulted to.
+const LEGACY_RECORDINGS_FOLDER_NAME: &str = "meetily-recordings";
+
+/// Platform directory that holds the recordings folder.
+fn recordings_parent_folder() -> PathBuf {
+    // Windows: %USERPROFILE%\Music, macOS: ~/Movies, Linux/Others: ~/Documents.
+    // Falls back to Documents when the platform media folder is not available.
+    #[cfg(target_os = "windows")]
+    let media_dir = dirs::audio_dir();
+    #[cfg(target_os = "macos")]
+    let media_dir = dirs::video_dir();
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    let media_dir: Option<PathBuf> = None;
+
+    media_dir
+        .or_else(dirs::document_dir)
+        .unwrap_or_else(|| PathBuf::from("."))
+}
+
 /// Get the default recordings folder based on platform
 pub fn get_default_recordings_folder() -> PathBuf {
-    #[cfg(target_os = "windows")]
-    {
-        // Windows: %USERPROFILE%\Music\meetily-recordings
-        if let Some(music_dir) = dirs::audio_dir() {
-            music_dir.join("meetily-recordings")
-        } else {
-            // Fallback to Documents if Music folder is not available
-            dirs::document_dir()
-                .unwrap_or_else(|| PathBuf::from("."))
-                .join("meetily-recordings")
-        }
-    }
+    recordings_parent_folder().join(DEFAULT_RECORDINGS_FOLDER_NAME)
+}
 
-    #[cfg(target_os = "macos")]
+/// Replace a stored save folder that is the old shared default.
+///
+/// Earlier builds persisted the default folder whenever recording settings were
+/// saved, so a stored `meetily-recordings` path was never chosen by the user. Left
+/// in place, "Open Folder" and the displayed save location would point at
+/// official Meetily's recordings while new recordings are written elsewhere.
+///
+/// Matches on the folder name rather than a recomputed path, because the old
+/// default may have come from the Documents fallback or a since-moved media
+/// folder.
+fn migrate_legacy_save_folder(preferences: &mut RecordingPreferences) {
+    if preferences.save_folder.file_name().and_then(|name| name.to_str())
+        == Some(LEGACY_RECORDINGS_FOLDER_NAME)
     {
-        // macOS: ~/Movies/meetily-recordings
-        if let Some(movies_dir) = dirs::video_dir() {
-            movies_dir.join("meetily-recordings")
-        } else {
-            // Fallback to Documents if Movies folder is not available
-            dirs::document_dir()
-                .unwrap_or_else(|| PathBuf::from("."))
-                .join("meetily-recordings")
-        }
-    }
-
-    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
-    {
-        // Linux/Others: ~/Documents/meetily-recordings
-        dirs::document_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join("meetily-recordings")
+        let default_folder = get_default_recordings_folder();
+        info!(
+            "Moving recordings save folder from the shared default {:?} to {:?}",
+            preferences.save_folder, default_folder
+        );
+        preferences.save_folder = default_folder;
     }
 }
 
@@ -110,6 +125,7 @@ pub async fn load_recording_preferences<R: Runtime>(
         match serde_json::from_value::<RecordingPreferences>(value.clone()) {
             Ok(mut p) => {
                 info!("Loaded recording preferences from store");
+                migrate_legacy_save_folder(&mut p);
                 // Update macOS backend to current value if needed
                 #[cfg(target_os = "macos")]
                 {
@@ -385,3 +401,50 @@ pub async fn get_audio_backend_info() -> Result<Vec<BackendInfo>, String> {
     }
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_recordings_folder_is_branch_owned() {
+        let folder = get_default_recordings_folder();
+        assert_eq!(
+            folder.file_name().and_then(|name| name.to_str()),
+            Some(DEFAULT_RECORDINGS_FOLDER_NAME)
+        );
+        assert_ne!(DEFAULT_RECORDINGS_FOLDER_NAME, "meetily-recordings");
+    }
+
+    #[test]
+    fn stored_legacy_default_moves_to_branch_folder() {
+        // The old default may have come from the Documents fallback or a media
+        // folder that has since moved, so any parent must be migrated.
+        for legacy in [
+            recordings_parent_folder().join(LEGACY_RECORDINGS_FOLDER_NAME),
+            PathBuf::from("/Users/someone/Documents").join(LEGACY_RECORDINGS_FOLDER_NAME),
+        ] {
+            let mut preferences = RecordingPreferences {
+                save_folder: legacy,
+                ..RecordingPreferences::default()
+            };
+            migrate_legacy_save_folder(&mut preferences);
+            assert_eq!(preferences.save_folder, get_default_recordings_folder());
+        }
+    }
+
+    #[test]
+    fn other_stored_folders_are_left_alone() {
+        for custom in [
+            PathBuf::from("/Volumes/Archive/meetings"),
+            get_default_recordings_folder(),
+        ] {
+            let mut preferences = RecordingPreferences {
+                save_folder: custom.clone(),
+                ..RecordingPreferences::default()
+            };
+            migrate_legacy_save_folder(&mut preferences);
+            assert_eq!(preferences.save_folder, custom);
+        }
+    }
+}
