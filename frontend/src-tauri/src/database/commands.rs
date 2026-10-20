@@ -162,6 +162,9 @@ pub async fn import_and_initialize_database(
     let speaker_store = SpeakerFeatureStore::new_from_app_handle(&app)
         .await
         .map_err(|e| format!("Failed to initialize speaker feature store: {e}"))?;
+    crate::diarization::finalize::reconcile_interrupted_runs(
+        db_manager.pool(), speaker_store.pool(),
+    ).await.map_err(|error| format!("Could not recover imported speaker data: {error}"))?;
     app.manage(AppState {
         db_manager,
         speaker_store,
