@@ -21,7 +21,6 @@ static RETRANSCRIPTION_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
 
 /// Global flag to signal cancellation
 static RETRANSCRIPTION_CANCELLED: AtomicBool = AtomicBool::new(false);
-static RETRANSCRIPTION_SPEAKERS: AtomicBool = AtomicBool::new(false);
 
 /// RAII guard for RETRANSCRIPTION_IN_PROGRESS flag
 /// Ensures flag is cleared even if retranscription panics or returns early
@@ -43,7 +42,6 @@ impl RetranscriptionGuard {
 impl Drop for RetranscriptionGuard {
     fn drop(&mut self) {
         RETRANSCRIPTION_IN_PROGRESS.store(false, Ordering::SeqCst);
-        RETRANSCRIPTION_SPEAKERS.store(false, Ordering::SeqCst);
     }
 }
 
@@ -98,9 +96,6 @@ pub fn is_retranscription_in_progress() -> bool {
 /// Cancel ongoing retranscription
 pub fn cancel_retranscription() {
     RETRANSCRIPTION_CANCELLED.store(true, Ordering::SeqCst);
-    if RETRANSCRIPTION_SPEAKERS.load(Ordering::SeqCst) {
-        crate::diarization::finalize::cancel();
-    }
 }
 
 /// Start retranscription of a meeting's audio
@@ -138,7 +133,6 @@ pub async fn start_retranscription<R: Runtime>(
     } else {
         None
     };
-    RETRANSCRIPTION_SPEAKERS.store(assign_speakers, Ordering::SeqCst);
     let use_parakeet = provider.as_deref() == Some("parakeet");
     let result = run_retranscription(
         app.clone(),
@@ -299,7 +293,7 @@ async fn run_retranscription<R: Runtime>(
             "Identifying speakers in the recording...",
         );
         Some(
-            crate::diarization::finalize::prepare_enhancement(&app, &meeting_id, &folder_path)
+            crate::diarization::finalize::prepare_enhancement(&app, &meeting_id, &folder_path, &RETRANSCRIPTION_CANCELLED)
                 .await?,
         )
     } else {

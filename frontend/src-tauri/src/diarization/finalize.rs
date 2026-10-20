@@ -466,8 +466,9 @@ pub(crate) async fn prepare_enhancement<R: Runtime>(
     app: &AppHandle<R>,
     meeting_id: &str,
     folder: &Path,
+    cancelled: &AtomicBool,
 ) -> Result<EnhancementSpeakerAnalysis> {
-    CANCEL_REQUESTED.store(false, Ordering::SeqCst);
+    check_cancelled_flag(cancelled)?;
     let state = app.state::<AppState>();
     let old_rows = load_transcripts(state.db_manager.pool(), meeting_id).await?;
     let ids = old_rows
@@ -493,7 +494,8 @@ pub(crate) async fn prepare_enhancement<R: Runtime>(
             .into_owned(),
         sources,
     };
-    let response = invoke_sidecar(&request).await?;
+    check_cancelled_flag(cancelled)?;
+    let response = invoke_sidecar_with_cancellation(&request, cancelled).await?;
     if !response.ok || response.intervals.is_empty() {
         return Err(anyhow!(
             "Speaker analysis failed: {}",
@@ -505,9 +507,11 @@ pub(crate) async fn prepare_enhancement<R: Runtime>(
     if windows.iter().any(|window| window.is_overlap) {
         quality_flags.push("overlap_detected".into());
     }
-    check_cancelled()?;
+    check_cancelled_flag(cancelled)?;
     let audio = load_source_audio(&request.sources).await?;
+    check_cancelled_flag(cancelled)?;
     let names = recognize_final_profiles(app, &mut windows, &audio).await;
+    check_cancelled_flag(cancelled)?;
     let labels = speaker_labels(&windows, &old_speakers, &names);
     Ok(EnhancementSpeakerAnalysis {
         windows,
@@ -796,8 +800,25 @@ pub(super) fn find_meeting_audio(folder: &Path) -> Result<PathBuf> {
 }
 
 async fn invoke_sidecar(request: &SidecarRequest) -> Result<SidecarResponse> {
+    invoke_sidecar_with_cancellation(request, &CANCEL_REQUESTED).await
+}
+
+async fn invoke_sidecar_with_cancellation(
+    request: &SidecarRequest,
+    cancelled: &AtomicBool,
+) -> Result<SidecarResponse> {
+    if request.action == "process" { check_cancelled_flag(cancelled)?; }
     let binary = resolve_sidecar_binary()?;
-    let mut child = Command::new(&binary)
+    invoke_sidecar_process(&binary, request, cancelled).await
+}
+
+async fn invoke_sidecar_process(
+    binary: &Path,
+    request: &SidecarRequest,
+    cancelled: &AtomicBool,
+) -> Result<SidecarResponse> {
+    if request.action == "process" { check_cancelled_flag(cancelled)?; }
+    let mut child = Command::new(binary)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -817,7 +838,7 @@ async fn invoke_sidecar(request: &SidecarRequest) -> Result<SidecarResponse> {
             _ = async {
                 loop {
                     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                    if CANCEL_REQUESTED.load(Ordering::SeqCst) { break; }
+                    if cancelled.load(Ordering::SeqCst) { break; }
                 }
             } => return Err(anyhow!("Final speaker refinement was cancelled")),
         }
@@ -1490,7 +1511,11 @@ fn emit_progress<R: Runtime>(
 }
 
 fn check_cancelled() -> Result<()> {
-    if CANCEL_REQUESTED.load(Ordering::SeqCst) {
+    check_cancelled_flag(&CANCEL_REQUESTED)
+}
+
+fn check_cancelled_flag(cancelled: &AtomicBool) -> Result<()> {
+    if cancelled.load(Ordering::SeqCst) {
         Err(anyhow!("Final speaker refinement was cancelled"))
     } else {
         Ok(())
@@ -2089,6 +2114,43 @@ mod tests {
             source_interval("system", "bob", 1.0, 3.0),
         ]);
         assert!(analysis.turn_boundaries().is_empty());
+    }
+
+    fn process_request() -> SidecarRequest {
+        SidecarRequest { action: "process".into(), meeting_id: "test".into(),
+            model_cache_path: "unused".into(), output_path: "unused".into(), sources: vec![] }
+    }
+
+    #[tokio::test]
+    async fn a_pending_enhance_cancel_is_preserved_before_sidecar_start() {
+        let cancelled = AtomicBool::new(true);
+        let result = invoke_sidecar_with_cancellation(&process_request(), &cancelled).await;
+        assert!(result.unwrap_err().to_string().contains("cancelled"));
+        assert!(cancelled.load(Ordering::SeqCst));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn enhancement_cancellation_stops_its_running_sidecar() {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = tempfile::tempdir().unwrap();
+        let binary = directory.path().join("fake-sidecar");
+        let started = directory.path().join("fake-sidecar.started");
+        std::fs::write(&binary, "#!/bin/sh\ncat > /dev/null\n: > \"$0.started\"\nexec /bin/sleep 30\n").unwrap();
+        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let cancelled = AtomicBool::new(false);
+        let request = process_request();
+        let cancel = async {
+            while !started.exists() {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+            cancelled.store(true, Ordering::SeqCst);
+        };
+        let (result, ()) = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            tokio::join!(invoke_sidecar_process(&binary, &request, &cancelled), cancel)
+        }).await.expect("cancellation must not wait for the 30-second helper");
+        assert!(result.unwrap_err().to_string().contains("cancelled"));
+        assert!(cancelled.load(Ordering::SeqCst));
     }
 
     #[test]
