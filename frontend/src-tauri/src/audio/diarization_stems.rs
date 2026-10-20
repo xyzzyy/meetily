@@ -27,7 +27,11 @@ pub struct DiarizationStemSaver {
 }
 
 impl DiarizationStemSaver {
-    pub fn start(meeting_folder: &Path) -> Result<Self> {
+    pub fn start(meeting_folder: &Path, save_audio: bool) -> Result<Option<Self>> {
+        // Speaker labels must not override the user's audio retention choice.
+        if !save_audio {
+            return Ok(None);
+        }
         let output_dir = meeting_folder.join(".diarization");
         fs::create_dir_all(&output_dir)?;
         let mic_raw = output_dir.join(".microphone.f32");
@@ -46,11 +50,11 @@ impl DiarizationStemSaver {
             Ok(())
         });
 
-        Ok(Self {
+        Ok(Some(Self {
             sender: Some(sender),
             task: Some(task),
             output_dir,
-        })
+        }))
     }
 
     pub fn sender(&self) -> Option<mpsc::UnboundedSender<StemWindow>> {
@@ -119,4 +123,17 @@ fn write_f32_le(writer: &mut impl Write, samples: &[f32]) -> Result<()> {
         writer.write_all(&sample.to_le_bytes())?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn disabling_audio_saving_creates_no_stem_files() {
+        let directory = tempfile::tempdir().unwrap();
+        let meeting = directory.path().join("meeting");
+        assert!(DiarizationStemSaver::start(&meeting, false).unwrap().is_none());
+        assert!(!meeting.exists());
+    }
 }

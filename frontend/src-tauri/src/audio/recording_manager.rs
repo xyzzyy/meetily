@@ -242,18 +242,19 @@ impl RecordingManager {
         let (transcription_sender, transcription_receiver) = mpsc::unbounded_channel::<AudioChunk>();
         let (recording_sender, recording_receiver) = mpsc::unbounded_channel::<AudioChunk>();
 
-        let stem_sender = if self.diarization_enabled {
+        let stem_sender = if self.diarization_enabled && auto_save {
             // Stems need the folder before the pipeline starts. Without stems,
             // start_accumulation creates it after the pipeline starts.
             self.recording_saver.prepare_meeting_folder(auto_save);
             self.recording_saver
                 .get_meeting_folder()
-                .and_then(|folder| match DiarizationStemSaver::start(folder) {
-                    Ok(saver) => {
+                .and_then(|folder| match DiarizationStemSaver::start(folder, auto_save) {
+                    Ok(Some(saver)) => {
                         let sender = saver.sender();
                         self.stem_saver = Some(saver);
                         sender
                     }
+                    Ok(None) => None,
                     Err(error) => {
                         warn!("Diarization stems unavailable; recording will continue: {error}");
                         None
