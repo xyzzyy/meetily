@@ -179,6 +179,9 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
 
   // Speaker diarization settings state
   const [diarizationSettings, setDiarizationSettings] = useState<DiarizationSettings>(DEFAULT_DIARIZATION_SETTINGS);
+  const savedDiarizationSettingsRef = useRef<DiarizationSettings>(DEFAULT_DIARIZATION_SETTINGS);
+  const diarizationSaveQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const diarizationSaveVersionRef = useRef(0);
   const [isLoadingDiarizationSettings, setIsLoadingDiarizationSettings] = useState(false);
 
   // Preference settings state (lazy loaded)
@@ -382,9 +385,11 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
       setIsLoadingDiarizationSettings(true);
       try {
         const settings = await configService.getDiarizationSettings();
+        savedDiarizationSettingsRef.current = settings;
         setDiarizationSettings(settings);
       } catch (error) {
         console.error('[ConfigContext] Failed to load diarization settings:', error);
+        savedDiarizationSettingsRef.current = DEFAULT_DIARIZATION_SETTINGS;
         setDiarizationSettings(DEFAULT_DIARIZATION_SETTINGS);
       } finally {
         setIsLoadingDiarizationSettings(false);
@@ -439,17 +444,21 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const updateDiarizationSettings = useCallback(async (settings: DiarizationSettings) => {
-    // Show the change immediately, but put the saved values back if the save
-    // fails so the switches never show settings the app isn't using.
-    let previous: DiarizationSettings | undefined;
-    setDiarizationSettings(current => {
-      previous = current;
-      return settings;
-    });
-    try {
+    const version = ++diarizationSaveVersionRef.current;
+    setDiarizationSettings(settings);
+    // Save in order so an older request cannot overwrite a newer setting.
+    const save = diarizationSaveQueueRef.current.then(async () => {
       await configService.saveDiarizationSettings(settings);
+      savedDiarizationSettingsRef.current = settings;
+    });
+    diarizationSaveQueueRef.current = save.catch(() => {});
+    try {
+      await save;
     } catch (error) {
-      if (previous) setDiarizationSettings(previous);
+      // An older failure must not replace a newer edit that is still pending.
+      if (version === diarizationSaveVersionRef.current) {
+        setDiarizationSettings(savedDiarizationSettingsRef.current);
+      }
       throw error;
     }
   }, []);
