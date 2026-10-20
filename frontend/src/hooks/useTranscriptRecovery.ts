@@ -172,7 +172,17 @@ export function useTranscriptRecovery(): UseTranscriptRecoveryReturn {
         confidence: t.confidence,
         audio_start_time: (t as any).audio_start_time,
         audio_end_time: (t as any).audio_end_time,
-        duration: (t as any).duration,
+        duration: t.duration,
+        speaker_id: t.speaker_id,
+        speaker_label: t.speaker_label,
+        speaker_profile_id: t.speaker_profile_id,
+        speaker_source: t.speaker_source,
+        speaker_color: t.speaker_color,
+        is_overlap: t.is_overlap,
+        candidate_speaker_ids: t.candidate_speaker_ids,
+        diarization_status: t.diarization_status,
+        diarization_method: t.diarization_method,
+        diarization_confidence: t.diarization_confidence,
       }));
 
       // 6. Save to backend database using existing save utilities
