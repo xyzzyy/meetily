@@ -229,6 +229,14 @@ pub(crate) async fn reconcile_publications(core: &SqlitePool, feature: &SqlitePo
     let pending: Vec<Publication> = sqlx::query_as("SELECT * FROM enhancement_publications")
         .fetch_all(feature).await?;
     for publication in pending {
+        let meeting_exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM meetings WHERE id = ?)")
+            .bind(&publication.meeting_id).fetch_one(core).await?;
+        if !meeting_exists {
+            // Deletion is authoritative, including a stop between core
+            // deletion and feature-store cleanup. Never recreate the meeting.
+            remove_intent(feature, &publication.meeting_id).await?;
+            continue;
+        }
         let actual: Vec<Transcript> = sqlx::query_as(CORE_ROWS)
             .bind(&publication.meeting_id).fetch_all(core).await?;
         let actual = serde_json::to_string(&actual)?;
@@ -686,6 +694,26 @@ mod tests {
             .fetch_all(&feature).await.unwrap();
         assert_eq!(labels, vec!["Alice", "Alice"]);
         reconcile_publications(&core, &feature).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_deleted_meeting_does_not_leave_a_recovery_blocker() {
+        for feature_cleanup_completed in [false, true] {
+            let (_dir, core, feature, original) = publication_fixture().await;
+            sqlx::query("INSERT INTO enhancement_publications VALUES ('m1', ?, '[]', '[]', NULL)")
+                .bind(serde_json::to_string(&original).unwrap()).execute(&feature).await.unwrap();
+            sqlx::query("DELETE FROM meetings WHERE id = 'm1'").execute(&core).await.unwrap();
+            if feature_cleanup_completed {
+                crate::database::repositories::diarization::DiarizationRepository::delete_meeting_data(&feature, "m1")
+                    .await.unwrap();
+            }
+            reconcile_publications(&core, &feature).await.unwrap();
+            let pending: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM enhancement_publications")
+                .fetch_one(&feature).await.unwrap();
+            assert_eq!(pending, 0);
+            let meetings: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM meetings").fetch_one(&core).await.unwrap();
+            assert_eq!(meetings, 0);
+        }
     }
 
 }
