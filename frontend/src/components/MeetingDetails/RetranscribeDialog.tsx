@@ -211,6 +211,11 @@ export function RetranscribeDialog({
       return;
     }
 
+    if (loadingModels || !selectedModelDetails) {
+      setError(loadingModels ? 'Wait for the models to load.' : 'Select an available transcription model.');
+      return;
+    }
+
     setIsProcessing(true);
     setError(null);
     setProgress(null);
@@ -219,16 +224,16 @@ export function RetranscribeDialog({
       const languageToSend = isParakeetModel ? null : selectedLang === 'auto' ? null : selectedLang;
       await Analytics.track('enhance_transcript_started', {
         language: isParakeetModel ? 'auto' : (selectedLang === 'auto' ? 'auto' : selectedLang),
-        model_provider: selectedModelDetails?.provider || '',
-        model_name: selectedModelDetails?.name || ''
+        model_provider: selectedModelDetails.provider,
+        model_name: selectedModelDetails.name
       });
 
       await invoke('start_retranscription_command', {
         meetingId,
         meetingFolderPath,
         language: languageToSend,
-        model: selectedModelDetails?.name || null,
-        provider: selectedModelDetails?.provider || null,
+        model: selectedModelDetails.name,
+        provider: selectedModelDetails.provider,
         assignSpeakers: speakerLabelsEnabled && assignSpeakers,
       });
     } catch (err: any) {
@@ -305,7 +310,7 @@ export function RetranscribeDialog({
               ? progress?.message || 'Processing audio...'
               : error
                 ? 'The enhancement could not finish'
-                : 'Rebuild the transcript from the recording.'}
+                : 'Create new text and timing from the recording. The saved transcript stays unchanged until enhancement succeeds.'}
           </DialogDescription>
         </DialogHeader>
 
@@ -419,7 +424,7 @@ export function RetranscribeDialog({
               <Button
                 onClick={handleStartRetranscription}
                 className="bg-blue-600 hover:bg-blue-700"
-                disabled={!meetingFolderPath}
+                disabled={!meetingFolderPath || loadingModels || !selectedModelDetails}
               >
                 <RefreshCw className="h-4 w-4 mr-2" />
                 Start enhancement

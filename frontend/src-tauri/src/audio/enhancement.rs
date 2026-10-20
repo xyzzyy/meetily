@@ -430,4 +430,61 @@ mod tests {
         assert!(rows[0].action_items.is_none());
         assert!(rows[0].key_points.is_none());
     }
+    async fn publication_fixture() -> (tempfile::TempDir, SqlitePool, SqlitePool, Vec<Transcript>) {
+        use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+        let dir = tempfile::tempdir().unwrap();
+        let connect = |name: &str| SqliteConnectOptions::new().filename(dir.path().join(name)).create_if_missing(true);
+        let core = SqlitePoolOptions::new().connect_with(connect("core.sqlite")).await.unwrap();
+        let feature = SqlitePoolOptions::new().connect_with(connect("speaker.sqlite")).await.unwrap();
+        sqlx::migrate!("./migrations").run(&core).await.unwrap();
+        sqlx::migrate!("./speaker-migrations").run(&feature).await.unwrap();
+        sqlx::query("INSERT INTO meetings(id,title,created_at,updated_at) VALUES ('m1','Test',CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)")
+            .execute(&core).await.unwrap();
+        sqlx::query("INSERT INTO transcripts(id,meeting_id,transcript,timestamp,audio_start_time,audio_end_time,duration) VALUES ('old','m1','Old merged text','old time',0,88,88)")
+            .execute(&core).await.unwrap();
+        sqlx::query("INSERT INTO transcript_speakers(transcript_id,meeting_id,speaker_id,speaker_label,diarization_status,published) VALUES ('old','m1','old-speaker','Speaker 1','final',1)")
+            .execute(&feature).await.unwrap();
+        let original = crate::diarization::finalize::load_transcripts(&core,"m1").await.unwrap();
+        (dir,core,feature,original)
+    }
+
+    fn fresh_segments() -> Vec<TranscriptSegment> {
+        let result = timed("Alice. Bob.", &[" Alice.", " Bob."], &[1.25, 15.5]);
+        let rows = parakeet_rows(&result, 0.0, 25_000.0, None).unwrap();
+        super::super::common::create_transcript_segments(&rows)
+    }
+
+    #[tokio::test]
+    async fn fresh_model_text_and_times_replace_a_long_old_row() {
+        let (_dir,core,feature,original) = publication_fixture().await;
+        let segments = fresh_segments();
+        publish(&core,&feature,"m1",&original,&segments,None,&AtomicBool::new(false)).await.unwrap();
+        let rows = crate::diarization::finalize::load_transcripts(&core,"m1").await.unwrap();
+        assert_eq!(rows.len(),2);
+        assert_eq!(rows[0].transcript,"Alice.");
+        assert_eq!(rows[1].transcript,"Bob.");
+        assert_eq!(rows[0].audio_start_time,Some(1.25));
+        assert_eq!(rows[1].audio_start_time,Some(15.5));
+        assert!(rows.iter().all(|row| row.audio_end_time.unwrap() < 16.0 && row.id != "old"));
+        let stale: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM transcript_speakers WHERE meeting_id='m1'")
+            .fetch_one(&feature).await.unwrap();
+        assert_eq!(stale,0,"old speaker rows must not attach to the new text");
+    }
+
+    #[tokio::test]
+    async fn failed_or_cancelled_enhancement_keeps_old_text_times_and_speaker() {
+        let (_dir,core,feature,original) = publication_fixture().await;
+        let segments = fresh_segments();
+        sqlx::query("CREATE TRIGGER fail_enhance BEFORE INSERT ON transcripts WHEN NEW.id != 'old' BEGIN SELECT RAISE(ABORT,'test failure'); END")
+            .execute(&core).await.unwrap();
+        assert!(publish(&core,&feature,"m1",&original,&segments,None,&AtomicBool::new(false)).await.is_err());
+        sqlx::query("DROP TRIGGER fail_enhance").execute(&core).await.unwrap();
+        assert!(publish(&core,&feature,"m1",&original,&segments,None,&AtomicBool::new(true)).await.is_err());
+        let rows = crate::diarization::finalize::load_transcripts(&core,"m1").await.unwrap();
+        assert_eq!(serde_json::to_string(&rows).unwrap(),serde_json::to_string(&original).unwrap());
+        let label: String = sqlx::query_scalar("SELECT speaker_label FROM transcript_speakers WHERE transcript_id='old'")
+            .fetch_one(&feature).await.unwrap();
+        assert_eq!(label,"Speaker 1");
+    }
+
 }

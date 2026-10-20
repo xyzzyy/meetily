@@ -1803,6 +1803,23 @@ mod tests {
     }
 
     #[test]
+    fn enhancement_checks_fresh_rows_instead_of_old_chunk_times() {
+        let windows = vec![speaker_window("a", 1.0, 2.0), speaker_window("b", 15.0, 16.0)];
+        let old = vec![live_row("old", 0.0, 88.0)];
+        assert!(!passes_quality_gates(assignment_coverage(&windows, &old), 1.0));
+        let fresh = vec![live_row("fresh-a", 1.25, 1.41), live_row("fresh-b", 15.5, 15.66)];
+        let analysis = EnhancementSpeakerAnalysis {
+            windows,
+            labels: HashMap::from([("a".into(), "Alice".into()), ("b".into(), "Bob".into())]),
+            quality_flags: vec![],
+        };
+        let result = analysis.label(&fresh).unwrap();
+        assert_eq!(result.transcripts[0].speaker_label, "Alice");
+        assert_eq!(result.transcripts[1].speaker_label, "Bob");
+        assert_eq!(result.coverage, 1.0);
+    }
+
+    #[test]
     fn remembered_name_replaces_live_label_in_final_transcript() {
         let live = vec![speaker_row("old-a", "Speaker 1", 0.0, 10.0)];
         let mut windows = vec![speaker_window("new-a", 0.0, 10.0)];

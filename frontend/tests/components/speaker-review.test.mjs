@@ -48,6 +48,7 @@ function makePanel(overrides = {}, command = async () => undefined, extraProps =
     if (name === 'react') return hooks;
     if (name === '@/contexts/ConfigContext') return { useConfig: () => ({
       diarizationSettings: settings, isLoadingDiarizationSettings: false,
+      betaFeatures: { importAndRetranscribe: true },
     }) };
     if (name === 'react/jsx-runtime') return { jsx, jsxs: jsx, Fragment: 'Fragment' };
     if (name === '@tauri-apps/api/core') return {
@@ -280,4 +281,25 @@ console.log('Speaker review controls: all checks passed');
   const indicators = nodes(panel.render()).filter(node => node.type === 'SpeakerAttributionIndicator');
   assert.deepEqual(indicators.map(node => node.props.verified), [false, true, false]);
   assert.match(indicators[0].props.description, /1 of 2 transcript segments confirmed/);
+}
+
+// A label-only rejection never starts retranscription. Enhance is a separate,
+// explicit action which opens the existing dialog without starting a job.
+{
+  const message = 'Speaker analysis did not cover enough of the existing transcript';
+  const panel = makePanel({ diarizationSettings: { enabled: true },
+    diarizationStatus: { currentStatus: 'completed', progress: 100 } }, async name => {
+    if (name === 'retry_final_diarization') throw new Error(message);
+    return [];
+  });
+  button(panel.render(), 'Run again').props.onClick();
+  await settle();
+  assert.deepEqual(panel.calls.map(call => call.name), ['retry_final_diarization']);
+  assert.equal(panel.states.get('enhanceDialogOpen'), false);
+  assert.ok(text(panel.render()).includes('The saved transcript and labels were kept.'));
+  button(panel.render(), 'Enhance').props.onClick();
+  const dialog = nodes(panel.render()).find(node => node.type === 'RetranscribeDialog');
+  assert.equal(dialog.props.open, true);
+  assert.equal(dialog.props.meetingId, 'meeting');
+  assert.equal(panel.calls.some(call => call.name === 'start_retranscription_command'), false);
 }

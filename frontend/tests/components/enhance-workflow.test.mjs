@@ -1,0 +1,69 @@
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import vm from 'node:vm';
+import ts from 'typescript';
+
+const source = fs.readFileSync(new URL('../../src/components/MeetingDetails/RetranscribeDialog.tsx', import.meta.url), 'utf8');
+const ast = ts.createSourceFile('RetranscribeDialog.tsx', source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+const names = [];
+function visit(node) {
+  if (ts.isVariableDeclaration(node) && ts.isArrayBindingPattern(node.name)
+    && node.initializer && ts.isCallExpression(node.initializer)
+    && node.initializer.expression.getText(ast) === 'useState') names.push(node.name.elements[0].name.getText(ast));
+  ts.forEachChild(node, visit);
+}
+visit(ast);
+function dialog(provider, loading = false, selected = true) {
+  let cursor = 0;
+  const states = new Map();
+  const calls = [];
+  const model = { provider, name: `${provider}-selected`, displayName: provider, size_mb: 100 };
+  const jsx = (type, props) => ({ type, props: props || {} });
+  const hooks = { useState(initial) {
+    const name = names[cursor++];
+    if (!states.has(name)) states.set(name, initial);
+    return [states.get(name), value => states.set(name, typeof value === 'function' ? value(states.get(name)) : value)];
+  }, useEffect() {}, useRef: value => ({ current: value }), useMemo: fn => fn() };
+  const require = name => {
+    if (name === 'react') return hooks;
+    if (name === 'react/jsx-runtime') return { jsx, jsxs: jsx, Fragment: 'Fragment' };
+    if (name === '@/contexts/ConfigContext') return { useConfig: () => ({ selectedLanguage: 'en', transcriptModelConfig: {},
+      diarizationSettings: { enabled: true }, isLoadingDiarizationSettings: false }) };
+    if (name === '@/hooks/useTranscriptionModels') return { useTranscriptionModels: () => ({ availableModels: [model],
+      selectedModelKey: selected ? `${provider}:${model.name}` : '', loadingModels: loading,
+      setSelectedModelKey() {}, fetchModels() {}, resetSelection() {} }) };
+    if (name === '@/lib/analytics') return { default: { track: async () => {}, trackError: async () => {} } };
+    if (name === '@/constants/languages') return { LANGUAGES: [] };
+    if (name === '@tauri-apps/api/core') return { invoke: async (command, args) => { calls.push({ command, args }); } };
+    return new Proxy({}, { get: (_, key) => String(key) });
+  };
+  const compiled = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS,
+    target: ts.ScriptTarget.ES2020, jsx: ts.JsxEmit.ReactJSX } });
+  const module = { exports: {} };
+  vm.runInNewContext(compiled.outputText, { module, exports: module.exports, require, console });
+  const tree = module.exports.RetranscribeDialog({ open: true, meetingId: 'meeting', meetingFolderPath: '/audio', onOpenChange() {} });
+  return { tree, states, calls };
+}
+function nodes(node) {
+  if (!node || typeof node !== 'object') return [];
+  if (Array.isArray(node)) return node.flatMap(nodes);
+  return [node, ...nodes(node.props?.children)];
+}
+const start = tree => nodes(tree).find(node => node.type === 'Button' && node.props.className === 'bg-blue-600 hover:bg-blue-700');
+for (const provider of ['parakeet', 'whisper']) {
+  const instance = dialog(provider);
+  assert.equal(start(instance.tree).props.disabled, false);
+  await start(instance.tree).props.onClick();
+  assert.equal(instance.calls.length, 1);
+  assert.equal(instance.calls[0].command, 'start_retranscription_command');
+  assert.equal(instance.calls[0].args.provider, provider);
+  assert.equal(instance.calls[0].args.model, `${provider}-selected`);
+  assert.equal(instance.calls[0].args.assignSpeakers, true);
+}
+for (const [loading, selected] of [[true, true], [false, false]]) {
+  const instance = dialog('parakeet', loading, selected);
+  assert.equal(start(instance.tree).props.disabled, true);
+  await start(instance.tree).props.onClick();
+  assert.equal(instance.calls.length, 0, 'a missing selection must not default to another engine');
+}
+console.log('Enhance workflow: all checks passed');
