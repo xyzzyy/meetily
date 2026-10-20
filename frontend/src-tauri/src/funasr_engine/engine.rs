@@ -370,7 +370,18 @@ impl FunAsrEngine {
         if resume_at > 0 {
             request = request.header(reqwest::header::RANGE, format!("bytes={resume_at}-"));
         }
-        let response = request.send().await?.error_for_status()?;
+        // A server can accept the connection without ever sending headers.
+        // Bound that wait too, and let Cancel stop it before any body arrives.
+        let response = tokio::select! {
+            biased;
+            _ = token.cancelled() => return Err(anyhow!("FUN-ASR model download cancelled")),
+            response = tokio::time::timeout(DOWNLOAD_STALL_TIMEOUT, request.send()) => {
+                response.map_err(|_| anyhow!(
+                    "FUN-ASR model download stalled: no response headers for {} seconds",
+                    DOWNLOAD_STALL_TIMEOUT.as_secs()
+                ))??.error_for_status()?
+            },
+        };
         let resumed = response.status() == reqwest::StatusCode::PARTIAL_CONTENT;
         if resume_at > 0 && !resumed {
             resume_at = 0;
@@ -649,6 +660,7 @@ mod tests {
     #[tokio::test]
     async fn cancelled_download_keeps_a_resumable_part_file() {
         let owned = tempfile::tempdir().unwrap();
+        write_file(&owned.path().join("model.gguf.part"), b"GGUF");
         let (base_url, server) = mock_artifact_server(b"GGUFtest".to_vec()).await;
         let mut engine = FunAsrEngine::new(owned.path().to_path_buf(), None).unwrap();
         engine.download_base_url = Some(base_url);
@@ -662,7 +674,41 @@ mod tests {
         assert!(error.to_string().contains("cancelled"));
         assert!(!destination.exists());
         assert!(owned.path().join("model.gguf.part").exists());
-        server.await.unwrap();
+        assert_eq!(std::fs::read(owned.path().join("model.gguf.part")).unwrap(), b"GGUF");
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn cancelling_before_response_headers_returns_promptly() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (received, accepted) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0u8; 4096];
+            socket.read(&mut request).await.unwrap();
+            received.send(()).unwrap();
+            // Keep the connection open without sending response headers.
+            std::future::pending::<()>().await;
+            drop(socket);
+        });
+        let owned = tempfile::tempdir().unwrap();
+        let mut engine = FunAsrEngine::new(owned.path().to_path_buf(), None).unwrap();
+        engine.download_base_url = Some(format!("http://{address}"));
+        let destination = owned.path().join("model.gguf");
+        let token = CancellationToken::new();
+        let canceller = token.clone();
+        let cancel = tokio::spawn(async move {
+            accepted.await.unwrap();
+            canceller.cancel();
+        });
+        let result = tokio::time::timeout(std::time::Duration::from_secs(2),
+            download_tiny_artifact(&engine, &destination, &token)).await;
+        server.abort();
+        cancel.abort();
+        let error = result.expect("Cancel waited for the response headers").unwrap_err();
+        assert!(error.to_string().contains("cancelled"), "{error}");
+        assert!(!destination.exists());
     }
 
     #[tokio::test]
