@@ -50,6 +50,7 @@ function makePanel(overrides = {}, command = async () => undefined, extraProps =
       diarizationSettings: settings, isLoadingDiarizationSettings: false,
       betaFeatures: { importAndRetranscribe: true },
     }) };
+    if (name === '@/hooks/useSpeakerRefinementAvailability') return { useSpeakerRefinementAvailability: () => ({ supported: overrides.refinementSupported !== false, unavailableReason: overrides.refinementSupported === false ? 'Speaker analysis is unavailable.' : null }) };
     if (name === 'react/jsx-runtime') return { jsx, jsxs: jsx, Fragment: 'Fragment' };
     if (name === '@tauri-apps/api/core') return {
       invoke: async (name, args) => { calls.push({ name, args }); return command(name, args); },
@@ -302,4 +303,17 @@ console.log('Speaker review controls: all checks passed');
   assert.equal(dialog.props.open, true);
   assert.equal(dialog.props.meetingId, 'meeting');
   assert.equal(panel.calls.some(call => call.name === 'start_retranscription_command'), false);
+}
+
+// Unsupported systems cannot start or retry analysis. Manual edits still work.
+for (const currentStatus of ['none', 'completed', 'failed']) {
+  const panel = makePanel({ refinementSupported: false, speakers: [alice],
+    diarizationSettings: { enabled: true }, diarizationStatus: { currentStatus, progress: 0 } }, async () => []);
+  const tree = panel.render();
+  const action = button(tree, currentStatus === 'failed' ? 'Retry' : currentStatus === 'completed' ? 'Run again' : 'Identify speakers');
+  assert.equal(action.props.disabled, true);
+  await action.props.onClick();
+  assert.equal(panel.calls.length, 0);
+  assert.equal(attribute(tree).props.disabled, false);
+  assert.equal(button(tree, 'Correct rows').props.disabled, false);
 }

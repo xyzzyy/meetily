@@ -21,6 +21,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { listen, UnlistenFn } from '@tauri-apps/api/event';
 import { toast } from 'sonner';
 import { useConfig } from '@/contexts/ConfigContext';
+import { useSpeakerRefinementAvailability } from '@/hooks/useSpeakerRefinementAvailability';
 import { LANGUAGES } from '@/constants/languages';
 import { useTranscriptionModels, ModelOption } from '@/hooks/useTranscriptionModels';
 import Analytics from '@/lib/analytics';
@@ -60,8 +61,10 @@ export function RetranscribeDialog({
   onComplete,
 }: RetranscribeDialogProps) {
   const { selectedLanguage, transcriptModelConfig, diarizationSettings, isLoadingDiarizationSettings } = useConfig();
+  const { supported: refinementSupported, checking: checkingRefinement, unavailableReason } = useSpeakerRefinementAvailability();
   const speakerLabelsEnabled = !isLoadingDiarizationSettings && diarizationSettings.enabled;
-  const [assignSpeakers, setAssignSpeakers] = useState(speakerLabelsEnabled);
+  const canAssignSpeakers = speakerLabelsEnabled && refinementSupported;
+  const [assignSpeakers, setAssignSpeakers] = useState(canAssignSpeakers);
   const [isProcessing, setIsProcessing] = useState(false);
   const [progress, setProgress] = useState<RetranscriptionProgress | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -124,8 +127,8 @@ export function RetranscribeDialog({
   // Default to the app-wide speaker labels setting, including when it finishes
   // loading after the dialog is already open.
   useEffect(() => {
-    if (open) setAssignSpeakers(speakerLabelsEnabled);
-  }, [open, speakerLabelsEnabled]);
+    if (open) setAssignSpeakers(canAssignSpeakers);
+  }, [open, canAssignSpeakers]);
 
   // Listen for retranscription events
   useEffect(() => {
@@ -211,6 +214,8 @@ export function RetranscribeDialog({
       return;
     }
 
+    if (speakerLabelsEnabled && checkingRefinement) return;
+
     if (loadingModels || !selectedModelDetails) {
       setError(loadingModels ? 'Wait for the models to load.' : 'Select an available transcription model.');
       return;
@@ -234,7 +239,7 @@ export function RetranscribeDialog({
         language: languageToSend,
         model: selectedModelDetails.name,
         provider: selectedModelDetails.provider,
-        assignSpeakers: speakerLabelsEnabled && assignSpeakers,
+        assignSpeakers: canAssignSpeakers && assignSpeakers,
       });
     } catch (err: any) {
       setIsProcessing(false);
@@ -380,11 +385,11 @@ export function RetranscribeDialog({
               <div>
                 <label htmlFor="enhance-assign-speakers" className="text-sm font-medium">Assign speakers</label>
                 <p className="text-xs text-muted-foreground">
-                  {speakerLabelsEnabled ? 'Identify speakers in the new transcript.' : 'Enable speaker labels in Settings to use this.'}
+                  {!speakerLabelsEnabled ? 'Enable speaker labels in Settings to use this.' : unavailableReason || 'Identify speakers in the new transcript.'}
                 </p>
               </div>
-              <Switch id="enhance-assign-speakers" checked={speakerLabelsEnabled && assignSpeakers}
-                disabled={!speakerLabelsEnabled} onCheckedChange={setAssignSpeakers} />
+              <Switch id="enhance-assign-speakers" checked={canAssignSpeakers && assignSpeakers}
+                disabled={!canAssignSpeakers} onCheckedChange={setAssignSpeakers} />
             </div>
           )}
 
@@ -424,7 +429,7 @@ export function RetranscribeDialog({
               <Button
                 onClick={handleStartRetranscription}
                 className="bg-blue-600 hover:bg-blue-700"
-                disabled={!meetingFolderPath || loadingModels || !selectedModelDetails}
+                disabled={!meetingFolderPath || loadingModels || !selectedModelDetails || (speakerLabelsEnabled && checkingRefinement)}
               >
                 <RefreshCw className="h-4 w-4 mr-2" />
                 Start enhancement

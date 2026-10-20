@@ -13,7 +13,7 @@ function visit(node) {
   ts.forEachChild(node, visit);
 }
 visit(ast);
-function dialog(provider, loading = false, selected = true) {
+function dialog(provider, loading = false, selected = true, supported = true, checking = false) {
   let cursor = 0;
   const states = new Map();
   const calls = [];
@@ -29,6 +29,7 @@ function dialog(provider, loading = false, selected = true) {
     if (name === 'react/jsx-runtime') return { jsx, jsxs: jsx, Fragment: 'Fragment' };
     if (name === '@/contexts/ConfigContext') return { useConfig: () => ({ selectedLanguage: 'en', transcriptModelConfig: {},
       diarizationSettings: { enabled: true }, isLoadingDiarizationSettings: false }) };
+    if (name === '@/hooks/useSpeakerRefinementAvailability') return { useSpeakerRefinementAvailability: () => ({ supported, checking, unavailableReason: supported ? null : 'Speaker analysis is unavailable.' }) };
     if (name === '@/hooks/useTranscriptionModels') return { useTranscriptionModels: () => ({ availableModels: [model],
       selectedModelKey: selected ? `${provider}:${model.name}` : '', loadingModels: loading,
       setSelectedModelKey() {}, fetchModels() {}, resetSelection() {} }) };
@@ -65,5 +66,22 @@ for (const [loading, selected] of [[true, true], [false, false]]) {
   assert.equal(start(instance.tree).props.disabled, true);
   await start(instance.tree).props.onClick();
   assert.equal(instance.calls.length, 0, 'a missing selection must not default to another engine');
+}
+// Unsupported systems can still transcribe, without starting speaker analysis.
+{
+  const instance = dialog('parakeet', false, true, false);
+  const toggle = nodes(instance.tree).find(node => node.type === 'Switch');
+  assert.equal(toggle.props.checked, false);
+  assert.equal(toggle.props.disabled, true);
+  assert.equal(start(instance.tree).props.disabled, false);
+  await start(instance.tree).props.onClick();
+  assert.equal(instance.calls[0].args.assignSpeakers, false);
+}
+// Wait for the capability check before applying the default speaker choice.
+{
+  const instance = dialog('parakeet', false, true, false, true);
+  assert.equal(start(instance.tree).props.disabled, true);
+  await start(instance.tree).props.onClick();
+  assert.equal(instance.calls.length, 0);
 }
 console.log('Enhance workflow: all checks passed');

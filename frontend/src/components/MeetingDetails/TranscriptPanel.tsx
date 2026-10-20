@@ -15,6 +15,7 @@ import { confirm } from '@tauri-apps/plugin-dialog';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { toast } from 'sonner';
 import { useConfig } from '@/contexts/ConfigContext';
+import { useSpeakerRefinementAvailability } from '@/hooks/useSpeakerRefinementAvailability';
 
 const isTimingMismatch = (error: unknown) =>
   String(error ?? '').includes('Speaker analysis did not cover enough of the existing transcript');
@@ -119,6 +120,7 @@ export function TranscriptPanel({
   const [assignmentOverlap, setAssignmentOverlap] = useState(false);
   const [diarizationStatus, setDiarizationStatus] = useState<DiarizationStatus | null>(null);
   const { diarizationSettings, isLoadingDiarizationSettings, betaFeatures } = useConfig();
+  const { supported: refinementSupported, unavailableReason } = useSpeakerRefinementAvailability();
   const canEnhance = Boolean(betaFeatures.importAndRetranscribe && meetingId && meetingFolderPath);
   const timingMismatch = isTimingMismatch(diarizationStatus?.failureReason);
   const diarizationEnabled = !isLoadingDiarizationSettings
@@ -212,7 +214,7 @@ export function TranscriptPanel({
   }, [isRecording, loadSpeakers, meetingId, onRefetchTranscripts]);
 
   const runDiarization = async (retry: boolean) => {
-    if (!meetingId || !diarizationEnabled || !beginEdit()) return;
+    if (!meetingId || !diarizationEnabled || !refinementSupported || !beginEdit()) return;
     setIsStartingDiarization(true);
     const command = retry ? 'retry_final_diarization' : 'start_final_diarization';
     try {
@@ -448,7 +450,7 @@ export function TranscriptPanel({
                 Enhance
               </Button>
             ) : ['fallback_to_live', 'needs_review', 'failed', 'cancelled'].includes(diarizationStatus.currentStatus) ? (
-              <Button size="sm" variant="outline" disabled={editsDisabled || !diarizationEnabled} onClick={() => void runDiarization(true)}>
+              <Button size="sm" variant="outline" disabled={editsDisabled || !diarizationEnabled || !refinementSupported} title={unavailableReason || undefined} onClick={() => void runDiarization(true)}>
                 Retry
               </Button>
             ) : null}
@@ -489,8 +491,8 @@ export function TranscriptPanel({
               )}
               {meetingFolderPath && diarizationEnabled && (!diarizationStatus || ['none', 'completed'].includes(diarizationStatus.currentStatus)) && (
                 <Button size="sm" variant="ghost" className="h-7 px-2"
-                  title="Analyze this meeting locally and update speaker labels. Transcript text stays the same."
-                  disabled={editsDisabled}
+                  title={unavailableReason || "Analyze this meeting locally and update speaker labels. Transcript text stays the same."}
+                  disabled={editsDisabled || !refinementSupported}
                   onClick={() => void runDiarization(diarizationStatus?.currentStatus === 'completed')}>
                   {isStartingDiarization ? 'Starting…' : diarizationStatus?.currentStatus === 'completed' ? 'Run again' : 'Identify speakers'}
                 </Button>
@@ -515,6 +517,9 @@ export function TranscriptPanel({
           </div>
 
           <div id={`speaker-controls-${meetingId}`} hidden={!speakersExpanded} className="space-y-1.5">
+            {diarizationEnabled && unavailableReason && (
+              <p className="text-xs text-muted-foreground">{unavailableReason}</p>
+            )}
             {refinementActive && (
               <p className="text-xs text-muted-foreground">Wait for speaker processing to finish before you change speakers.</p>
             )}

@@ -10,9 +10,11 @@ import { SettingsSection } from '@/components/settings/SettingsSection';
 import { SettingsRow } from '@/components/settings/SettingsRow';
 import { SettingsStatusBadge } from '@/components/settings/SettingsStatusBadge';
 import { useConfig } from '@/contexts/ConfigContext';
+import { useSpeakerRefinementAvailability } from '@/hooks/useSpeakerRefinementAvailability';
 import { RememberedVoices } from '@/components/RememberedVoices';
 
 export function SpeakerDiarizationSettings() {
+  const { supported: refinementSupported, unavailableReason } = useSpeakerRefinementAvailability();
   const [modelInstalled, setModelInstalled] = useState(false);
   const [modelBusy, setModelBusy] = useState(false);
   const [downloadPercent, setDownloadPercent] = useState<number | null>(null);
@@ -125,11 +127,11 @@ export function SpeakerDiarizationSettings() {
 
       <SettingsRow
         title="Run post-call refinement automatically"
-        description="Identify speakers when recording stops. If this is off, use Identify speakers in the meeting transcript."
+        description={unavailableReason || "Identify speakers when recording stops. If this is off, use Identify speakers in the meeting transcript."}
         control={
           <Switch
-            checked={diarizationSettings.postCallRefinementEnabled}
-            disabled={!diarizationSettings.enabled || isLoadingDiarizationSettings}
+            checked={refinementSupported && diarizationSettings.postCallRefinementEnabled}
+            disabled={!refinementSupported || !diarizationSettings.enabled || isLoadingDiarizationSettings}
             onCheckedChange={(postCallRefinementEnabled) => update({ postCallRefinementEnabled })}
           />
         }
