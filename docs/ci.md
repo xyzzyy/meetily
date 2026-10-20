@@ -14,7 +14,9 @@ The workflow has two checks:
 
 The macOS job sets `SDKROOT` to the SDK from the active Xcode installation.
 This keeps the Swift compiler and the speaker helper's C++ headers on the
-same SDK when Command Line Tools are also installed.
+same SDK when Command Line Tools are also installed. The Rust cache key also
+includes the active Xcode version so build-script paths from an older runner
+image are not reused.
 
 The frontend is the React and Next.js interface shown in the Tauri window.
 The frontend job exports its production files to `frontend/out`. The macOS

@@ -69,10 +69,13 @@ jobs:
         with:
           node-version: '22'
       - uses: dtolnay/rust-toolchain@stable
+      - name: Read the active Xcode version
+        id: xcode
+        run: echo "version=$(xcodebuild -version | head -n 1 | tr ' ' '-')" >> "$GITHUB_OUTPUT"
       - uses: swatinem/rust-cache@v2
         with:
           workspaces: '. -> target'
-          key: pr-macos-release
+          key: pr-macos-release-${{ steps.xcode.outputs.version }}
       - uses: actions/download-artifact@v4
         with:
           name: frontend-build
