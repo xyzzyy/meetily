@@ -37,6 +37,7 @@ pub struct SpeakerCluster {
 pub struct SpeakerClusterer {
     clusters: Vec<SpeakerCluster>,
     last_label: Option<String>,
+    last_cluster: Option<usize>,
     anon_speaker_count: usize,
 }
 
@@ -53,6 +54,7 @@ impl SpeakerClusterer {
         Self {
             clusters: Vec::new(),
             last_label: None,
+            last_cluster: None,
             anon_speaker_count: 0,
         }
     }
@@ -77,11 +79,7 @@ impl SpeakerClusterer {
 
     /// The remembered voice behind the last label, if it matched one.
     pub fn last_profile_id(&self) -> Option<String> {
-        let label = self.last_label.as_deref()?;
-        self.clusters
-            .iter()
-            .find(|cluster| cluster.label == label)
-            .and_then(|cluster| cluster.profile_id.clone())
+        self.clusters.get(self.last_cluster?)?.profile_id.clone()
     }
 
     /// Assign an L2-normalized embedding to a cluster, returning its label.
@@ -110,6 +108,7 @@ impl SpeakerClusterer {
             if similarity - runner_up >= PROFILE_MATCH_MARGIN {
                 let label = self.update_cluster(index, embedding);
                 self.last_label = Some(label.clone());
+                self.last_cluster = Some(index);
                 return ClusterAssignment {
                     label,
                     profile_id: self.clusters[index].profile_id.clone(),
@@ -132,14 +131,18 @@ impl SpeakerClusterer {
             .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
 
         let (label, profile_id, confidence, needs_review) = match best {
-            Some((idx, similarity)) => (
-                self.update_cluster(idx, embedding),
-                self.clusters[idx].profile_id.clone(),
-                similarity,
-                false,
-            ),
+            Some((idx, similarity)) => {
+                self.last_cluster = Some(idx);
+                (
+                    self.update_cluster(idx, embedding),
+                    self.clusters[idx].profile_id.clone(),
+                    similarity,
+                    false,
+                )
+            }
             None => {
                 if self.anon_speaker_count >= MAX_TENTATIVE_SPEAKERS {
+                    self.last_cluster = None;
                     ("Unknown speaker".to_string(), None, 0.0, true)
                 } else {
                     self.anon_speaker_count += 1;
@@ -151,6 +154,7 @@ impl SpeakerClusterer {
                         from_profile: false,
                         profile_id: None,
                     });
+                    self.last_cluster = Some(self.clusters.len() - 1);
                     (label, None, 1.0, false)
                 }
             }
@@ -246,6 +250,29 @@ mod tests {
         assert_eq!(c.last_profile_id().as_deref(), Some("profile-alice"));
         c.assign(&unit(vec![0.0, 1.0, 0.0]));
         assert_eq!(c.last_profile_id(), None, "an anonymous speaker has no remembered voice");
+    }
+
+    #[test]
+    fn duplicate_names_keep_the_last_matched_profile() {
+        let mut c = SpeakerClusterer::new();
+        c.seed_profile("alex-a", "Alex", vec![1.0, 0.0]);
+        c.seed_profile("alex-b", "Alex", vec![0.0, 1.0]);
+        c.assign(&[0.0, 1.0]);
+        assert_eq!(c.last_profile_id().as_deref(), Some("alex-b"));
+        c.relabel("Alex", "Renamed");
+        assert_eq!(c.last_profile_id().as_deref(), Some("alex-b"));
+        c.assign(&[0.0, 1.0]);
+        assert_eq!(c.last_profile_id().as_deref(), Some("alex-b"));
+    }
+
+    #[test]
+    fn anonymous_label_collision_does_not_assign_a_profile() {
+        let mut c = SpeakerClusterer::new();
+        c.seed_profile("saved", "Speaker 1", vec![1.0, 0.0]);
+        c.assign(&[1.0, 0.0]);
+        assert_eq!(c.last_profile_id().as_deref(), Some("saved"));
+        assert_eq!(c.assign(&[0.0, 1.0]), "Speaker 1");
+        assert_eq!(c.last_profile_id(), None);
     }
 
     #[test]
