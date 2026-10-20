@@ -153,7 +153,6 @@ fn assign_live_speaker(
         (true, true) if activity.overlap_detected => {
             let mut assignment = base("multiple-speakers", "Multiple speakers", "mixed", true);
             assignment.speaker_id = None;
-            assignment.candidate_speaker_ids = Some(vec!["local-you".to_string()]);
             assignment
         }
         (true, true) => {
@@ -161,7 +160,6 @@ fn assign_live_speaker(
             assignment.diarization_status = Some("needs_review".to_string());
             assignment
         }
-        (true, false) if activity.system_available => base("local-you", "You", "microphone", false),
         (true, false) | (false, true) => {
             let source = if activity.system_active {
                 "system"
@@ -202,7 +200,10 @@ fn assign_live_speaker(
                 }
                 assignment
             } else {
-                base("unknown-speaker", "Unknown speaker", source, false)
+                let mut assignment = base("unknown-speaker", "Unknown speaker", source, false);
+                assignment.diarization_status = Some("needs_review".to_string());
+                assignment.speaker_color = Some(crate::diarization::colors::LIVE_REVIEW_COLOR.to_string());
+                assignment
             }
         }
         (false, false) => base("unknown-speaker", "Unknown speaker", "mixed", false),
@@ -874,7 +875,7 @@ fn format_recording_time(seconds: f64) -> String {
         }
 
         #[test]
-        fn source_activity_labels_clean_local_speech_as_you() {
+        fn silent_system_audio_does_not_identify_the_microphone_speaker() {
             let activity = SourceActivity {
                 microphone_active: true,
                 system_active: false,
@@ -882,8 +883,10 @@ fn format_recording_time(seconds: f64) -> String {
                 overlap_detected: false,
             };
             let assignment = assign_live_speaker(Some(&activity), &[], &mut None);
-            assert_eq!(assignment.speaker_id.as_deref(), Some("local-you"));
-            assert_eq!(assignment.speaker_label.as_deref(), Some("You"));
+            assert_eq!(assignment.speaker_id.as_deref(), Some("unknown-speaker"));
+            assert_eq!(assignment.speaker_label.as_deref(), Some("Unknown speaker"));
+            assert_eq!(assignment.speaker_source.as_deref(), Some("microphone"));
+            assert_eq!(assignment.diarization_status.as_deref(), Some("needs_review"));
         }
 
         #[test]
@@ -898,7 +901,7 @@ fn format_recording_time(seconds: f64) -> String {
             assert_eq!(assignment.speaker_label.as_deref(), Some("Multiple speakers"));
             assert_eq!(assignment.is_overlap, Some(true));
             assert_eq!(assignment.speaker_id, None);
-            assert_eq!(assignment.candidate_speaker_ids, Some(vec!["local-you".to_string()]));
+            assert_eq!(assignment.candidate_speaker_ids, None);
         }
 
         #[test]
