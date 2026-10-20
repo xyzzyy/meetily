@@ -178,6 +178,8 @@ export interface MeetingSpeaker {
   speakerLabel: string;
   speakerColor?: string | null;
   segmentCount: number;
+  /** Number of transcript rows whose speaker assignment was confirmed by a person. */
+  verifiedSegmentCount?: number;
 }
 
 /** One meeting speaker whose speech is part of a remembered voice. */

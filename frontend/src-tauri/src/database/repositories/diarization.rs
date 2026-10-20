@@ -21,6 +21,7 @@ pub struct MeetingSpeaker {
     pub speaker_label: String,
     pub speaker_color: Option<String>,
     pub segment_count: i64,
+    pub verified_segment_count: i64,
 }
 
 #[derive(Debug, Clone, sqlx::FromRow, Serialize)]
@@ -168,7 +169,8 @@ impl DiarizationRepository {
                 speaker_id AS speaker_id,
                 COALESCE(NULLIF(TRIM(MAX(speaker_label)), ''), speaker_id) AS speaker_label,
                 MAX(speaker_color) AS speaker_color,
-                COUNT(*) AS segment_count
+                COUNT(*) AS segment_count,
+                SUM(CASE WHEN diarization_method = 'manual' THEN 1 ELSE 0 END) AS verified_segment_count
              FROM transcript_speakers
              WHERE meeting_id = ?
                 AND published = 1
@@ -698,6 +700,20 @@ mod tests {
         assert_eq!(speakers[1].speaker_id, "speaker-2");
         assert_eq!(speakers[1].speaker_label, "Speaker 2");
         assert_eq!(speakers[1].segment_count, 1);
+    }
+
+    #[tokio::test]
+    async fn speaker_verification_counts_only_manual_rows() {
+        let pool = speaker_test_pool().await;
+        sqlx::query("UPDATE transcript_speakers SET diarization_method = 'manual' WHERE transcript_id = 't-1'")
+            .execute(&pool).await.unwrap();
+        let speakers = DiarizationRepository::get_meeting_speakers(&pool, "meeting-1").await.unwrap();
+        assert_eq!(speakers[0].segment_count, 2);
+        assert_eq!(speakers[0].verified_segment_count, 1);
+        assert_eq!(speakers[1].verified_segment_count, 0);
+        DiarizationRepository::rename_speaker(&pool, "meeting-1", "speaker-1", "Alice").await.unwrap();
+        let speakers = DiarizationRepository::get_meeting_speakers(&pool, "meeting-1").await.unwrap();
+        assert_eq!(speakers[0].verified_segment_count, speakers[0].segment_count);
     }
 
     #[tokio::test]

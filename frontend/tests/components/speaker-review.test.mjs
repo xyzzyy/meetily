@@ -268,3 +268,16 @@ for (const currentStatus of ['processing', 'preparing_models', 'rebuilding_windo
   assert.equal(panel.states.get('savingSpeakerId'), null);
 }
 console.log('Speaker review controls: all checks passed');
+
+// A speaker summary is confirmed only when every row is confirmed. Use the
+// full-meeting counts, including rows that are outside the loaded transcript page.
+{
+  const panel = makePanel({ speakers: [
+    { ...alice, segmentCount: 2, verifiedSegmentCount: 1 },
+    { ...alice, speakerId: 'bob', speakerLabel: 'Bob', verifiedSegmentCount: 1 },
+    { ...alice, speakerId: 'unknown', speakerLabel: 'Speaker 3' },
+  ] });
+  const indicators = nodes(panel.render()).filter(node => node.type === 'SpeakerAttributionIndicator');
+  assert.deepEqual(indicators.map(node => node.props.verified), [false, true, false]);
+  assert.match(indicators[0].props.description, /1 of 2 transcript segments confirmed/);
+}

@@ -107,6 +107,7 @@ mod tests {
                 speaker_label: format!("Speaker {i}"),
                 speaker_color: Some("#3b82f6".into()),
                 segment_count: 1,
+                verified_segment_count: 0,
             })
             .collect()
     }

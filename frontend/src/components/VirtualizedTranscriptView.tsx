@@ -4,6 +4,7 @@ import { useCallback, useRef, useReducer, startTransition, useEffect, useState, 
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { useAutoScroll } from "@/hooks/useAutoScroll";
 import { useTranscriptStreaming } from "@/hooks/useTranscriptStreaming";
+import { SpeakerAttributionIndicator } from "./SpeakerAttributionIndicator";
 import { ConfidenceIndicator } from "./ConfidenceIndicator";
 import { Tooltip, TooltipContent, TooltipTrigger } from "./ui/tooltip";
 import { RecordingStatusBar } from "./RecordingStatusBar";
@@ -87,6 +88,7 @@ const TranscriptSegment = memo(function TranscriptSegment({
     speakerColor,
     isOverlap,
     diarizationStatus,
+    diarizationMethod,
     isStreaming,
     showConfidence,
     selected,
@@ -101,6 +103,7 @@ const TranscriptSegment = memo(function TranscriptSegment({
     speakerColor?: string | null;
     isOverlap?: boolean | null;
     diarizationStatus?: DiarizationStatus | null;
+    diarizationMethod?: string | null;
     isStreaming: boolean;
     showConfidence: boolean;
     selected?: boolean;
@@ -123,7 +126,7 @@ const TranscriptSegment = memo(function TranscriptSegment({
     );
     const visibleSpeakerLabel = isOverlap ? 'Multiple speakers' : speakerLabel?.trim();
     const statusBadge =
-        diarizationStatus && diarizationStatus !== 'none'
+        diarizationStatus && diarizationStatus !== 'none' && diarizationStatus !== 'final'
             ? DIARIZATION_STATUS_BADGES[diarizationStatus]
             : null;
 
@@ -166,6 +169,9 @@ const TranscriptSegment = memo(function TranscriptSegment({
                                 >
                                     {visibleSpeakerLabel}
                                 </span>
+                            )}
+                            {visibleSpeakerLabel && !isOverlap && visibleSpeakerLabel !== 'Unknown speaker' && (
+                                <SpeakerAttributionIndicator verified={diarizationMethod === 'manual'} />
                             )}
                             {statusBadge && (
                                 <span className={`rounded-full px-2 py-0.5 font-medium ${statusBadge.toneClassName}`}>
@@ -378,6 +384,7 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
                                         speakerColor={segment.speaker_color}
                                         isOverlap={segment.is_overlap}
                                         diarizationStatus={segment.diarization_status}
+                                        diarizationMethod={segment.diarization_method}
                                         isStreaming={isStreaming}
                                         showConfidence={showConfidence}
                                         selected={selectedSegmentIds?.has(segment.id)}
@@ -441,6 +448,7 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
                                         speakerColor={segment.speaker_color}
                                         isOverlap={segment.is_overlap}
                                         diarizationStatus={segment.diarization_status}
+                                        diarizationMethod={segment.diarization_method}
                                         isStreaming={isStreaming}
                                         showConfidence={showConfidence}
                                         selected={selectedSegmentIds?.has(segment.id)}

@@ -2,6 +2,7 @@
 
 import { MeetingSpeaker, SpeakerProfile, Transcript, TranscriptSegmentData } from '@/types';
 import { VirtualizedTranscriptView } from '@/components/VirtualizedTranscriptView';
+import { SpeakerAttributionIndicator } from '@/components/SpeakerAttributionIndicator';
 import { SpeakerColorPicker } from './SpeakerColorPicker';
 import { SpeakerAttributeButton, type SpeakerAttribution } from './SpeakerAttributeButton';
 import { TranscriptButtonGroup } from './TranscriptButtonGroup';
@@ -521,6 +522,12 @@ export function TranscriptPanel({
                             <span className="truncate text-sm font-medium text-foreground">
                               {speaker.speakerLabel}
                             </span>
+                            <SpeakerAttributionIndicator
+                              verified={speaker.segmentCount > 0 && speaker.verifiedSegmentCount === speaker.segmentCount}
+                              description={speaker.verifiedSegmentCount && speaker.verifiedSegmentCount < speaker.segmentCount
+                                ? `${speaker.verifiedSegmentCount} of ${speaker.segmentCount} transcript segments confirmed by you. Other segments were assigned automatically.`
+                                : undefined}
+                            />
                             <span className="shrink-0 text-[11px] tabular-nums text-muted-foreground" aria-label={`${speaker.segmentCount} transcript segments`}>
                               {speaker.segmentCount}
                             </span>
