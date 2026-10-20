@@ -201,6 +201,10 @@ async fn copy_legacy_feature_data(core: &SqlitePool, feature: &SqlitePool) -> Re
             .map_err(stringify)?;
         }
     }
+    // Migrations ran before the imported profiles and transcript links existed.
+    // Apply the same repair used for stores converted by earlier builds.
+    sqlx::raw_sql(include_str!("../../speaker-migrations/20261021000000_recover_legacy_profile_samples.sql"))
+        .execute(feature).await.map_err(stringify)?;
     Ok(())
 }
 
@@ -519,7 +523,7 @@ mod tests {
             sqlx::query(statement).execute(&pool).await.unwrap();
         }
         sqlx::query(
-            "UPDATE transcripts SET speaker_id='speaker-1', speaker_label='Alice', speaker_source='microphone', diarization_status='final' WHERE id='t1'",
+            "UPDATE transcripts SET speaker_id='speaker-1', speaker_label='Alice', speaker_source='microphone', diarization_status='final', diarization_method='manual', speaker_profile_id='p1' WHERE id='t1'",
         ).execute(&pool).await.unwrap();
         sqlx::query(
             "CREATE TABLE diarization_settings (
@@ -541,6 +545,8 @@ mod tests {
         ] {
             sqlx::query(table).execute(&pool).await.unwrap();
         }
+        sqlx::query("INSERT INTO speaker_profiles (id, name, embedding, model_version, sample_count, speech_seconds) VALUES ('p1', 'Alice', x'0000803f', 'v1', 2, 12.0)")
+            .execute(&pool).await.unwrap();
         for version in LEGACY_MIGRATIONS {
             sqlx::query(
                 "INSERT INTO _sqlx_migrations (version, description, installed_on, success, checksum, execution_time)
@@ -578,6 +584,10 @@ mod tests {
             "SELECT transcript_id, speaker_label, speaker_source FROM transcript_speakers WHERE transcript_id='t1'",
         ).fetch_one(&feature).await.unwrap();
         assert_eq!(metadata, ("t1".to_string(), "Alice".to_string(), "microphone".to_string()));
+        let sample: (String, String, String, Vec<u8>, i64, f64) = sqlx::query_as(
+            "SELECT profile_id, meeting_id, speaker_id, embedding, sample_count, speech_seconds FROM speaker_profile_samples",
+        ).fetch_one(&feature).await.unwrap();
+        assert_eq!(sample, ("p1".into(), "m1".into(), "speaker-1".into(), vec![0, 0, 128, 63], 2, 12.0));
         feature.close().await;
         assert!(!temp.path().join(MARKER_FILE).exists());
     }
