@@ -14,7 +14,8 @@ const OP_PING: u16 = 2;
 const OP_SHUTDOWN: u16 = 3;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
 const MAX_TEXT_BYTES: usize = 4 * 1024 * 1024;
-const MAX_AUDIO_SAMPLES: usize = 30 * 16_000;
+/// Longest audio the helper accepts in one request (16 kHz samples).
+pub(crate) const MAX_AUDIO_SAMPLES: usize = 30 * 16_000;
 
 #[derive(Debug)]
 pub struct SidecarRequestError {
@@ -291,10 +292,16 @@ fn resolve_helper_binary() -> Result<PathBuf> {
             }
         }
     }
-    if let Ok(current) = std::env::current_dir() {
-        candidates.push(current.join("frontend/src-tauri/binaries").join(&target));
-        candidates.push(current.join("funasr-helper/build/bin").join(&plain));
-        candidates.push(current.join("../funasr-helper/build/bin").join(&plain));
+    // Development builds and tests also look in the source tree. Release builds
+    // only use the bundled helper, never a binary from the working directory.
+    if cfg!(debug_assertions) {
+        let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        candidates.push(manifest.join("binaries").join(&target));
+        candidates.push(manifest.join("../../funasr-helper/build/bin").join(&plain));
+        if let Ok(current) = std::env::current_dir() {
+            candidates.push(current.join("frontend/src-tauri/binaries").join(&target));
+            candidates.push(current.join("funasr-helper/build/bin").join(&plain));
+        }
     }
 
     candidates

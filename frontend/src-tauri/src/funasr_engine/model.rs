@@ -32,7 +32,7 @@ pub const MODELS: &[FunAsrModelSpec] = &[
     FunAsrModelSpec {
         id: "funasr-nano-2512-q4km",
         display_name: "FUN-ASR Nano Q4_K_M",
-        description: "Recommended · Smallest download",
+        description: "Default · Smallest download (484 MB decoder)",
         decoder: ArtifactSpec {
             filename: "qwen3-0.6b-q4km.gguf",
             size: 484_219_776,
@@ -42,7 +42,7 @@ pub const MODELS: &[FunAsrModelSpec] = &[
     FunAsrModelSpec {
         id: "funasr-nano-2512-q5km",
         display_name: "FUN-ASR Nano Q5_K_M",
-        description: "Best published benchmark",
+        description: "5-bit decoder (551 MB) · Not yet compared in Meetily",
         decoder: ArtifactSpec {
             filename: "qwen3-0.6b-q5km.gguf",
             size: 551_377_792,
@@ -52,7 +52,7 @@ pub const MODELS: &[FunAsrModelSpec] = &[
     FunAsrModelSpec {
         id: "funasr-nano-2512-q8_0",
         display_name: "FUN-ASR Nano Q8_0",
-        description: "8-bit decoder · Largest download",
+        description: "8-bit decoder (805 MB) · Largest download · Not yet compared in Meetily",
         decoder: ArtifactSpec {
             filename: "qwen3-0.6b-q8_0.gguf",
             size: 804_753_280,

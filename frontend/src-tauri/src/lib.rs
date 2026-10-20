@@ -50,6 +50,7 @@ pub mod groq;
 pub mod model_storage;
 pub mod openrouter;
 pub mod parakeet_engine;
+pub mod funasr_engine;
 pub mod state;
 pub mod storage_safety;
 pub mod summary;
@@ -563,10 +564,11 @@ pub fn run() {
                 }
             });
 
-            // Set Whisper and Parakeet models directories. These resolve branch
-            // storage again, so a failure stops startup like the checks above.
+            // Set Whisper, Parakeet and FUN-ASR models directories. These resolve
+            // branch storage again, so a failure stops startup like the checks above.
             if let Err(message) = whisper_engine::commands::set_models_directory(_app.handle())
                 .and_then(|()| parakeet_engine::commands::set_models_directory(_app.handle()))
+                .and_then(|()| funasr_engine::commands::set_models_directory(_app.handle()))
             {
                 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
                 _app.dialog()
@@ -589,6 +591,14 @@ pub fn run() {
             tauri::async_runtime::spawn(async {
                 if let Err(e) = parakeet_engine::commands::parakeet_init().await {
                     log::error!("Failed to initialize Parakeet engine on startup: {}", e);
+                }
+            });
+
+            // Initialize the FUN-ASR engine. It only starts its helper process
+            // when a model is loaded.
+            tauri::async_runtime::spawn(async {
+                if let Err(e) = funasr_engine::commands::funasr_init().await {
+                    log::error!("Failed to initialize FUN-ASR engine on startup: {}", e);
                 }
             });
 
@@ -712,6 +722,20 @@ pub fn run() {
             parakeet_engine::commands::parakeet_cancel_download,
             parakeet_engine::commands::parakeet_delete_corrupted_model,
             parakeet_engine::commands::open_parakeet_models_folder,
+            // FUN-ASR engine commands
+            funasr_engine::commands::funasr_init,
+            funasr_engine::commands::funasr_get_available_models,
+            funasr_engine::commands::funasr_get_current_model,
+            funasr_engine::commands::funasr_is_model_loaded,
+            funasr_engine::commands::funasr_has_available_models,
+            funasr_engine::commands::funasr_load_model,
+            funasr_engine::commands::funasr_unload_model,
+            funasr_engine::commands::funasr_validate_model_ready,
+            funasr_engine::commands::funasr_get_models_directory,
+            funasr_engine::commands::funasr_download_model,
+            funasr_engine::commands::funasr_cancel_download,
+            funasr_engine::commands::funasr_delete_model,
+            funasr_engine::commands::funasr_transcribe_audio,
             // Parallel processing commands
             whisper_engine::parallel_commands::initialize_parallel_processor,
             whisper_engine::parallel_commands::start_parallel_processing,
@@ -897,6 +921,9 @@ pub fn run() {
                         } else {
                             log::warn!("AppState not available for database cleanup (likely first launch)");
                         }
+
+                        // Stop the FUN-ASR helper process, if one is running
+                        funasr_engine::commands::shutdown().await;
 
                         // Clean up sidecar
                         log::info!("Cleaning up sidecar...");

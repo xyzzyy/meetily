@@ -21,6 +21,13 @@ export interface FunAsrModelInfo {
 
 export const FUNASR_SUPPORTED_LANGUAGES = new Set(['auto', 'en', 'zh', 'ja']);
 
+/** The languages a transcription provider accepts, from a full language list. */
+export function languagesForProvider<T extends { code: string }>(provider: string | undefined, languages: T[]): T[] {
+  return provider === 'funasr'
+    ? languages.filter((language) => FUNASR_SUPPORTED_LANGUAGES.has(language.code))
+    : languages;
+}
+
 export class FunAsrAPI {
   static init(): Promise<void> {
     return invoke('funasr_init');

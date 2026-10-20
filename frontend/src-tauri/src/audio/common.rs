@@ -14,10 +14,30 @@ pub(crate) async fn acquire_engine_lifecycle_lock() -> OwnedMutexGuard<()> {
     ENGINE_LIFECYCLE_LOCK.clone().lock_owned().await
 }
 
+/// Local engine used for a batch job (import or retranscription).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum BatchEngine {
+    Whisper,
+    Parakeet,
+    FunAsr,
+}
+
+impl BatchEngine {
+    /// Map a transcript provider name to its batch engine. Unknown or missing
+    /// providers use Whisper, as before.
+    pub(crate) fn from_provider(provider: Option<&str>) -> Self {
+        match provider {
+            Some("parakeet") => Self::Parakeet,
+            Some("funasr") => Self::FunAsr,
+            _ => Self::Whisper,
+        }
+    }
+}
+
 /// Unload the transcription engine after a batch job (import or retranscription).
 /// Skips unloading if a live recording is currently in progress, since recording
 /// uses the same global engine instances.
-pub(crate) async fn unload_engine_after_batch(use_parakeet: bool) {
+pub(crate) async fn unload_engine_after_batch(engine: BatchEngine) {
     let _engine_lifecycle_guard = acquire_engine_lifecycle_lock().await;
 
     if crate::audio::recording_commands::is_recording().await {
@@ -25,25 +45,70 @@ pub(crate) async fn unload_engine_after_batch(use_parakeet: bool) {
         return;
     }
 
-    if use_parakeet {
-        use crate::parakeet_engine::commands::PARAKEET_ENGINE;
-        let engine = {
-            let guard = PARAKEET_ENGINE.lock().unwrap_or_else(|e| e.into_inner());
-            guard.as_ref().cloned()
-        };
-        if let Some(e) = engine {
-            e.unload_model().await;
+    match engine {
+        BatchEngine::Parakeet => {
+            use crate::parakeet_engine::commands::PARAKEET_ENGINE;
+            let engine = {
+                let guard = PARAKEET_ENGINE.lock().unwrap_or_else(|e| e.into_inner());
+                guard.as_ref().cloned()
+            };
+            if let Some(e) = engine {
+                e.unload_model().await;
+            }
         }
-    } else {
-        use crate::whisper_engine::commands::WHISPER_ENGINE;
-        let engine = {
-            let guard = WHISPER_ENGINE.lock().unwrap_or_else(|e| e.into_inner());
-            guard.as_ref().cloned()
-        };
-        if let Some(e) = engine {
-            e.unload_model().await;
+        BatchEngine::FunAsr => {
+            // Unloading also stops the helper process and frees its memory.
+            use crate::funasr_engine::commands::FUNASR_ENGINE;
+            let engine = {
+                let guard = FUNASR_ENGINE.lock().unwrap_or_else(|e| e.into_inner());
+                guard.as_ref().cloned()
+            };
+            if let Some(e) = engine {
+                e.unload_model().await;
+            }
+        }
+        BatchEngine::Whisper => {
+            use crate::whisper_engine::commands::WHISPER_ENGINE;
+            let engine = {
+                let guard = WHISPER_ENGINE.lock().unwrap_or_else(|e| e.into_inner());
+                guard.as_ref().cloned()
+            };
+            if let Some(e) = engine {
+                e.unload_model().await;
+            }
         }
     }
+}
+
+/// Get the FUN-ASR engine with a model loaded for a batch job: the requested
+/// model, or else the configured one (falling back to the default or any
+/// downloaded model).
+pub(crate) async fn get_or_init_funasr<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    requested_model: Option<&str>,
+    language: Option<&str>,
+) -> Result<Arc<crate::funasr_engine::FunAsrEngine>> {
+    use crate::funasr_engine::commands::{funasr_init, validate_model_ready_with_config, FUNASR_ENGINE};
+    // Fail before any work if every segment would be rejected.
+    crate::funasr_engine::normalize_language(language).map_err(anyhow::Error::msg)?;
+    funasr_init().await.map_err(anyhow::Error::msg)?;
+    let engine = {
+        let guard = FUNASR_ENGINE.lock().unwrap_or_else(|e| e.into_inner());
+        guard.as_ref().cloned()
+    }
+    .ok_or_else(|| anyhow::anyhow!("FUN-ASR engine not initialized"))?;
+    match requested_model {
+        Some(model) => {
+            if engine.get_current_model().await.as_deref() != Some(model) {
+                info!("Loading FUN-ASR model '{}'", model);
+                engine.load_model(model).await?;
+            }
+        }
+        None => {
+            validate_model_ready_with_config(app).await.map_err(anyhow::Error::msg)?;
+        }
+    }
+    Ok(engine)
 }
 
 /// Create transcript segments from transcription results.

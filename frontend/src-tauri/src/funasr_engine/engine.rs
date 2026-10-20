@@ -115,10 +115,14 @@ impl FunAsrEngine {
             model_spec(model_id).ok_or_else(|| anyhow!("Unknown FUN-ASR model: {model_id}"))?;
         let encoder = self.encoder_path();
         let decoder = self.decoder_path(model_id)?;
-        validate_artifact(&encoder, ENCODER, true)
+        // Downloads verify the full SHA-256 before a file is installed. Loading
+        // checks size and GGUF header only: re-hashing about 950 MB on every
+        // recording start and Enhance run took seconds each time, and the
+        // Whisper and Parakeet engines don't re-hash on load either.
+        validate_artifact(&encoder, ENCODER, false)
             .await
             .context("FUN-ASR encoder validation failed")?;
-        validate_artifact(&decoder, spec.decoder, true)
+        validate_artifact(&decoder, spec.decoder, false)
             .await
             .with_context(|| format!("FUN-ASR decoder validation failed for {model_id}"))?;
         Ok((encoder, decoder))

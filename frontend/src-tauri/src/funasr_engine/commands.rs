@@ -8,14 +8,14 @@ pub static FUNASR_ENGINE: Mutex<Option<Arc<FunAsrEngine>>> = Mutex::new(None);
 static MODELS_DIR: Mutex<Option<PathBuf>> = Mutex::new(None);
 static OFFICIAL_MODELS_DIR: Mutex<Option<PathBuf>> = Mutex::new(None);
 
-pub fn set_models_directory<R: Runtime>(app: &AppHandle<R>) {
-    match crate::model_storage::owned_models_root(app) {
-        Ok(path) => *MODELS_DIR.lock().unwrap() = Some(path),
-        Err(error) => log::error!("Failed to configure FUN-ASR model directory: {error}"),
-    }
-    *OFFICIAL_MODELS_DIR.lock().unwrap() = crate::model_storage::official_models_root(app)
-        .ok()
-        .flatten();
+/// Resolve FUN-ASR's model directories: branch-owned for downloads and
+/// deletion, and the official installation's copy as a read-only fallback.
+pub fn set_models_directory<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
+    let owned = crate::model_storage::owned_models_root(app)?;
+    let official = crate::model_storage::official_models_root(app)?;
+    *MODELS_DIR.lock().unwrap() = Some(owned);
+    *OFFICIAL_MODELS_DIR.lock().unwrap() = official;
+    Ok(())
 }
 
 #[tauri::command]

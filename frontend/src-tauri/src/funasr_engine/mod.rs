@@ -4,6 +4,7 @@ pub mod model;
 mod sidecar;
 
 pub use engine::FunAsrEngine;
+pub(crate) use sidecar::MAX_AUDIO_SAMPLES;
 
 pub fn normalize_language(language: Option<&str>) -> Result<&'static str, String> {
     let language = language.unwrap_or("auto");

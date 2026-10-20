@@ -266,7 +266,7 @@ pub async fn start_import<R: Runtime>(
     // Reset cancellation flag
     IMPORT_CANCELLED.store(false, Ordering::SeqCst);
 
-    let use_parakeet = provider.as_deref() == Some("parakeet");
+    let batch_engine = super::common::BatchEngine::from_provider(provider.as_deref());
     let result = run_import(
         app.clone(),
         source_path,
@@ -278,7 +278,7 @@ pub async fn start_import<R: Runtime>(
     .await;
 
     // Unload the engine after the batch job (success, failure, or cancellation)
-    super::common::unload_engine_after_batch(use_parakeet).await;
+    super::common::unload_engine_after_batch(batch_engine).await;
 
     // Guard will automatically clear flag on drop
     // No need for manual: IMPORT_IN_PROGRESS.store(false, Ordering::SeqCst);
@@ -330,7 +330,7 @@ async fn run_import<R: Runtime>(
     );
 
     // Determine which provider to use (default to whisper)
-    let use_parakeet = provider.as_deref() == Some("parakeet");
+    let batch_engine = super::common::BatchEngine::from_provider(provider.as_deref());
 
     emit_progress(&app, "copying", 5, "Creating meeting folder...");
 
@@ -509,13 +509,19 @@ async fn run_import<R: Runtime>(
     emit_progress(&app, "transcribing", 30, "Loading transcription engine...");
 
     // Initialize the appropriate engine
-    let whisper_engine = if !use_parakeet && total_segments > 0 {
+    let whisper_engine = if batch_engine == super::common::BatchEngine::Whisper && total_segments > 0 {
         Some(get_or_init_whisper(&app, model.as_deref()).await?)
     } else {
         None
     };
-    let parakeet_engine = if use_parakeet && total_segments > 0 {
+    let parakeet_engine = if batch_engine == super::common::BatchEngine::Parakeet && total_segments > 0 {
         Some(get_or_init_parakeet(&app, model.as_deref()).await?)
+    } else {
+        None
+    };
+    let funasr_provider = if batch_engine == super::common::BatchEngine::FunAsr && total_segments > 0 {
+        let engine = super::common::get_or_init_funasr(&app, model.as_deref(), language.as_deref()).await?;
+        Some(crate::audio::transcription::FunAsrProvider::new(engine))
     } else {
         None
     };
@@ -580,8 +586,15 @@ async fn run_import<R: Runtime>(
         }
 
         // Transcribe
-        let (text, conf) = if use_parakeet {
-            let engine = parakeet_engine.as_ref().unwrap();
+        let (text, conf) = if let Some(provider) = funasr_provider.as_ref() {
+            use crate::audio::transcription::TranscriptionProvider;
+            let result = provider
+                .transcribe(segment.samples.clone(), language.clone())
+                .await
+                .map_err(|e| anyhow!("FUN-ASR transcription failed on segment {}: {}", i, e))?;
+            // FUN-ASR reports no confidence; use the same placeholder as Parakeet.
+            (result.text, 0.9f32)
+        } else if let Some(engine) = parakeet_engine.as_ref() {
             let text = engine
                 .transcribe_audio(segment.samples.clone())
                 .await

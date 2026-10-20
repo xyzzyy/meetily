@@ -6,8 +6,8 @@
     "build": {
         "frontendDist": "../out",
         "devUrl": "http://localhost:3118",
-        "beforeDevCommand": "pnpm dev",
-        "beforeBuildCommand": "pnpm build"
+        "beforeDevCommand": "node scripts/build-funasr-sidecar.js && pnpm dev",
+        "beforeBuildCommand": "node scripts/build-funasr-sidecar.js && pnpm build"
     },
     "app": {
         "windows": [
@@ -99,7 +99,8 @@
         ],
         "externalBin": [
             "binaries/llama-helper",
-            "binaries/ffmpeg"
+            "binaries/ffmpeg",
+            "binaries/funasr-helper"
         ],
         "macOS": {
             "entitlements": "entitlements.plist",

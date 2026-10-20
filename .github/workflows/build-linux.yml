@@ -198,6 +198,14 @@ jobs:
           echo "Copied llama-helper to frontend/src-tauri/binaries/"
           ls -la frontend/src-tauri/binaries/
 
+      - name: Build FUN-ASR helper sidecar
+        shell: bash
+        run: |
+          # CPU-only llama.cpp build (GPU backends are off in funasr-helper/CMakeLists.txt).
+          # Skips the build if frontend/src-tauri/binaries already has the helper.
+          node frontend/scripts/build-funasr-sidecar.js
+          ls -la frontend/src-tauri/binaries/
+
       - name: Build Tauri app
         uses: tauri-apps/tauri-action@v0
         env:

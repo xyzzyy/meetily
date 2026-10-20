@@ -135,10 +135,28 @@ pub async fn validate_transcription_model_ready<R: Runtime>(app: &AppHandle<R>) 
                 }
             }
         }
+        "funasr" => {
+            // Every chunk would fail with an unsupported language, so refuse
+            // to start rather than record without a transcript.
+            crate::funasr_engine::normalize_language(
+                crate::get_language_preference_internal().as_deref(),
+            )?;
+            info!("🔍 Validating FUN-ASR model...");
+            match crate::funasr_engine::commands::validate_model_ready_with_config(app).await {
+                Ok(model_name) => {
+                    info!("✅ FUN-ASR model validation successful: {} is ready", model_name);
+                    Ok(())
+                }
+                Err(e) => {
+                    warn!("❌ FUN-ASR model validation failed: {}", e);
+                    Err(e)
+                }
+            }
+        }
         other => {
             warn!("❌ Unsupported transcription provider for local recording: {}", other);
             Err(format!(
-                "Provider '{}' is not supported for local transcription. Please select 'localWhisper' or 'parakeet'.",
+                "Provider '{}' is not supported for local transcription. Please select 'localWhisper', 'parakeet' or 'funasr'.",
                 other
             ))
         }
@@ -210,6 +228,20 @@ pub async fn get_or_init_transcription_engine<R: Runtime>(
                 None => {
                     Err("Parakeet engine not initialized. This should not happen after validation.".to_string())
                 }
+            }
+        }
+        "funasr" => {
+            info!("Initializing FUN-ASR transcription engine");
+            let engine = {
+                let guard = crate::funasr_engine::commands::FUNASR_ENGINE.lock().unwrap();
+                guard.as_ref().cloned()
+            };
+            match engine {
+                Some(engine) if engine.is_model_loaded().await => Ok(TranscriptionEngine::Provider(
+                    Arc::new(super::funasr_provider::FunAsrProvider::new(engine)),
+                )),
+                Some(_) => Err("FUN-ASR engine initialized but no model loaded. This should not happen after validation.".to_string()),
+                None => Err("FUN-ASR engine not initialized. This should not happen after validation.".to_string()),
             }
         }
         "localWhisper" | _ => {
