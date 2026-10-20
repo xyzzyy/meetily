@@ -771,6 +771,18 @@ pub async fn attribute_speaker<R: Runtime>(
             Err(error) => (None, Some(format!("The voice wasn't learned: {error}."))),
         },
     };
+    apply_attribution(pool, &request, name, existing, voice, voice_note).await
+}
+
+/// Voice storage is optional; failures must not prevent the speaker name change.
+async fn apply_attribution(
+    pool: &sqlx::SqlitePool,
+    request: &AttributeSpeakerRequest,
+    name: String,
+    existing: Option<crate::database::repositories::speaker_profile::SpeakerProfile>,
+    voice: Option<(Vec<f32>, f64, i64)>,
+    mut voice_note: Option<String>,
+) -> Result<AttributeSpeakerResponse, String> {
     let source = || SampleSource {
         meeting_id: &request.meeting_id,
         speaker_id: &request.speaker_id,
@@ -778,22 +790,45 @@ pub async fn attribute_speaker<R: Runtime>(
     let model_version = crate::diarization::models::EMBEDDING_MODEL_VERSION;
     let (profile_id, outcome) = match (existing, voice) {
         (Some(profile), Some((embedding, seconds, samples))) => {
-            let added = SpeakerProfilesRepository::add_sample(
-                pool, &profile.id, &embedding, model_version, samples, seconds, source(),
+            let outcome = match SpeakerProfilesRepository::add_sample(
+                pool,
+                &profile.id,
+                &embedding,
+                model_version,
+                samples,
+                seconds,
+                source(),
             )
             .await
-            .map_err(|error| error.to_string())?;
-            let outcome = if added { AttributionOutcome::Added } else { AttributionOutcome::AlreadyIncluded };
+            {
+                Ok(true) => AttributionOutcome::Added,
+                Ok(false) => AttributionOutcome::AlreadyIncluded,
+                Err(error) => {
+                    voice_note = Some(format!("The voice wasn't learned: {error}."));
+                    AttributionOutcome::NamedOnly
+                }
+            };
             (Some(profile.id), outcome)
         }
         (Some(profile), None) => (Some(profile.id), AttributionOutcome::NamedOnly),
         (None, Some((embedding, seconds, samples))) => {
-            let id = SpeakerProfilesRepository::create_from_sample(
-                pool, &name, &embedding, model_version, samples, seconds, source(),
+            match SpeakerProfilesRepository::create_from_sample(
+                pool,
+                &name,
+                &embedding,
+                model_version,
+                samples,
+                seconds,
+                source(),
             )
             .await
-            .map_err(|error| error.to_string())?;
-            (Some(id), AttributionOutcome::Created)
+            {
+                Ok(id) => (Some(id), AttributionOutcome::Created),
+                Err(error) => {
+                    voice_note = Some(format!("The voice wasn't learned: {error}."));
+                    (None, AttributionOutcome::NamedOnly)
+                }
+            }
         }
         (None, None) => (None, AttributionOutcome::NamedOnly),
     };
@@ -821,7 +856,12 @@ pub async fn attribute_speaker<R: Runtime>(
         .map_err(|error| error.to_string())?;
     }
 
-    Ok(AttributeSpeakerResponse { profile_id, name, outcome, voice_note })
+    Ok(AttributeSpeakerResponse {
+        profile_id,
+        name,
+        outcome,
+        voice_note,
+    })
 }
 
 fn is_running_from_mounted_disk_image(executable: &std::path::Path) -> bool {
@@ -1048,6 +1088,85 @@ fn normalize_speaker_label(label: &str) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn voice_storage_failures_still_apply_the_speaker_name() {
+        for existing_profile in [true, false] {
+            let pool = sqlx::sqlite::SqlitePoolOptions::new()
+                .max_connections(1)
+                .connect("sqlite::memory:")
+                .await
+                .unwrap();
+            sqlx::migrate!("./speaker-migrations")
+                .run(&pool)
+                .await
+                .unwrap();
+            sqlx::query(
+                "INSERT INTO transcript_speakers (transcript_id, meeting_id, speaker_id, speaker_label)
+                VALUES ('row', 'meeting', 'speaker', 'Speaker 1')",
+            )
+            .execute(&pool)
+            .await
+            .unwrap();
+            let existing = if existing_profile {
+                let id = SpeakerProfilesRepository::create_from_sample(
+                    &pool, "Alice", &[1.0, 0.0], "old-model", 1, 10.0,
+                    SampleSource { meeting_id: "earlier", speaker_id: "earlier" },
+                ).await.unwrap();
+                SpeakerProfilesRepository::get(&pool, &id).await.unwrap()
+            } else {
+                sqlx::query(
+                    "CREATE TRIGGER fail_voice_insert BEFORE INSERT ON speaker_profiles
+                    BEGIN SELECT RAISE(ABORT, 'voice storage unavailable'); END",
+                )
+                .execute(&pool)
+                .await
+                .unwrap();
+                None
+            };
+            let request = AttributeSpeakerRequest {
+                meeting_id: "meeting".into(),
+                speaker_id: "speaker".into(),
+                profile_id: existing.as_ref().map(|profile| profile.id.clone()),
+                name: Some("Alice".into()),
+            };
+            let response = apply_attribution(
+                &pool,
+                &request,
+                "Alice".into(),
+                existing,
+                Some((vec![0.0, 1.0], 10.0, 1)),
+                None,
+            )
+            .await
+            .unwrap();
+            assert!(matches!(response.outcome, AttributionOutcome::NamedOnly));
+            assert!(response
+                .voice_note
+                .as_deref()
+                .unwrap()
+                .contains(if existing_profile {
+                    "speaker model"
+                } else {
+                    "voice storage unavailable"
+                }));
+            assert_eq!(response.profile_id.is_some(), existing_profile);
+            let label: String = sqlx::query_scalar(
+                "SELECT speaker_label FROM transcript_speakers WHERE transcript_id='row'",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(label, "Alice");
+            if existing_profile {
+                let seconds: f64 = sqlx::query_scalar("SELECT speech_seconds FROM speaker_profiles")
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+                assert_eq!(seconds, 10.0);
+            }
+        }
+    }
 
     #[test]
     fn detects_apps_running_from_a_mounted_disk_image() {
