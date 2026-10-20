@@ -1031,16 +1031,23 @@ fn speaker_labels(
 ) -> HashMap<String, String> {
     let mut labels = HashMap::new();
     labels.insert("local-you".to_string(), "You".to_string());
-    labels.extend(profile_labels.clone());
+    let mut manual_labels = HashMap::new();
     for transcript in live {
         if let (Some(id), Some(label)) = (&transcript.speaker_id, &transcript.speaker_label) {
             if !label.trim().is_empty()
                 && !matches!(label.as_str(), "Multiple speakers" | "Unknown speaker")
             {
                 labels.insert(id.clone(), label.clone());
+                if transcript.diarization_method.as_deref() == Some("manual") {
+                    manual_labels.insert(id.clone(), label.clone());
+                }
             }
         }
     }
+    // A strong post-call match replaces automatic live labels. A name set by
+    // the user takes precedence over either automatic pass.
+    labels.extend(profile_labels.clone());
+    labels.extend(manual_labels);
     let mut used_labels: BTreeSet<String> = labels.values().cloned().collect();
     let mut next = 1;
     for window in windows {
@@ -1793,6 +1800,31 @@ mod tests {
             confidence: 0.9,
             is_overlap: false,
         }
+    }
+
+    #[test]
+    fn remembered_name_replaces_live_label_in_final_transcript() {
+        let live = vec![speaker_row("old-a", "Speaker 1", 0.0, 10.0)];
+        let mut windows = vec![speaker_window("new-a", 0.0, 10.0)];
+        stabilize_speaker_ids(&mut windows, &live);
+        windows[0].speaker_profile_id = Some("alice-profile".into());
+        let names = HashMap::from([("old-a".into(), "Alice".into())]);
+        let labels = speaker_labels(&windows, &live, &names);
+        let rows = label_existing_transcripts(&[live_row("t1", 0.0, 10.0)], &windows, &labels);
+        assert_eq!(rows[0].speaker_label, "Alice");
+        assert_eq!(rows[0].speaker_profile_id.as_deref(), Some("alice-profile"));
+        assert_eq!(rows[0].speaker_id.as_deref(), Some("old-a"));
+    }
+
+    #[test]
+    fn manual_name_wins_over_profile_match_and_later_automatic_rows() {
+        let mut manual = speaker_row("old-a", "User name", 0.0, 5.0);
+        manual.diarization_method = Some("manual".into());
+        let live = vec![manual, speaker_row("old-a", "Speaker 1", 5.0, 10.0)];
+        let windows = vec![speaker_window("old-a", 0.0, 10.0)];
+        let names = HashMap::from([("old-a".into(), "Alice".into())]);
+        let labels = speaker_labels(&windows, &live, &names);
+        assert_eq!(labels["old-a"], "User name");
     }
 
     #[test]
