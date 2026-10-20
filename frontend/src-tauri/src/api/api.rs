@@ -793,6 +793,8 @@ async fn delete_meeting_and_cleanup(
     speaker_pool: &sqlx::SqlitePool,
     meeting_id: &str,
 ) -> Result<bool, sqlx::Error> {
+    let _meeting = crate::diarization::operations::try_meeting_edit(meeting_id)
+        .map_err(sqlx::Error::Protocol)?;
     let deleted = MeetingsRepository::delete_meeting(core_pool, meeting_id).await?;
     if deleted {
         if let Err(error) =
@@ -1593,6 +1595,33 @@ pub async fn api_test_custom_openai_connection<R: Runtime>(
 #[cfg(test)]
 mod meeting_deletion_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn meeting_deletion_is_blocked_until_speaker_processing_finishes() {
+        let core = sqlx::sqlite::SqlitePoolOptions::new().max_connections(1)
+            .connect("sqlite::memory:").await.unwrap();
+        let feature = sqlx::sqlite::SqlitePoolOptions::new().max_connections(1)
+            .connect("sqlite::memory:").await.unwrap();
+        sqlx::migrate!("./migrations").run(&core).await.unwrap();
+        sqlx::migrate!("./speaker-migrations").run(&feature).await.unwrap();
+        let id = "delete-during-speaker-processing";
+        sqlx::query("INSERT INTO meetings (id, title, created_at, updated_at) VALUES (?, 'Test', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)")
+            .bind(id).execute(&core).await.unwrap();
+        let processing = crate::diarization::operations::try_meeting_edit(id).unwrap();
+        let error = delete_meeting_and_cleanup(&core, &feature, id).await.unwrap_err();
+        assert!(error.to_string().contains("in progress"));
+        let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM meetings WHERE id = ?)")
+            .bind(id).fetch_one(&core).await.unwrap();
+        assert!(exists);
+        // The active run can finish its final write before deletion is retried.
+        sqlx::query("INSERT INTO meeting_diarization_status (meeting_id, current_status) VALUES (?, 'completed')")
+            .bind(id).execute(&feature).await.unwrap();
+        drop(processing);
+        assert!(delete_meeting_and_cleanup(&core, &feature, id).await.unwrap());
+        let remaining: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM meeting_diarization_status WHERE meeting_id = ?")
+            .bind(id).fetch_one(&feature).await.unwrap();
+        assert_eq!(remaining, 0);
+    }
 
     #[tokio::test]
     async fn committed_deletion_succeeds_when_speaker_cleanup_fails() {
