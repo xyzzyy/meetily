@@ -742,6 +742,7 @@ pub async fn attribute_speaker<R: Runtime>(
     state: State<'_, AppState>,
     request: AttributeSpeakerRequest,
 ) -> Result<AttributeSpeakerResponse, String> {
+    let _processing = super::operations::try_processing_slot()?;
     let _edit = super::operations::try_meeting_edit(&request.meeting_id)?;
     let pool = state.speaker_store.pool();
 
@@ -807,7 +808,7 @@ async fn apply_attribution(
         speaker_id: &request.speaker_id,
     };
     let model_version = crate::diarization::models::EMBEDDING_MODEL_VERSION;
-    let (profile_id, outcome) = match (existing, voice) {
+    let (mut profile_id, mut outcome) = match (existing, voice) {
         (Some(profile), Some((embedding, seconds, samples))) => {
             let outcome = match SpeakerProfilesRepository::add_sample(
                 pool,
@@ -863,6 +864,17 @@ async fn apply_attribution(
     if updated == 0 {
         return Err("Speaker not found for meeting".to_string());
     }
+    let mut transaction = pool.begin().await.map_err(|error| error.to_string())?;
+    if let Some(id) = &profile_id {
+        let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM speaker_profiles WHERE id = ?)")
+            .bind(id).fetch_one(&mut *transaction).await.map_err(|error| error.to_string())?;
+        if !exists {
+            // Keep the requested name even if a cached voice was removed.
+            profile_id = None;
+            outcome = AttributionOutcome::NamedOnly;
+            voice_note = Some("That remembered voice no longer exists. The speaker name was saved.".into());
+        }
+    }
     for table in ["transcript_speakers", "speaker_segments"] {
         sqlx::query(&format!(
             "UPDATE {table} SET speaker_profile_id = ? WHERE meeting_id = ? AND speaker_id = ? AND is_overlap = 0"
@@ -870,10 +882,11 @@ async fn apply_attribution(
         .bind(&profile_id)
         .bind(&request.meeting_id)
         .bind(&request.speaker_id)
-        .execute(pool)
+        .execute(&mut *transaction)
         .await
         .map_err(|error| error.to_string())?;
     }
+    transaction.commit().await.map_err(|error| error.to_string())?;
 
     Ok(AttributeSpeakerResponse {
         profile_id,
@@ -1107,6 +1120,35 @@ fn normalize_speaker_label(label: &str) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn attribution_does_not_restore_a_deleted_cached_profile() {
+        for has_voice in [false, true] {
+            let pool = sqlx::sqlite::SqlitePoolOptions::new().max_connections(1)
+                .connect("sqlite::memory:").await.unwrap();
+            sqlx::migrate!("./speaker-migrations").run(&pool).await.unwrap();
+            let id = SpeakerProfilesRepository::create_from_sample(
+                &pool, "Alice", &[1.0, 0.0], crate::diarization::models::EMBEDDING_MODEL_VERSION, 1, 10.0,
+                SampleSource { meeting_id: "earlier", speaker_id: "alice" },
+            ).await.unwrap();
+            let cached = SpeakerProfilesRepository::get(&pool, &id).await.unwrap();
+            sqlx::query("INSERT INTO transcript_speakers (transcript_id, meeting_id, speaker_id, speaker_label, published)
+                VALUES ('row', 'meeting', 'speaker', 'Speaker 1', 1)")
+                .execute(&pool).await.unwrap();
+            // Deletion finishes after attribution has loaded the voice.
+            SpeakerProfilesRepository::delete(&pool, &id).await.unwrap();
+            let request = AttributeSpeakerRequest { meeting_id: "meeting".into(), speaker_id: "speaker".into(),
+                profile_id: Some(id), name: None };
+            let voice = has_voice.then(|| (vec![1.0, 0.0], 10.0, 1));
+            let response = apply_attribution(&pool, &request, "Alice".into(), cached, voice, None).await.unwrap();
+            assert_eq!(response.profile_id, None);
+            assert!(matches!(response.outcome, AttributionOutcome::NamedOnly));
+            let row: (String, Option<String>) = sqlx::query_as(
+                "SELECT speaker_label, speaker_profile_id FROM transcript_speakers WHERE transcript_id = 'row'"
+            ).fetch_one(&pool).await.unwrap();
+            assert_eq!(row, ("Alice".into(), None));
+        }
+    }
 
     #[tokio::test]
     async fn voice_deletion_waits_for_refinement_before_clearing_links() {
