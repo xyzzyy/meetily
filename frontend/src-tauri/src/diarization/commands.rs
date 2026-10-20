@@ -522,6 +522,9 @@ pub async fn remove_speaker_profile_sample(
     state: State<'_, AppState>,
     request: RemoveSpeakerProfileSampleRequest,
 ) -> Result<String, String> {
+    // Removing the last sample also deletes the voice. Do not let a running
+    // refinement publish a profile it loaded before that deletion.
+    let _processing = super::operations::try_processing_slot()?;
     let _edit = super::operations::try_meeting_edit(&request.meeting_id)?;
     let outcome = SpeakerProfilesRepository::remove_sample(
         state.speaker_store.pool(),
@@ -566,7 +569,14 @@ pub async fn delete_speaker_profile(
     state: State<'_, AppState>,
     profile_id: String,
 ) -> Result<(), String> {
-    SpeakerProfilesRepository::delete(state.speaker_store.pool(), &profile_id)
+    delete_profile_from_store(state.speaker_store.pool(), &profile_id).await
+}
+
+async fn delete_profile_from_store(pool: &sqlx::SqlitePool, profile_id: &str) -> Result<(), String> {
+    // Final refinement and Enhance hold this slot until their cached profile
+    // IDs have been published. Keep deletion and link cleanup after that work.
+    let _processing = super::operations::try_processing_slot()?;
+    SpeakerProfilesRepository::delete(pool, profile_id)
         .await
         .map_err(|error| error.to_string())
 }
@@ -1097,6 +1107,32 @@ fn normalize_speaker_label(label: &str) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn voice_deletion_waits_for_refinement_before_clearing_links() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new().max_connections(1)
+            .connect("sqlite::memory:").await.unwrap();
+        sqlx::migrate!("./speaker-migrations").run(&pool).await.unwrap();
+        let profile_id = SpeakerProfilesRepository::create_from_sample(
+            &pool, "Alice", &[1.0, 0.0], "test-model", 1, 10.0,
+            SampleSource { meeting_id: "meeting", speaker_id: "alice" },
+        ).await.unwrap();
+        let processing = super::super::operations::try_processing_slot().unwrap();
+        let error = delete_profile_from_store(&pool, &profile_id).await.unwrap_err();
+        assert!(error.contains("in progress"));
+        assert!(SpeakerProfilesRepository::get(&pool, &profile_id).await.unwrap().is_some());
+        // Refinement can still publish its cached ID before releasing the slot.
+        sqlx::query("INSERT INTO transcript_speakers (transcript_id, meeting_id, speaker_id, speaker_label, speaker_profile_id)
+            VALUES ('row', 'meeting', 'alice', 'Alice', ?)")
+            .bind(&profile_id).execute(&pool).await.unwrap();
+        drop(processing);
+        delete_profile_from_store(&pool, &profile_id).await.unwrap();
+        assert!(SpeakerProfilesRepository::get(&pool, &profile_id).await.unwrap().is_none());
+        let row: (String, Option<String>) = sqlx::query_as(
+            "SELECT speaker_label, speaker_profile_id FROM transcript_speakers WHERE transcript_id = 'row'"
+        ).fetch_one(&pool).await.unwrap();
+        assert_eq!(row, ("Alice".to_string(), None));
+    }
 
     #[tokio::test]
     async fn overlap_cannot_create_a_remembered_voice() {
