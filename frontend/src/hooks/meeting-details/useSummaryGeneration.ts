@@ -439,13 +439,25 @@ export function useSummaryGeneration({
         return fallbackTimestamp;
       }
       const totalSecs = Math.floor(seconds);
-      return `[${Math.floor(totalSecs / 60).toString().padStart(2, '0')}:${(totalSecs % 60).toString().padStart(2, '0')}]`;
+      const mins = Math.floor(totalSecs / 60);
+      const secs = totalSecs % 60;
+      return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
     };
 
+    const formattedLines = allTranscripts.map(t => {
+      const start = formatTime(t.audio_start_time, t.timestamp.replace(/^\[|\]$/g, ''));
+      const end = formatTime(t.audio_end_time, start);
+      const timestamp = `[${start}–${end}]`;
+      const canTrustSpeaker = t.diarization_status === 'final' || t.diarization_method === 'manual';
+      const speaker = canTrustSpeaker
+        ? (t.is_overlap ? 'Multiple speakers' : t.speaker_label?.trim())
+        : undefined;
+      return `${timestamp}${speaker ? ` ${speaker}:` : ''} ${t.text}`;
+    });
+
     return {
-      transcriptText: allTranscripts
-        .map((transcript) => `${formatTime(transcript.audio_start_time, transcript.timestamp)} ${transcript.text}`)
-        .join('\n'),
+      transcriptText: formattedLines.join('\n'),
+      // Language detection needs the spoken text only, without timestamps or speaker labels.
       transcriptTexts: allTranscripts.map((transcript) => transcript.text),
     };
   }, []);

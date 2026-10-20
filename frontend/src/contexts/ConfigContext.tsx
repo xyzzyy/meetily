@@ -9,6 +9,7 @@ import Analytics from '@/lib/analytics';
 import { FUNASR_SUPPORTED_LANGUAGES } from '@/lib/funasr';
 import { toast } from 'sonner';
 import { BetaFeatures, BetaFeatureKey, loadBetaFeatures, saveBetaFeatures } from '@/types/betaFeatures';
+import { DEFAULT_DIARIZATION_SETTINGS, type DiarizationSettings } from '@/types/diarization';
 
 export interface OllamaModel {
   name: string;
@@ -69,6 +70,11 @@ interface ConfigContextType {
   // Beta features
   betaFeatures: BetaFeatures;
   toggleBetaFeature: (featureKey: BetaFeatureKey, enabled: boolean) => void;
+
+  // Speaker diarization settings
+  diarizationSettings: DiarizationSettings;
+  isLoadingDiarizationSettings: boolean;
+  updateDiarizationSettings: (settings: DiarizationSettings) => Promise<void>;
 
   // Ollama models
   models: OllamaModel[];
@@ -172,6 +178,13 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
   const [betaFeatures, setBetaFeatures] = useState<BetaFeatures>(() => {
     return loadBetaFeatures();
   });
+
+  // Speaker diarization settings state
+  const [diarizationSettings, setDiarizationSettings] = useState<DiarizationSettings>(DEFAULT_DIARIZATION_SETTINGS);
+  const savedDiarizationSettingsRef = useRef<DiarizationSettings>(DEFAULT_DIARIZATION_SETTINGS);
+  const diarizationSaveQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const diarizationSaveVersionRef = useRef(0);
+  const [isLoadingDiarizationSettings, setIsLoadingDiarizationSettings] = useState(false);
 
   // Preference settings state (lazy loaded)
   const [notificationSettings, setNotificationSettings] = useState<NotificationSettings | null>(null);
@@ -368,6 +381,26 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
     loadDevicePreferences();
   }, []);
 
+  // Load speaker diarization settings on mount
+  useEffect(() => {
+    const loadDiarizationSettings = async () => {
+      setIsLoadingDiarizationSettings(true);
+      try {
+        const settings = await configService.getDiarizationSettings();
+        savedDiarizationSettingsRef.current = settings;
+        setDiarizationSettings(settings);
+      } catch (error) {
+        console.error('[ConfigContext] Failed to load diarization settings:', error);
+        savedDiarizationSettingsRef.current = DEFAULT_DIARIZATION_SETTINGS;
+        setDiarizationSettings(DEFAULT_DIARIZATION_SETTINGS);
+      } finally {
+        setIsLoadingDiarizationSettings(false);
+      }
+    };
+
+    loadDiarizationSettings();
+  }, []);
+
   // Calculate model options based on available models
   const modelOptions: Record<ModelConfig['provider'], string[]> = {
     ollama: models.map(model => model.name),
@@ -410,6 +443,26 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
 
       return updated;
     });
+  }, []);
+
+  const updateDiarizationSettings = useCallback(async (settings: DiarizationSettings) => {
+    const version = ++diarizationSaveVersionRef.current;
+    setDiarizationSettings(settings);
+    // Save in order so an older request cannot overwrite a newer setting.
+    const save = diarizationSaveQueueRef.current.then(async () => {
+      await configService.saveDiarizationSettings(settings);
+      savedDiarizationSettingsRef.current = settings;
+    });
+    diarizationSaveQueueRef.current = save.catch(() => {});
+    try {
+      await save;
+    } catch (error) {
+      // An older failure must not replace a newer edit that is still pending.
+      if (version === diarizationSaveVersionRef.current) {
+        setDiarizationSettings(savedDiarizationSettingsRef.current);
+      }
+      throw error;
+    }
   }, []);
 
   // Update individual provider API key
@@ -521,6 +574,9 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
     toggleConfidenceIndicator,
     betaFeatures,
     toggleBetaFeature,
+    diarizationSettings,
+    isLoadingDiarizationSettings,
+    updateDiarizationSettings,
     models,
     modelOptions,
     error,
@@ -544,6 +600,9 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
     toggleConfidenceIndicator,
     betaFeatures,
     toggleBetaFeature,
+    diarizationSettings,
+    isLoadingDiarizationSettings,
+    updateDiarizationSettings,
     models,
     modelOptions,
     error,

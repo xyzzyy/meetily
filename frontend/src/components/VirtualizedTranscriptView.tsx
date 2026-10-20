@@ -4,11 +4,13 @@ import { useCallback, useRef, useReducer, startTransition, useEffect, useState, 
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { useAutoScroll } from "@/hooks/useAutoScroll";
 import { useTranscriptStreaming } from "@/hooks/useTranscriptStreaming";
+import { SpeakerAttributionIndicator } from "./SpeakerAttributionIndicator";
 import { ConfidenceIndicator } from "./ConfidenceIndicator";
 import { Tooltip, TooltipContent, TooltipTrigger } from "./ui/tooltip";
 import { RecordingStatusBar } from "./RecordingStatusBar";
 import { motion, AnimatePresence } from "framer-motion";
 import { TranscriptSegmentData } from "@/types";
+import type { DiarizationStatus } from "@/types/diarization";
 
 export interface VirtualizedTranscriptViewProps {
     /** Transcript segments to display */
@@ -34,6 +36,8 @@ export interface VirtualizedTranscriptViewProps {
     totalCount?: number;
     loadedCount?: number;
     onLoadMore?: () => void;
+    selectedSegmentIds?: Set<string>;
+    onToggleSegment?: (id: string) => void;
 }
 
 // Threshold for enabling virtualization (below this, use simple rendering)
@@ -63,6 +67,16 @@ function cleanStopWords(text: string): string {
     return cleanedText.replace(/\s+/g, ' ').trim();
 }
 
+type VisibleDiarizationStatus = Exclude<DiarizationStatus, 'none'>;
+
+const DIARIZATION_STATUS_BADGES: Record<VisibleDiarizationStatus, { label: string; toneClassName: string }> = {
+    provisional: { label: 'Provisional', toneClassName: 'bg-amber-100 text-amber-800' },
+    final: { label: 'Final', toneClassName: 'bg-green-100 text-green-800' },
+    needs_review: { label: 'Needs review', toneClassName: 'bg-purple-100 text-purple-800' },
+    fallback_to_live: { label: 'Live fallback', toneClassName: 'bg-orange-100 text-orange-800' },
+    failed: { label: 'Failed', toneClassName: 'bg-destructive/15 text-destructive' },
+};
+
 // Memoized transcript segment component
 const TranscriptSegment = memo(function TranscriptSegment({
     id,
@@ -70,16 +84,30 @@ const TranscriptSegment = memo(function TranscriptSegment({
     endTime,
     text,
     confidence,
+    speakerLabel,
+    speakerColor,
+    isOverlap,
+    diarizationStatus,
+    diarizationMethod,
     isStreaming,
     showConfidence,
+    selected,
+    onToggle,
 }: {
     id: string;
     timestamp: number;
     endTime?: number;
     text: string;
     confidence?: number;
+    speakerLabel?: string | null;
+    speakerColor?: string | null;
+    isOverlap?: boolean | null;
+    diarizationStatus?: DiarizationStatus | null;
+    diarizationMethod?: string | null;
     isStreaming: boolean;
     showConfidence: boolean;
+    selected?: boolean;
+    onToggle?: (id: string) => void;
 }) {
     const displayText = cleanStopWords(text) || (text.trim() === '' ? '[Silence]' : text);
     const duration = endTime !== undefined && endTime >= timestamp
@@ -96,10 +124,24 @@ const TranscriptSegment = memo(function TranscriptSegment({
             {formatRecordingTime(timestamp)}
         </span>
     );
+    const visibleSpeakerLabel = isOverlap ? 'Multiple speakers' : speakerLabel?.trim();
+    const statusBadge =
+        diarizationStatus && diarizationStatus !== 'none' && diarizationStatus !== 'final'
+            ? DIARIZATION_STATUS_BADGES[diarizationStatus]
+            : null;
 
     return (
         <div id={`segment-${id}`} className="mb-3">
             <div className="flex items-start gap-2">
+                {onToggle && (
+                    <input
+                        type="checkbox"
+                        aria-label="Select transcript row"
+                        className="mt-1"
+                        checked={selected}
+                        onChange={() => onToggle(id)}
+                    />
+                )}
                 {hasTooltip ? (
                     <Tooltip>
                         <TooltipTrigger asChild>
@@ -118,6 +160,26 @@ const TranscriptSegment = memo(function TranscriptSegment({
                     </Tooltip>
                 ) : timestampLabel}
                 <div className="flex-1">
+                    {(visibleSpeakerLabel || statusBadge) && (
+                        <div className="mb-1 flex items-center gap-2 text-xs">
+                            {visibleSpeakerLabel && (
+                                <span
+                                    className="font-medium"
+                                    style={{ color: speakerColor || (isOverlap ? '#f97316' : undefined) }}
+                                >
+                                    {visibleSpeakerLabel}
+                                </span>
+                            )}
+                            {visibleSpeakerLabel && !isOverlap && visibleSpeakerLabel !== 'Unknown speaker' && (
+                                <SpeakerAttributionIndicator verified={diarizationMethod === 'manual'} />
+                            )}
+                            {statusBadge && (
+                                <span className={`rounded-full px-2 py-0.5 font-medium ${statusBadge.toneClassName}`}>
+                                    {statusBadge.label}
+                                </span>
+                            )}
+                        </div>
+                    )}
                     {isStreaming ? (
                         <div className="bg-gray-100 border border-gray-200 rounded-lg px-3 py-2">
                             <p className="text-base text-gray-800 leading-relaxed">{displayText}</p>
@@ -145,6 +207,8 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
     totalCount = 0,
     loadedCount = 0,
     onLoadMore,
+    selectedSegmentIds,
+    onToggleSegment,
 }) => {
     // Create scroll ref first - shared between virtualizer and auto-scroll hook
     const scrollRef = useRef<HTMLDivElement>(null);
@@ -316,8 +380,15 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
                                         endTime={segment.endTime}
                                         text={getDisplayText(segment)}
                                         confidence={segment.confidence}
+                                        speakerLabel={segment.speaker_label}
+                                        speakerColor={segment.speaker_color}
+                                        isOverlap={segment.is_overlap}
+                                        diarizationStatus={segment.diarization_status}
+                                        diarizationMethod={segment.diarization_method}
                                         isStreaming={isStreaming}
                                         showConfidence={showConfidence}
+                                        selected={selectedSegmentIds?.has(segment.id)}
+                                        onToggle={onToggleSegment}
                                     />
                                 </div>
                             );
@@ -373,8 +444,15 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
                                         endTime={segment.endTime}
                                         text={getDisplayText(segment)}
                                         confidence={segment.confidence}
+                                        speakerLabel={segment.speaker_label}
+                                        speakerColor={segment.speaker_color}
+                                        isOverlap={segment.is_overlap}
+                                        diarizationStatus={segment.diarization_status}
+                                        diarizationMethod={segment.diarization_method}
                                         isStreaming={isStreaming}
                                         showConfidence={showConfidence}
+                                        selected={selectedSegmentIds?.has(segment.id)}
+                                        onToggle={onToggleSegment}
                                     />
                                 </motion.div>
                             );

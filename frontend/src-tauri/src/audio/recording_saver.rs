@@ -12,7 +12,7 @@ use super::audio_processing::create_meeting_folder;
 use super::incremental_saver::IncrementalAudioSaver;
 
 /// Structured transcript segment for JSON export
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct TranscriptSegment {
     pub id: String,
     pub text: String,
@@ -22,6 +22,41 @@ pub struct TranscriptSegment {
     pub display_time: String,   // Formatted time for display like "[02:15]"
     pub confidence: f32,
     pub sequence_id: u64,
+    pub speaker_id: Option<String>,
+    pub speaker_label: Option<String>,
+    pub speaker_profile_id: Option<String>,
+    pub speaker_source: Option<String>,
+    pub speaker_color: Option<String>,
+    pub is_overlap: Option<bool>,
+    pub candidate_speaker_ids: Option<Vec<String>>,
+    pub diarization_status: Option<String>,
+    pub diarization_method: Option<String>,
+    pub diarization_confidence: Option<f32>,
+}
+
+impl From<super::transcription::TranscriptUpdate> for TranscriptSegment {
+    fn from(update: super::transcription::TranscriptUpdate) -> Self {
+        Self {
+            id: format!("seg_{}", update.sequence_id),
+            text: update.text,
+            audio_start_time: update.audio_start_time,
+            audio_end_time: update.audio_end_time,
+            duration: update.duration,
+            display_time: update.timestamp,
+            confidence: update.confidence,
+            sequence_id: update.sequence_id,
+            speaker_id: update.speaker_id,
+            speaker_label: update.speaker_label,
+            speaker_profile_id: update.speaker_profile_id,
+            speaker_source: update.speaker_source,
+            speaker_color: update.speaker_color,
+            is_overlap: update.is_overlap,
+            candidate_speaker_ids: update.candidate_speaker_ids,
+            diarization_status: update.diarization_status,
+            diarization_method: update.diarization_method,
+            diarization_confidence: update.diarization_confidence,
+        }
+    }
 }
 
 /// Meeting metadata structure
@@ -127,25 +162,16 @@ impl RecordingSaver {
             display_time: "[00:00]".to_string(),
             confidence: 1.0,
             sequence_id: 0,
+            ..Default::default()
         };
         self.add_transcript_segment(segment);
     }
 
-    /// Start accumulation with optional incremental saving
-    ///
-    /// # Arguments
-    /// * `auto_save` - If true, creates checkpoints and enables saving. If false, audio chunks are discarded.
-    pub fn start_accumulation(
-        &mut self,
-        auto_save: bool,
-        mut receiver: mpsc::UnboundedReceiver<AudioChunk>,
-    ) {
-        if auto_save {
-            info!("Initializing incremental audio saver for recording (auto-save ENABLED)");
-        } else {
-            info!("Starting recording without audio saving (auto-save DISABLED - transcripts only)");
-        }
-
+    /// Create the meeting folder (and checkpoints when `auto_save` is on) so
+    /// other recorders, like the diarization stem saver, can write into it
+    /// before accumulation starts. `start_accumulation` calls this itself if
+    /// the folder hasn't been prepared.
+    pub fn prepare_meeting_folder(&mut self, auto_save: bool) {
         // Initialize meeting folder and incremental saver ONLY if auto_save is enabled
         if auto_save {
             if let Some(name) = self.meeting_name.clone() {
@@ -168,6 +194,26 @@ impl RecordingSaver {
                     }
                 }
             }
+        }
+    }
+
+    /// Start accumulation with optional incremental saving
+    ///
+    /// # Arguments
+    /// * `auto_save` - If true, creates checkpoints and enables saving. If false, audio chunks are discarded.
+    pub fn start_accumulation(
+        &mut self,
+        auto_save: bool,
+        mut receiver: mpsc::UnboundedReceiver<AudioChunk>,
+    ) {
+        if auto_save {
+            info!("Initializing incremental audio saver for recording (auto-save ENABLED)");
+        } else {
+            info!("Starting recording without audio saving (auto-save DISABLED - transcripts only)");
+        }
+
+        if self.meeting_folder.is_none() {
+            self.prepare_meeting_folder(auto_save);
         }
 
         // Start accumulation task
@@ -475,5 +521,52 @@ impl RecordingSaver {
 impl Default for RecordingSaver {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn live_speaker_data_survives_history_and_json_round_trips() {
+        for overlap in [false, true] {
+            let event = serde_json::json!({
+                "text": "Hello", "timestamp": "14:30:05", "source": "Audio", "sequence_id": 7,
+                "chunk_start_time": 1.0, "is_partial": false, "confidence": 0.85,
+                "audio_start_time": 1.0, "audio_end_time": 2.0, "duration": 1.0,
+                "speaker_id": if overlap { None } else { Some("alice") },
+                "speaker_label": if overlap { "Multiple speakers" } else { "Alice" },
+                "speaker_profile_id": if overlap { None } else { Some("profile-alice") },
+                "speaker_source": "microphone", "speaker_color": "#2563eb", "is_overlap": overlap,
+                "candidate_speaker_ids": if overlap { vec!["alice", "bob"] } else { vec![] },
+                "diarization_status": "provisional", "diarization_method": "live_source_wespeaker",
+                "diarization_confidence": 0.75,
+            });
+            let update: super::super::transcription::TranscriptUpdate = serde_json::from_value(event.clone()).unwrap();
+            let directory = tempfile::tempdir().unwrap();
+            let mut saver = RecordingSaver::new();
+            saver.meeting_folder = Some(directory.path().into());
+            saver.add_transcript_segment(update.into());
+            let history = serde_json::to_value(saver.get_transcript_segments()).unwrap();
+            let disk: serde_json::Value = serde_json::from_slice(&std::fs::read(directory.path().join("transcripts.json")).unwrap()).unwrap();
+            for field in ["speaker_id", "speaker_label", "speaker_profile_id", "speaker_source", "speaker_color",
+                "is_overlap", "candidate_speaker_ids", "diarization_status", "diarization_method", "diarization_confidence"] {
+                assert_eq!(history[0][field], event[field], "history lost {field}");
+                assert_eq!(disk["segments"][0][field], event[field], "JSON lost {field}");
+            }
+            let restored: Vec<TranscriptSegment> = serde_json::from_value(disk["segments"].clone()).unwrap();
+            assert_eq!(serde_json::to_value(restored).unwrap(), history);
+        }
+    }
+
+    #[test]
+    fn old_transcript_json_without_speaker_fields_still_loads() {
+        let segment: TranscriptSegment = serde_json::from_value(serde_json::json!({
+            "id": "old", "text": "Hello", "audio_start_time": 0.0, "audio_end_time": 1.0,
+            "duration": 1.0, "display_time": "00:00", "confidence": 1.0, "sequence_id": 0,
+        })).unwrap();
+        assert!(segment.speaker_id.is_none());
+        assert!(segment.is_overlap.is_none());
     }
 }

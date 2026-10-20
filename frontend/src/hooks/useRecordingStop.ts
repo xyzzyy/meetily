@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import { useRouter } from 'next/navigation';
 import { listen } from '@tauri-apps/api/event';
 import { toast } from 'sonner';
+import { invoke } from '@tauri-apps/api/core';
 import { useTranscripts } from '@/contexts/TranscriptContext';
 import { useSidebar } from '@/components/Sidebar/SidebarProvider';
 import { useRecordingState, RecordingStatus } from '@/contexts/RecordingStateContext';
@@ -293,6 +294,26 @@ export function useRecordingStop(
           console.log('   Transcripts:', freshTranscripts.length);
           console.log('   folder_path:', folderPath);
 
+          void (async () => {
+            try {
+              const settings = await invoke<{ enabled: boolean; postCallRefinementEnabled: boolean }>(
+                'get_diarization_settings'
+              );
+              if (!settings.enabled || !settings.postCallRefinementEnabled || !folderPath) return;
+              // Refinement needs Apple Silicon with macOS 14.4+; elsewhere keep the
+              // live labels instead of recording a failed run.
+              const models = await invoke<{ refinementSupported: boolean }>('get_diarization_model_status');
+              if (models.refinementSupported) {
+                await invoke('start_final_diarization', {
+                  request: { meetingId, overwriteManualEdits: false }
+                });
+                await refetchMeetings();
+              }
+            } catch (error) {
+              console.warn('Final speaker refinement kept the live transcript:', error);
+            }
+          })();
+
           // Mark meeting as saved in IndexedDB (for recovery system)
           await markMeetingAsSaved();
 
@@ -396,10 +417,13 @@ export function useRecordingStop(
           }
 
         } catch (saveError) {
+          const saveErrorMessage = saveError instanceof Error
+            ? saveError.message
+            : String(saveError || 'Unknown error');
           console.error('Failed to save meeting to database:', saveError);
-          setStatus(RecordingStatus.ERROR, saveError instanceof Error ? saveError.message : 'Unknown error');
+          setStatus(RecordingStatus.ERROR, saveErrorMessage);
           toast.error('Failed to save meeting', {
-            description: saveError instanceof Error ? saveError.message : 'Unknown error'
+            description: saveErrorMessage
           });
           throw saveError;
         }
@@ -412,8 +436,11 @@ export function useRecordingStop(
       // isRecording already set to false at function start
       setIsRecordingDisabled(false);
     } catch (error) {
+      const errorMessage = error instanceof Error
+        ? error.message
+        : String(error || 'Unknown error');
       console.error('Error in handleRecordingStop:', error);
-      setStatus(RecordingStatus.ERROR, error instanceof Error ? error.message : 'Unknown error');
+      setStatus(RecordingStatus.ERROR, errorMessage);
       // isRecording already set to false at function start
       setIsRecordingDisabled(false);
     } finally {

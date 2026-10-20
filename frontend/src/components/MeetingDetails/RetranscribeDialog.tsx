@@ -9,6 +9,7 @@ import {
   DialogTitle,
 } from '../ui/dialog';
 import { Button } from '../ui/button';
+import { Switch } from '../ui/switch';
 import {
   Select,
   SelectContent,
@@ -20,6 +21,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { listen, UnlistenFn } from '@tauri-apps/api/event';
 import { toast } from 'sonner';
 import { useConfig } from '@/contexts/ConfigContext';
+import { useSpeakerRefinementAvailability } from '@/hooks/useSpeakerRefinementAvailability';
 import { LANGUAGES } from '@/constants/languages';
 import { languagesForProvider } from '@/lib/funasr';
 import { useTranscriptionModels, ModelOption } from '@/hooks/useTranscriptionModels';
@@ -59,7 +61,11 @@ export function RetranscribeDialog({
   meetingFolderPath,
   onComplete,
 }: RetranscribeDialogProps) {
-  const { selectedLanguage, transcriptModelConfig } = useConfig();
+  const { selectedLanguage, transcriptModelConfig, diarizationSettings, isLoadingDiarizationSettings } = useConfig();
+  const { supported: refinementSupported, checking: checkingRefinement, unavailableReason } = useSpeakerRefinementAvailability();
+  const speakerLabelsEnabled = !isLoadingDiarizationSettings && diarizationSettings.enabled;
+  const canAssignSpeakers = speakerLabelsEnabled && refinementSupported;
+  const [assignSpeakers, setAssignSpeakers] = useState(canAssignSpeakers);
   const [isProcessing, setIsProcessing] = useState(false);
   const [progress, setProgress] = useState<RetranscriptionProgress | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -129,6 +135,12 @@ export function RetranscribeDialog({
       fetchModels();
     }
   }, [open, selectedLanguage, transcriptModelConfig, fetchModels]);
+
+  // Default to the app-wide speaker labels setting, including when it finishes
+  // loading after the dialog is already open.
+  useEffect(() => {
+    if (open) setAssignSpeakers(canAssignSpeakers);
+  }, [open, canAssignSpeakers]);
 
   // Listen for retranscription events
   useEffect(() => {
@@ -214,6 +226,13 @@ export function RetranscribeDialog({
       return;
     }
 
+    if (speakerLabelsEnabled && checkingRefinement) return;
+
+    if (loadingModels || !selectedModelDetails) {
+      setError(loadingModels ? 'Wait for the models to load.' : 'Select an available transcription model.');
+      return;
+    }
+
     setIsProcessing(true);
     setError(null);
     setProgress(null);
@@ -222,16 +241,17 @@ export function RetranscribeDialog({
       const languageToSend = isParakeetModel ? null : selectedLang === 'auto' ? null : selectedLang;
       await Analytics.track('enhance_transcript_started', {
         language: isParakeetModel ? 'auto' : (selectedLang === 'auto' ? 'auto' : selectedLang),
-        model_provider: selectedModelDetails?.provider || '',
-        model_name: selectedModelDetails?.name || ''
+        model_provider: selectedModelDetails.provider,
+        model_name: selectedModelDetails.name
       });
 
       await invoke('start_retranscription_command', {
         meetingId,
         meetingFolderPath,
         language: languageToSend,
-        model: selectedModelDetails?.name || null,
-        provider: selectedModelDetails?.provider || null,
+        model: selectedModelDetails.name,
+        provider: selectedModelDetails.provider,
+        assignSpeakers: canAssignSpeakers && assignSpeakers,
       });
     } catch (err: any) {
       setIsProcessing(false);
@@ -293,12 +313,12 @@ export function RetranscribeDialog({
             ) : error ? (
               <>
                 <AlertCircle className="h-5 w-5 text-red-600" />
-                Retranscription Failed
+                Enhancement failed
               </>
             ) : (
               <>
                 <RefreshCw className="h-5 w-5 text-blue-600" />
-                Retranscribe Meeting
+                Enhance meeting
               </>
             )}
           </DialogTitle>
@@ -306,8 +326,8 @@ export function RetranscribeDialog({
             {isProcessing
               ? progress?.message || 'Processing audio...'
               : error
-                ? 'An error occurred during retranscription'
-                : 'Re-process the audio with different language settings'}
+                ? 'The enhancement could not finish'
+                : 'Create new text and timing from the recording. The saved transcript stays unchanged until enhancement succeeds.'}
           </DialogDescription>
         </DialogHeader>
 
@@ -372,6 +392,19 @@ export function RetranscribeDialog({
             </div>
           )}
 
+          {!isProcessing && !error && (
+            <div className="flex items-center justify-between gap-4 rounded-md border px-3 py-2">
+              <div>
+                <label htmlFor="enhance-assign-speakers" className="text-sm font-medium">Assign speakers</label>
+                <p className="text-xs text-muted-foreground">
+                  {!speakerLabelsEnabled ? 'Enable speaker labels in Settings to use this.' : unavailableReason || 'Identify speakers in the new transcript.'}
+                </p>
+              </div>
+              <Switch id="enhance-assign-speakers" checked={canAssignSpeakers && assignSpeakers}
+                disabled={!canAssignSpeakers} onCheckedChange={setAssignSpeakers} />
+            </div>
+          )}
+
           {isProcessing && progress && (
             <div className="space-y-2">
               <div className="relative">
@@ -408,10 +441,10 @@ export function RetranscribeDialog({
               <Button
                 onClick={handleStartRetranscription}
                 className="bg-blue-600 hover:bg-blue-700"
-                disabled={!meetingFolderPath}
+                disabled={!meetingFolderPath || loadingModels || !selectedModelDetails || (speakerLabelsEnabled && checkingRefinement)}
               >
                 <RefreshCw className="h-4 w-4 mr-2" />
-                Start Retranscription
+                Start enhancement
               </Button>
             </>
           )}

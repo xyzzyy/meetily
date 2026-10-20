@@ -16,6 +16,16 @@ export interface Transcript {
   audio_start_time?: number; // Seconds from recording start (e.g., 125.3)
   audio_end_time?: number;   // Seconds from recording start (e.g., 128.6)
   duration?: number;          // Segment duration in seconds (e.g., 3.3)
+  speaker_id?: string | null;
+  speaker_label?: string | null;
+  speaker_profile_id?: string | null;
+  speaker_source?: 'microphone' | 'system' | 'mixed' | null;
+  speaker_color?: string | null;
+  is_overlap?: boolean | null;
+  candidate_speaker_ids?: string[] | null;
+  diarization_status?: 'none' | 'provisional' | 'final' | 'fallback_to_live' | 'failed' | 'needs_review' | null;
+  diarization_method?: string | null;
+  diarization_confidence?: number | null;
 }
 
 export interface TranscriptUpdate {
@@ -30,6 +40,16 @@ export interface TranscriptUpdate {
   audio_start_time: number; // Seconds from recording start
   audio_end_time: number;   // Seconds from recording start
   duration: number;          // Segment duration in seconds
+  speaker_id?: string | null;
+  speaker_label?: string | null;
+  speaker_profile_id?: string | null;
+  speaker_source?: 'microphone' | 'system' | 'mixed' | null;
+  speaker_color?: string | null;
+  is_overlap?: boolean | null;
+  candidate_speaker_ids?: string[] | null;
+  diarization_status?: 'none' | 'provisional' | 'final' | 'fallback_to_live' | 'failed' | 'needs_review' | null;
+  diarization_method?: string | null;
+  diarization_confidence?: number | null;
 }
 
 export interface Block {
@@ -141,4 +161,48 @@ export interface TranscriptSegmentData {
   endTime?: number; // audio_end_time in seconds
   text: string;
   confidence?: number;
+  speaker_id?: string | null;
+  speaker_label?: string | null;
+  speaker_profile_id?: string | null;
+  speaker_source?: 'microphone' | 'system' | 'mixed' | null;
+  speaker_color?: string | null;
+  is_overlap?: boolean | null;
+  candidate_speaker_ids?: string[] | null;
+  diarization_status?: 'none' | 'provisional' | 'final' | 'fallback_to_live' | 'failed' | 'needs_review' | null;
+  diarization_method?: string | null;
+  diarization_confidence?: number | null;
+}
+
+export interface MeetingSpeaker {
+  speakerId: string;
+  speakerLabel: string;
+  speakerColor?: string | null;
+  segmentCount: number;
+  /** Number of transcript rows whose speaker assignment was confirmed by a person. */
+  verifiedSegmentCount?: number;
+}
+
+/** One meeting speaker whose speech is part of a remembered voice. */
+export interface SpeakerProfileSample {
+  meetingId: string;
+  speakerId: string;
+  /** Null when the meeting has since been deleted. */
+  meetingTitle: string | null;
+  meetingCreatedAt: string | null;
+  /** The speaker's name in that meeting. */
+  speakerLabel: string | null;
+  speechSeconds: number;
+  /** False for contributions that can't be separated from the blended voice. */
+  removable: boolean;
+}
+
+/** A voice remembered locally for recognizing a person in future meetings. */
+export interface SpeakerProfile {
+  id: string;
+  name: string;
+  modelVersion: string;
+  sampleCount: number;
+  speechSeconds: number;
+  /** How many meeting speakers make up this voice. */
+  recordingCount: number;
 }

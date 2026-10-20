@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { RecordingControls } from '@/components/RecordingControls';
 import { useSidebar } from '@/components/Sidebar/SidebarProvider';
 import { usePermissionCheck } from '@/hooks/usePermissionCheck';
@@ -26,6 +26,7 @@ export default function Home() {
   const [isRecording, setIsRecordingState] = useState(false);
   const [barHeights, setBarHeights] = useState(['58%', '76%', '58%']);
   const [showRecoveryDialog, setShowRecoveryDialog] = useState(false);
+  const recoveryCheckStartedRef = useRef(false);
 
   // Use contexts for state management
   const { meetingTitle } = useTranscripts();
@@ -69,6 +70,7 @@ export default function Home() {
   // Startup recovery check
   useEffect(() => {
     const performStartupChecks = async () => {
+      if (recoveryCheckStartedRef.current) return;
       try {
         // Skip recovery check if currently recording or processing stop
         // This prevents the recovery dialog from showing when:
@@ -79,6 +81,8 @@ export default function Home() {
           console.log('Skipping recovery check - recording in progress or processing');
           return;
         }
+
+        recoveryCheckStartedRef.current = true;
 
         // 1. Clean up old meetings (7+ days)
         try {
@@ -108,14 +112,14 @@ export default function Home() {
   // Watch for recoverable meetings changes and show dialog once per session
   useEffect(() => {
     // Only show dialog if we have meetings and haven't shown it yet this session
-    if (recoverableMeetings.length > 0) {
+    if (recoverableMeetings.length > 0 && !recordingState.isRecording && status === RecordingStatus.IDLE) {
       const shownThisSession = sessionStorage.getItem('recovery_dialog_shown');
       if (!shownThisSession) {
         setShowRecoveryDialog(true);
         sessionStorage.setItem('recovery_dialog_shown', 'true');
       }
     }
-  }, [recoverableMeetings]);
+  }, [recoverableMeetings, recordingState.isRecording, status]);
 
   // Handle recovery with toast notifications and navigation
   const handleRecovery = async (meetingId: string) => {

@@ -49,7 +49,7 @@ pub struct SummaryProcess {
     pub end_time: Option<chrono::DateTime<chrono::Utc>>,
     pub chunk_count: i64,
     pub processing_time: f64,
-    pub metadata: Option<String>, // JSON
+    pub metadata: Option<String>,      // JSON
     pub result_backup: Option<String>, // Backup of result before regeneration
     pub result_backup_timestamp: Option<chrono::DateTime<chrono::Utc>>, // When backup was created
 }
@@ -101,9 +101,9 @@ pub struct Setting {
 impl Setting {
     /// Parse the custom OpenAI config from JSON string
     pub fn get_custom_openai_config(&self) -> Option<crate::summary::CustomOpenAIConfig> {
-        self.custom_openai_config.as_ref().and_then(|json| {
-            serde_json::from_str(json).ok()
-        })
+        self.custom_openai_config
+            .as_ref()
+            .and_then(|json| serde_json::from_str(json).ok())
     }
 }
 
@@ -127,4 +127,73 @@ pub struct TranscriptSetting {
     #[sqlx(rename = "openaiApiKey")]
     #[serde(rename = "openaiApiKey")]
     pub openai_api_key: Option<String>,
+}
+
+#[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
+pub struct DiarizationSetting {
+    pub id: String,
+    pub enabled: i64,
+    pub mode: String,
+    pub show_provisional_labels: i64,
+    pub post_call_refinement_enabled: i64,
+    pub overlap_handling: String,
+    pub speaker_review_enabled: i64,
+    pub updated_at: DateTimeUtc,
+}
+
+#[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
+pub struct MeetingDiarizationStatus {
+    pub meeting_id: String,
+    pub enabled: i64,
+    pub live_enabled: i64,
+    pub post_call_enabled: i64,
+    pub current_status: String,
+    pub quality_flags: Option<String>,
+    pub processed_at: Option<DateTimeUtc>,
+    pub updated_at: DateTimeUtc,
+}
+
+#[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
+pub struct SpeakerSegmentModel {
+    pub id: String,
+    pub meeting_id: String,
+    pub source: String,
+    pub start_time: f64,
+    pub end_time: f64,
+    pub speaker_id: Option<String>,
+    pub speaker_label: Option<String>,
+    pub confidence: Option<f64>,
+    pub is_overlap: i64,
+    pub diarization_status: String,
+    pub diarization_method: Option<String>,
+    pub created_at: DateTimeUtc,
+}
+
+#[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
+pub struct SpeakerProfileModel {
+    pub id: String,
+    pub name: String,
+    pub embedding: Vec<u8>,
+    pub model_version: String,
+    pub sample_count: i64,
+    pub speech_seconds: f64,
+    pub created_at: DateTimeUtc,
+    pub updated_at: DateTimeUtc,
+    pub last_used_at: Option<DateTimeUtc>,
+}
+
+#[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
+pub struct DiarizationRunModel {
+    pub id: String,
+    pub meeting_id: String,
+    pub status: String,
+    pub method: String,
+    pub progress: i64,
+    pub quality_flags: Option<String>,
+    pub error: Option<String>,
+    pub transcript_backup: Option<String>,
+    pub assigned_coverage: Option<f64>,
+    pub transcription_success_rate: Option<f64>,
+    pub started_at: DateTimeUtc,
+    pub completed_at: Option<DateTimeUtc>,
 }

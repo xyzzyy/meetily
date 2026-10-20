@@ -48,7 +48,7 @@ impl TranscriptsRepository {
             let transcript_id = format!("transcript-{}", Uuid::new_v4());
             let result = sqlx::query(
                 "INSERT INTO transcripts (id, meeting_id, transcript, timestamp, audio_start_time, audio_end_time, duration)
-                 VALUES (?, ?, ?, ?, ?, ?, ?)"
+                 VALUES (?, ?, ?, ?, ?, ?, ?)",
             )
             .bind(&transcript_id)
             .bind(&meeting_id)
@@ -142,5 +142,142 @@ impl TranscriptsRepository {
             }
             None => transcript.chars().take(200).collect(), // Fallback to the start of the transcript
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sqlx::sqlite::SqlitePoolOptions;
+
+    async fn migrated_test_pool() -> SqlitePool {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("test database should open");
+        sqlx::migrate!("./migrations")
+            .run(&pool)
+            .await
+            .expect("migrations should run");
+        pool
+    }
+
+    #[tokio::test]
+    async fn saves_only_upstream_transcript_fields() {
+        let pool = migrated_test_pool().await;
+
+        let segment = TranscriptSegment {
+            id: "live-segment-1".to_string(),
+            text: "Hello from Alice".to_string(),
+            timestamp: "00:01".to_string(),
+            audio_start_time: Some(1.0),
+            audio_end_time: Some(2.5),
+            duration: Some(1.5),
+            speaker_id: Some("speaker-1".to_string()),
+            speaker_label: Some("Alice".to_string()),
+            speaker_profile_id: None,
+            speaker_source: Some("system".to_string()),
+            speaker_color: Some("#3b82f6".to_string()),
+            is_overlap: Some(false),
+            candidate_speaker_ids: Some(Vec::new()),
+            diarization_status: Some("provisional".to_string()),
+            diarization_method: Some("wespeaker_live".to_string()),
+            diarization_confidence: Some(0.9),
+        };
+
+        let meeting_id = TranscriptsRepository::save_transcript(
+            &pool,
+            "Save regression test",
+            &[segment],
+            Some("/tmp/meeting".to_string()),
+        )
+        .await
+        .expect("meeting and transcript should save atomically");
+
+        let saved: (String, Option<f64>, Option<f64>, Option<f64>) = sqlx::query_as(
+            "SELECT transcript, audio_start_time, audio_end_time, duration
+             FROM transcripts WHERE meeting_id = ?",
+        )
+        .bind(meeting_id)
+        .fetch_one(&pool)
+        .await
+        .expect("saved transcript should be readable");
+        assert_eq!(saved, ("Hello from Alice".to_string(), Some(1.0), Some(2.5), Some(1.5)));
+
+        let custom_columns: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM pragma_table_info('transcripts')
+             WHERE name IN ('speaker_id', 'speaker_label', 'diarization_status')",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("schema should be inspectable");
+        assert_eq!(custom_columns, 0);
+    }
+
+    #[tokio::test]
+    async fn saves_meeting_without_transcript_rows() {
+        let pool = migrated_test_pool().await;
+        let meeting_id = TranscriptsRepository::save_transcript(
+            &pool,
+            "Empty meeting",
+            &[],
+            None,
+        )
+        .await
+        .expect("empty meeting should still save");
+
+        let meeting_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM meetings WHERE id = ?")
+            .bind(&meeting_id)
+            .fetch_one(&pool)
+            .await
+            .expect("meeting count should be readable");
+        let transcript_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM transcripts WHERE meeting_id = ?")
+                .bind(&meeting_id)
+                .fetch_one(&pool)
+                .await
+                .expect("transcript count should be readable");
+        assert_eq!((meeting_count, transcript_count), (1, 0));
+    }
+
+    #[tokio::test]
+    async fn rolls_back_meeting_when_a_transcript_insert_fails() {
+        let pool = migrated_test_pool().await;
+        sqlx::query(
+            "CREATE TRIGGER reject_transcript BEFORE INSERT ON transcripts
+             BEGIN SELECT RAISE(ABORT, 'forced transcript failure'); END",
+        )
+        .execute(&pool)
+        .await
+        .expect("failure trigger should be created");
+
+        let segment = TranscriptSegment {
+            id: "live-segment-1".to_string(),
+            text: "This insert must fail".to_string(),
+            timestamp: "00:01".to_string(),
+            audio_start_time: Some(1.0),
+            audio_end_time: Some(2.0),
+            duration: Some(1.0),
+            speaker_id: None,
+            speaker_label: None,
+            speaker_profile_id: None,
+            speaker_source: None,
+            speaker_color: None,
+            is_overlap: Some(false),
+            candidate_speaker_ids: None,
+            diarization_status: None,
+            diarization_method: None,
+            diarization_confidence: None,
+        };
+
+        TranscriptsRepository::save_transcript(&pool, "Rollback meeting", &[segment], None)
+            .await
+            .expect_err("forced transcript failure should abort the transaction");
+        let meeting_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM meetings")
+            .fetch_one(&pool)
+            .await
+            .expect("meeting count should be readable");
+        assert_eq!(meeting_count, 0);
     }
 }

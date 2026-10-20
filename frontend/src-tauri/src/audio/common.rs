@@ -113,7 +113,9 @@ pub(crate) async fn get_or_init_funasr<R: tauri::Runtime>(
 
 /// Create transcript segments from transcription results.
 /// Each tuple is (text, start_ms, end_ms) from VAD timestamps.
-pub(crate) fn create_transcript_segments(transcripts: &[(String, f64, f64)]) -> Vec<TranscriptSegment> {
+pub(crate) fn create_transcript_segments(
+    transcripts: &[(String, f64, f64)],
+) -> Vec<TranscriptSegment> {
     transcripts
         .iter()
         .map(|(text, start_ms, end_ms)| {
@@ -128,6 +130,16 @@ pub(crate) fn create_transcript_segments(transcripts: &[(String, f64, f64)]) -> 
                 audio_start_time: Some(start_seconds),
                 audio_end_time: Some(end_seconds),
                 duration: Some(duration),
+                speaker_id: None,
+                speaker_label: None,
+                speaker_profile_id: None,
+                speaker_source: None,
+                speaker_color: None,
+                is_overlap: Some(false),
+                candidate_speaker_ids: None,
+                diarization_status: Some("none".to_string()),
+                diarization_method: None,
+                diarization_confidence: None,
             }
         })
         .collect()
@@ -191,8 +203,8 @@ pub(crate) fn split_segment_at_silence(
         return vec![segment.clone()];
     }
 
-    let ms_per_sample = (segment.end_timestamp_ms - segment.start_timestamp_ms)
-        / segment.samples.len() as f64;
+    let ms_per_sample =
+        (segment.end_timestamp_ms - segment.start_timestamp_ms) / segment.samples.len() as f64;
     let mut result = Vec::new();
     let mut pos = 0usize;
 
