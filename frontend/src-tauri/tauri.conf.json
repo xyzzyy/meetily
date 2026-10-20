@@ -6,8 +6,8 @@
     "build": {
         "frontendDist": "../out",
         "devUrl": "http://localhost:3118",
-        "beforeDevCommand": "pnpm dev",
-        "beforeBuildCommand": "pnpm build"
+        "beforeDevCommand": "node scripts/build-diarization-sidecar.js && node node_modules/next/dist/bin/next dev -p 3118",
+        "beforeBuildCommand": "node scripts/build-diarization-sidecar.js && node node_modules/next/dist/bin/next build"
     },
     "app": {
         "windows": [

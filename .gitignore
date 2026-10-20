@@ -76,5 +76,7 @@ node_modules/
 experiments/
 .cursor/
 target/
+diarization-sidecar/.build/
+diarization-sidecar/.swiftpm/
 
 frontend/src-tauri/binaries/

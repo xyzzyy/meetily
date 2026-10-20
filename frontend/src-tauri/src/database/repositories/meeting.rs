@@ -61,11 +61,12 @@ impl MeetingsRepository {
         let mut transaction = conn.begin().await?;
 
         // Get meeting details
-        let meeting: Option<MeetingModel> =
-            sqlx::query_as("SELECT id, title, created_at, updated_at, folder_path FROM meetings WHERE id = ?")
-                .bind(meeting_id)
-                .fetch_optional(&mut *transaction)
-                .await?;
+        let meeting: Option<MeetingModel> = sqlx::query_as(
+            "SELECT id, title, created_at, updated_at, folder_path FROM meetings WHERE id = ?",
+        )
+        .bind(meeting_id)
+        .fetch_optional(&mut *transaction)
+        .await?;
 
         if meeting.is_none() {
             transaction.rollback().await?;
@@ -92,6 +93,16 @@ impl MeetingsRepository {
                     audio_start_time: t.audio_start_time,
                     audio_end_time: t.audio_end_time,
                     duration: t.duration,
+                    speaker_id: None,
+                    speaker_label: None,
+                    speaker_profile_id: None,
+                    speaker_source: None,
+                    speaker_color: None,
+                    is_overlap: None,
+                    candidate_speaker_ids: None,
+                    diarization_status: None,
+                    diarization_method: None,
+                    diarization_confidence: None,
                 })
                 .collect::<Vec<_>>();
 
@@ -119,11 +130,12 @@ impl MeetingsRepository {
             ));
         }
 
-        let meeting: Option<MeetingModel> =
-            sqlx::query_as("SELECT id, title, created_at, updated_at, folder_path FROM meetings WHERE id = ?")
-                .bind(meeting_id)
-                .fetch_optional(pool)
-                .await?;
+        let meeting: Option<MeetingModel> = sqlx::query_as(
+            "SELECT id, title, created_at, updated_at, folder_path FROM meetings WHERE id = ?",
+        )
+        .bind(meeting_id)
+        .fetch_optional(pool)
+        .await?;
 
         Ok(meeting)
     }
@@ -142,19 +154,17 @@ impl MeetingsRepository {
         }
 
         // Get total count of transcripts for this meeting
-        let total: (i64,) = sqlx::query_as(
-            "SELECT COUNT(*) FROM transcripts WHERE meeting_id = ?"
-        )
-        .bind(meeting_id)
-        .fetch_one(pool)
-        .await?;
+        let total: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM transcripts WHERE meeting_id = ?")
+            .bind(meeting_id)
+            .fetch_one(pool)
+            .await?;
 
         // Get paginated transcripts ordered by audio_start_time
         let transcripts = sqlx::query_as::<_, Transcript>(
             "SELECT * FROM transcripts
              WHERE meeting_id = ?
              ORDER BY audio_start_time ASC
-             LIMIT ? OFFSET ?"
+             LIMIT ? OFFSET ?",
         )
         .bind(meeting_id)
         .bind(limit)

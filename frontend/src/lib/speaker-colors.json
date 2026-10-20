@@ -1,0 +1,18 @@
+[
+  { "name": "Blue", "value": "#2563eb" },
+  { "name": "Green", "value": "#15803d" },
+  { "name": "Purple", "value": "#7e22ce" },
+  { "name": "Amber", "value": "#a16207" },
+  { "name": "Rose", "value": "#be123c" },
+  { "name": "Teal", "value": "#0f766e" },
+  { "name": "Orange", "value": "#c2410c" },
+  { "name": "Indigo", "value": "#4338ca" },
+  { "name": "Pink", "value": "#be185d" },
+  { "name": "Cyan", "value": "#0e7490" },
+  { "name": "Olive", "value": "#4d7c0f" },
+  { "name": "Brown", "value": "#92400e" },
+  { "name": "Violet", "value": "#6d28d9" },
+  { "name": "Red", "value": "#b91c1c" },
+  { "name": "Slate", "value": "#475569" },
+  { "name": "Deep green", "value": "#065f46" }
+]

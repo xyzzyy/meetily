@@ -137,6 +137,44 @@ pub struct MeetingTranscript {
     pub audio_end_time: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub duration: Option<f64>,
+    pub speaker_id: Option<String>,
+    pub speaker_label: Option<String>,
+    pub speaker_profile_id: Option<String>,
+    pub speaker_source: Option<String>,
+    pub speaker_color: Option<String>,
+    pub is_overlap: Option<bool>,
+    pub candidate_speaker_ids: Option<Vec<String>>,
+    pub diarization_status: Option<String>,
+    pub diarization_method: Option<String>,
+    pub diarization_confidence: Option<f64>,
+}
+
+fn apply_speaker_metadata(
+    transcripts: &mut [MeetingTranscript],
+    metadata: Vec<crate::database::repositories::diarization::TranscriptSpeakerMetadata>,
+) {
+    let by_id: HashMap<_, _> = metadata
+        .into_iter()
+        .map(|item| (item.transcript_id.clone(), item))
+        .collect();
+    for transcript in transcripts {
+        let Some(item) = by_id.get(&transcript.id) else {
+            continue;
+        };
+        transcript.speaker_id = item.speaker_id.clone();
+        transcript.speaker_label = item.speaker_label.clone();
+        transcript.speaker_profile_id = item.speaker_profile_id.clone();
+        transcript.speaker_source = item.speaker_source.clone();
+        transcript.speaker_color = item.speaker_color.clone();
+        transcript.is_overlap = Some(item.is_overlap != 0);
+        transcript.candidate_speaker_ids = item
+            .candidate_speaker_ids
+            .as_ref()
+            .and_then(|value| serde_json::from_str(value).ok());
+        transcript.diarization_status = Some(item.diarization_status.clone());
+        transcript.diarization_method = item.diarization_method.clone();
+        transcript.diarization_confidence = item.diarization_confidence;
+    }
 }
 
 /// Meeting metadata without transcripts (for pagination)
@@ -188,6 +226,16 @@ pub struct TranscriptSegment {
     pub audio_end_time: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub duration: Option<f64>,
+    pub speaker_id: Option<String>,
+    pub speaker_label: Option<String>,
+    pub speaker_profile_id: Option<String>,
+    pub speaker_source: Option<String>,
+    pub speaker_color: Option<String>,
+    pub is_overlap: Option<bool>,
+    pub candidate_speaker_ids: Option<Vec<String>>,
+    pub diarization_status: Option<String>,
+    pub diarization_method: Option<String>,
+    pub diarization_confidence: Option<f64>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -740,6 +788,34 @@ pub async fn api_delete_api_key<R: Runtime>(
     }
 }
 
+async fn delete_meeting_and_cleanup(
+    core_pool: &sqlx::SqlitePool,
+    speaker_pool: &sqlx::SqlitePool,
+    meeting_id: &str,
+) -> Result<bool, sqlx::Error> {
+    let _meeting = crate::diarization::operations::try_meeting_edit(meeting_id)
+        .map_err(sqlx::Error::Protocol)?;
+    let deleted = MeetingsRepository::delete_meeting(core_pool, meeting_id).await?;
+    if deleted {
+        if let Err(error) =
+            crate::database::repositories::diarization::DiarizationRepository::delete_meeting_data(
+                speaker_pool,
+                meeting_id,
+            )
+            .await
+        {
+            // The core deletion has committed. Report success so the UI removes
+            // the meeting, even when the separate feature store cannot be cleaned.
+            log_warn!(
+                "Meeting {} was deleted, but speaker metadata cleanup failed: {}",
+                meeting_id,
+                error
+            );
+        }
+    }
+    Ok(deleted)
+}
+
 #[tauri::command]
 pub async fn api_delete_meeting<R: Runtime>(
     _app: AppHandle<R>,
@@ -755,7 +831,7 @@ pub async fn api_delete_meeting<R: Runtime>(
 
     let pool = state.db_manager.pool();
 
-    match MeetingsRepository::delete_meeting(pool, &meeting_id).await {
+    match delete_meeting_and_cleanup(pool, state.speaker_store.pool(), &meeting_id).await {
         Ok(true) => {
             log_info!("Successfully deleted meeting {}", meeting_id);
             Ok(serde_json::json!({
@@ -793,7 +869,19 @@ pub async fn api_get_meeting<R: Runtime>(
     let pool = state.db_manager.pool();
 
     match MeetingsRepository::get_meeting(pool, &meeting_id).await {
-        Ok(Some(meeting)) => {
+        Ok(Some(mut meeting)) => {
+            let ids = meeting
+                .transcripts
+                .iter()
+                .map(|transcript| transcript.id.clone())
+                .collect::<Vec<_>>();
+            let metadata = crate::database::repositories::diarization::DiarizationRepository::get_transcript_metadata(
+                state.speaker_store.pool(),
+                &ids,
+            )
+            .await
+            .map_err(|error| format!("Failed to retrieve speaker metadata: {error}"))?;
+            apply_speaker_metadata(&mut meeting.transcripts, metadata);
             log_info!("Successfully retrieved meeting {}", meeting_id);
             Ok(meeting)
         }
@@ -815,7 +903,10 @@ pub async fn api_get_meeting_metadata<R: Runtime>(
     meeting_id: String,
     state: tauri::State<'_, AppState>,
 ) -> Result<MeetingMetadata, String> {
-    log_info!("api_get_meeting_metadata called for meeting_id: {}", meeting_id);
+    log_info!(
+        "api_get_meeting_metadata called for meeting_id: {}",
+        meeting_id
+    );
 
     let pool = state.db_manager.pool();
 
@@ -859,7 +950,9 @@ pub async fn api_get_meeting_transcripts<R: Runtime>(
 
     let pool = state.db_manager.pool();
 
-    match MeetingsRepository::get_meeting_transcripts_paginated(pool, &meeting_id, limit, offset).await {
+    match MeetingsRepository::get_meeting_transcripts_paginated(pool, &meeting_id, limit, offset)
+        .await
+    {
         Ok((transcripts, total_count)) => {
             log_info!(
                 "Successfully retrieved {} transcripts for meeting {} (total: {})",
@@ -869,7 +962,7 @@ pub async fn api_get_meeting_transcripts<R: Runtime>(
             );
 
             // Convert Transcript to MeetingTranscript
-            let meeting_transcripts = transcripts
+            let mut meeting_transcripts = transcripts
                 .into_iter()
                 .map(|t| MeetingTranscript {
                     id: t.id,
@@ -878,8 +971,30 @@ pub async fn api_get_meeting_transcripts<R: Runtime>(
                     audio_start_time: t.audio_start_time,
                     audio_end_time: t.audio_end_time,
                     duration: t.duration,
+                    speaker_id: None,
+                    speaker_label: None,
+                    speaker_profile_id: None,
+                    speaker_source: None,
+                    speaker_color: None,
+                    is_overlap: None,
+                    candidate_speaker_ids: None,
+                    diarization_status: None,
+                    diarization_method: None,
+                    diarization_confidence: None,
                 })
                 .collect::<Vec<_>>();
+
+            let ids = meeting_transcripts
+                .iter()
+                .map(|transcript| transcript.id.clone())
+                .collect::<Vec<_>>();
+            let metadata = crate::database::repositories::diarization::DiarizationRepository::get_transcript_metadata(
+                state.speaker_store.pool(),
+                &ids,
+            )
+            .await
+            .map_err(|error| format!("Failed to retrieve speaker metadata: {error}"))?;
+            apply_speaker_metadata(&mut meeting_transcripts, metadata);
 
             let has_more = (offset + meeting_transcripts.len() as i64) < total_count;
 
@@ -890,7 +1005,11 @@ pub async fn api_get_meeting_transcripts<R: Runtime>(
             })
         }
         Err(e) => {
-            log_error!("Error retrieving transcripts for meeting {}: {}", meeting_id, e);
+            log_error!(
+                "Error retrieving transcripts for meeting {}: {}",
+                meeting_id,
+                e
+            );
             Err(format!("Failed to retrieve transcripts: {}", e))
         }
     }
@@ -958,7 +1077,10 @@ pub async fn api_save_transcript<R: Runtime>(
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| {
             log_error!("Failed to parse transcript segments: {}", e);
-            format!("Invalid transcript data format: {}. Please check the data structure.", e)
+            format!(
+                "Invalid transcript data format: {}. Please check the data structure.",
+                e
+            )
         })?;
 
     // Log parsed segments count and first segment details
@@ -982,6 +1104,23 @@ pub async fn api_save_transcript<R: Runtime>(
     .await
     {
         Ok(meeting_id) => {
+            // Speaker metadata is a feature-layer hook after the upstream core
+            // transaction commits. A feature-store error never rolls back or
+            // duplicates the successfully saved meeting.
+            if let Err(error) = persist_committed_speaker_metadata(
+                state.speaker_store.pool(),
+                pool,
+                &meeting_id,
+                &transcripts_to_save,
+            )
+            .await
+            {
+                log_error!(
+                    "Meeting {} was saved, but provisional speaker metadata was not: {}",
+                    meeting_id,
+                    error
+                );
+            }
             log_info!(
                 "Successfully saved transcript and created meeting with id: {}",
                 meeting_id
@@ -1001,6 +1140,55 @@ pub async fn api_save_transcript<R: Runtime>(
             Err(format!("Failed to save transcript: {}", e))
         }
     }
+}
+
+async fn persist_committed_speaker_metadata(
+    feature_pool: &sqlx::SqlitePool,
+    core_pool: &sqlx::SqlitePool,
+    meeting_id: &str,
+    source: &[TranscriptSegment],
+) -> Result<(), sqlx::Error> {
+    let committed: Vec<(String, Option<f64>, Option<f64>)> = sqlx::query_as(
+        "SELECT id, audio_start_time, audio_end_time FROM transcripts
+         WHERE meeting_id = ? ORDER BY rowid",
+    )
+    .bind(meeting_id)
+    .fetch_all(core_pool)
+    .await?;
+    let mut transaction = feature_pool.begin().await?;
+    for ((id, start, end), segment) in committed.into_iter().zip(source) {
+        if segment.speaker_id.is_none()
+            && segment.speaker_label.is_none()
+            && segment.diarization_status.is_none()
+        {
+            continue;
+        }
+        let status = match segment.diarization_status.as_deref() {
+            Some("provisional") => crate::diarization::types::DiarizationStatus::Provisional,
+            Some("final") => crate::diarization::types::DiarizationStatus::Final,
+            Some("fallback_to_live") => crate::diarization::types::DiarizationStatus::FallbackToLive,
+            Some("failed") => crate::diarization::types::DiarizationStatus::Failed,
+            Some("needs_review") => crate::diarization::types::DiarizationStatus::NeedsReview,
+            _ => crate::diarization::types::DiarizationStatus::None,
+        };
+        let assignment = crate::diarization::types::SpeakerAssignment {
+            speaker_id: segment.speaker_id.clone(),
+            speaker_label: segment.speaker_label.clone(),
+            speaker_profile_id: segment.speaker_profile_id.clone(),
+            speaker_source: segment.speaker_source.clone(),
+            speaker_color: segment.speaker_color.clone(),
+            is_overlap: segment.is_overlap.unwrap_or(false),
+            candidate_speaker_ids: segment.candidate_speaker_ids.clone().unwrap_or_default(),
+            diarization_status: status,
+            diarization_method: segment.diarization_method.clone(),
+            diarization_confidence: segment.diarization_confidence,
+        };
+        crate::database::repositories::diarization::DiarizationRepository::update_transcript_assignment(
+            &mut *transaction, &id, meeting_id, start, end, &assignment,
+        )
+        .await?;
+    }
+    transaction.commit().await
 }
 
 /// Opens the meeting's recording folder in the system file explorer
@@ -1228,7 +1416,10 @@ pub async fn api_save_custom_openai_config<R: Runtime>(
 
     match SettingsRepository::save_custom_openai_config(pool, &config).await {
         Ok(()) => {
-            log_info!("✅ Successfully saved custom OpenAI config for endpoint: {}", config.endpoint);
+            log_info!(
+                "✅ Successfully saved custom OpenAI config for endpoint: {}",
+                config.endpoint
+            );
             Ok(serde_json::json!({
                 "status": "success",
                 "message": "Custom OpenAI configuration saved successfully"
@@ -1254,8 +1445,11 @@ pub async fn api_get_custom_openai_config<R: Runtime>(
     match SettingsRepository::get_custom_openai_config(pool).await {
         Ok(config) => {
             if let Some(ref c) = config {
-                log_info!("✅ Found custom OpenAI config: endpoint='{}', model='{}'",
-                    c.endpoint, c.model);
+                log_info!(
+                    "✅ Found custom OpenAI config: endpoint='{}', model='{}'",
+                    c.endpoint,
+                    c.model
+                );
             } else {
                 log_info!("No custom OpenAI config found");
             }
@@ -1338,7 +1532,7 @@ pub async fn api_test_custom_openai_connection<R: Runtime>(
                                             .get("message")
                                             .and_then(|m| {
                                                 m.get("content")
-                                                .or_else(|| m.get("reasoning_content"))
+                                                    .or_else(|| m.get("reasoning_content"))
                                             })
                                             .is_some();
 
@@ -1356,17 +1550,33 @@ pub async fn api_test_custom_openai_connection<R: Runtime>(
                         }
 
                         // Response was 200 but doesn't match OpenAI format
-                        log_warn!("⚠️ Endpoint returned 200 but response doesn't match OpenAI format: {}", response_text);
+                        log_warn!(
+                            "⚠️ Endpoint returned 200 but response doesn't match OpenAI format: {}",
+                            response_text
+                        );
                         Err("Endpoint is reachable but doesn't appear to be OpenAI-compatible. Response is missing 'choices' array or 'message.content' / 'message.reasoning_content' field.".to_string())
                     }
                     Err(e) => {
-                        log_warn!("⚠️ Endpoint returned 200 but response is not valid JSON: {}", e);
-                        Err(format!("Endpoint is reachable but returned invalid JSON: {}. Response: {}", e, response_text))
+                        log_warn!(
+                            "⚠️ Endpoint returned 200 but response is not valid JSON: {}",
+                            e
+                        );
+                        Err(format!(
+                            "Endpoint is reachable but returned invalid JSON: {}. Response: {}",
+                            e, response_text
+                        ))
                     }
                 }
             } else {
-                log_warn!("⚠️ Custom OpenAI connection test failed with status {}: {}", status, response_text);
-                Err(format!("Connection failed with status {}: {}", status, response_text))
+                log_warn!(
+                    "⚠️ Custom OpenAI connection test failed with status {}: {}",
+                    status,
+                    response_text
+                );
+                Err(format!(
+                    "Connection failed with status {}: {}",
+                    status, response_text
+                ))
             }
         }
         Err(e) => {
@@ -1379,5 +1589,79 @@ pub async fn api_test_custom_openai_connection<R: Runtime>(
                 Err(format!("Connection failed: {}", e))
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod meeting_deletion_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn meeting_deletion_is_blocked_until_speaker_processing_finishes() {
+        let core = sqlx::sqlite::SqlitePoolOptions::new().max_connections(1)
+            .connect("sqlite::memory:").await.unwrap();
+        let feature = sqlx::sqlite::SqlitePoolOptions::new().max_connections(1)
+            .connect("sqlite::memory:").await.unwrap();
+        sqlx::migrate!("./migrations").run(&core).await.unwrap();
+        sqlx::migrate!("./speaker-migrations").run(&feature).await.unwrap();
+        let id = "delete-during-speaker-processing";
+        sqlx::query("INSERT INTO meetings (id, title, created_at, updated_at) VALUES (?, 'Test', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)")
+            .bind(id).execute(&core).await.unwrap();
+        let processing = crate::diarization::operations::try_meeting_edit(id).unwrap();
+        let error = delete_meeting_and_cleanup(&core, &feature, id).await.unwrap_err();
+        assert!(error.to_string().contains("in progress"));
+        let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM meetings WHERE id = ?)")
+            .bind(id).fetch_one(&core).await.unwrap();
+        assert!(exists);
+        // The active run can finish its final write before deletion is retried.
+        sqlx::query("INSERT INTO meeting_diarization_status (meeting_id, current_status) VALUES (?, 'completed')")
+            .bind(id).execute(&feature).await.unwrap();
+        drop(processing);
+        assert!(delete_meeting_and_cleanup(&core, &feature, id).await.unwrap());
+        let remaining: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM meeting_diarization_status WHERE meeting_id = ?")
+            .bind(id).fetch_one(&feature).await.unwrap();
+        assert_eq!(remaining, 0);
+    }
+
+    #[tokio::test]
+    async fn committed_deletion_succeeds_when_speaker_cleanup_fails() {
+        let core = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        let feature = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::raw_sql(
+            "CREATE TABLE meetings (id TEXT PRIMARY KEY);
+            CREATE TABLE transcripts (meeting_id TEXT);
+            CREATE TABLE transcript_chunks (meeting_id TEXT);
+            CREATE TABLE summary_processes (meeting_id TEXT);
+            INSERT INTO meetings VALUES ('meeting'), ('other');
+            INSERT INTO transcripts VALUES ('meeting'), ('other');",
+        )
+        .execute(&core)
+        .await
+        .unwrap();
+        // The empty feature database forces cleanup to fail after core commit.
+        assert!(delete_meeting_and_cleanup(&core, &feature, "meeting")
+            .await
+            .unwrap());
+        let remaining: Vec<String> = sqlx::query_scalar("SELECT id FROM meetings")
+            .fetch_all(&core)
+            .await
+            .unwrap();
+        assert_eq!(remaining, vec!["other"]);
+        let transcripts: Vec<String> = sqlx::query_scalar("SELECT meeting_id FROM transcripts")
+            .fetch_all(&core)
+            .await
+            .unwrap();
+        assert_eq!(transcripts, vec!["other"]);
+        assert!(!delete_meeting_and_cleanup(&core, &feature, "meeting")
+            .await
+            .unwrap());
     }
 }
