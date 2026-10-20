@@ -269,6 +269,14 @@ impl DiarizationRepository {
         target_label: &str,
     ) -> Result<u64, sqlx::Error> {
         let mut transaction = pool.begin().await?;
+        let target_exists: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM transcript_speakers
+             WHERE meeting_id = ? AND speaker_id = ? AND published = 1 AND is_overlap = 0)",
+        )
+        .bind(meeting_id).bind(target_speaker_id).fetch_one(&mut *transaction).await?;
+        if !target_exists {
+            return Err(sqlx::Error::RowNotFound);
+        }
         let target_color: Option<String> = sqlx::query_scalar(
             "SELECT MAX(speaker_color) FROM transcript_speakers
              WHERE meeting_id = ? AND speaker_id = ? AND is_overlap = 0 AND published = 1",
@@ -282,7 +290,7 @@ impl DiarizationRepository {
             if source_id == target_speaker_id {
                 continue;
             }
-            updated += sqlx::query(
+            let changed = sqlx::query(
                 "UPDATE transcript_speakers SET
                     speaker_id = ?, speaker_label = ?, speaker_profile_id = NULL,
                     speaker_color = ?, diarization_method = 'manual',
@@ -297,6 +305,12 @@ impl DiarizationRepository {
             .execute(&mut *transaction)
             .await?
             .rows_affected();
+            updated += changed;
+            if changed > 0 {
+                super::speaker_profile::SpeakerProfilesRepository::merge_speaker_samples(
+                    &mut transaction, meeting_id, source_id, target_speaker_id,
+                ).await?;
+            }
 
             sqlx::query(
                 "UPDATE speaker_segments SET speaker_id = ?, speaker_label = ?,
@@ -508,6 +522,12 @@ mod tests {
 
     async fn speaker_test_pool() -> SqlitePool {
         let pool = transcript_test_pool().await;
+
+        sqlx::query("CREATE TABLE speaker_profile_samples (
+            profile_id TEXT NOT NULL, meeting_id TEXT NOT NULL, speaker_id TEXT NOT NULL,
+            embedding BLOB, sample_count INTEGER NOT NULL DEFAULT 0, speech_seconds REAL NOT NULL,
+            PRIMARY KEY (profile_id, meeting_id, speaker_id))")
+            .execute(&pool).await.unwrap();
 
         sqlx::query(
             "CREATE TABLE speaker_segments (
@@ -982,6 +1002,41 @@ mod tests {
             .unwrap();
         assert_eq!(rows[0].meeting_id, "meeting-2");
         assert_eq!(rows[0].speaker_id.as_deref(), Some("speaker-1"));
+    }
+
+    #[tokio::test]
+    async fn merge_keeps_voice_history_and_does_not_count_audio_twice() {
+        use super::super::speaker_profile::{SpeakerProfilesRepository, SampleSource, SampleRemoval};
+        for target_contributed in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let store = crate::database::speaker_store::SpeakerFeatureStore::new(
+                &directory.path().join("speakers.sqlite"),
+            ).await.unwrap();
+            let pool = store.pool();
+            sqlx::query("INSERT INTO transcript_speakers (transcript_id, meeting_id, speaker_id, speaker_label) VALUES ('a', 'meeting', 'source', 'Alice'), ('b', 'meeting', 'target', 'Alice')")
+                .execute(pool).await.unwrap();
+            let id = SpeakerProfilesRepository::create_from_sample(pool, "Alice", &[1.0, 0.0], "v1", 1, 10.0,
+                SampleSource { meeting_id: "meeting", speaker_id: "source" }).await.unwrap();
+            if target_contributed {
+                SpeakerProfilesRepository::add_sample(pool, &id, &[0.0, 1.0], "v1", 1, 10.0,
+                    SampleSource { meeting_id: "meeting", speaker_id: "target" }).await.unwrap();
+            }
+            let before = SpeakerProfilesRepository::get(pool, &id).await.unwrap().unwrap();
+            DiarizationRepository::merge_speakers(pool, "meeting", &["source".into()], "target", "Alice")
+                .await.unwrap();
+            let samples = SpeakerProfilesRepository::list_samples(pool, &id).await.unwrap();
+            assert_eq!(samples.len(), 1);
+            assert_eq!(samples[0].speaker_id, "target");
+            assert_eq!(samples[0].speech_seconds, before.speech_seconds);
+            assert!(!SpeakerProfilesRepository::add_sample(pool, &id, &[1.0, 0.0], "v1", 9, 90.0,
+                SampleSource { meeting_id: "meeting", speaker_id: "target" }).await.unwrap());
+            let after = SpeakerProfilesRepository::get(pool, &id).await.unwrap().unwrap();
+            assert_eq!(after.embedding, before.embedding);
+            assert_eq!(after.sample_count, before.sample_count);
+            assert_eq!(after.speech_seconds, before.speech_seconds);
+            assert_eq!(SpeakerProfilesRepository::remove_sample(pool, &id,
+                SampleSource { meeting_id: "meeting", speaker_id: "target" }).await.unwrap(), SampleRemoval::Forgotten);
+        }
     }
 
     #[tokio::test]

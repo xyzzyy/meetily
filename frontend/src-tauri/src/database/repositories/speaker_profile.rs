@@ -233,6 +233,60 @@ impl SpeakerProfilesRepository {
         Ok(())
     }
 
+    /// Keep sample ownership with the surviving meeting speaker after a merge.
+    /// The profile already contains both contributions, so its totals and
+    /// blended voiceprint must not change or be counted again.
+    pub async fn merge_speaker_samples(
+        transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        meeting_id: &str,
+        source_id: &str,
+        target_id: &str,
+    ) -> Result<(), SqlxError> {
+        let sources: Vec<(String, Option<Vec<u8>>, i64, f64)> = sqlx::query_as(
+            "SELECT profile_id, embedding, sample_count, speech_seconds
+             FROM speaker_profile_samples WHERE meeting_id = ? AND speaker_id = ?",
+        )
+        .bind(meeting_id).bind(source_id).fetch_all(&mut **transaction).await?;
+        for (profile_id, source_embedding, source_count, source_seconds) in sources {
+            let target: Option<(Option<Vec<u8>>, i64, f64)> = sqlx::query_as(
+                "SELECT embedding, sample_count, speech_seconds FROM speaker_profile_samples
+                 WHERE profile_id = ? AND meeting_id = ? AND speaker_id = ?",
+            )
+            .bind(&profile_id).bind(meeting_id).bind(target_id)
+            .fetch_optional(&mut **transaction).await?;
+            if let Some((target_embedding, target_count, target_seconds)) = target {
+                let embedding = match (source_embedding, target_embedding) {
+                    (Some(source), Some(target)) => Some(embedding_to_blob(&blend_embeddings(
+                        &blob_to_embedding(&target), target_seconds,
+                        &blob_to_embedding(&source), source_seconds,
+                    ))),
+                    (Some(embedding), None) | (None, Some(embedding)) => Some(embedding),
+                    (None, None) => None,
+                };
+                sqlx::query(
+                    "UPDATE speaker_profile_samples SET embedding = ?, sample_count = ?, speech_seconds = ?
+                     WHERE profile_id = ? AND meeting_id = ? AND speaker_id = ?",
+                )
+                .bind(embedding).bind(source_count + target_count).bind(source_seconds + target_seconds)
+                .bind(&profile_id).bind(meeting_id).bind(target_id)
+                .execute(&mut **transaction).await?;
+                sqlx::query(
+                    "DELETE FROM speaker_profile_samples WHERE profile_id = ? AND meeting_id = ? AND speaker_id = ?",
+                )
+                .bind(&profile_id).bind(meeting_id).bind(source_id)
+                .execute(&mut **transaction).await?;
+            } else {
+                sqlx::query(
+                    "UPDATE speaker_profile_samples SET speaker_id = ?
+                     WHERE profile_id = ? AND meeting_id = ? AND speaker_id = ?",
+                )
+                .bind(target_id).bind(&profile_id).bind(meeting_id).bind(source_id)
+                .execute(&mut **transaction).await?;
+            }
+        }
+        Ok(())
+    }
+
     /// The meeting speakers that contributed to a remembered voice, newest first.
     pub async fn list_samples(
         pool: &SqlitePool,
