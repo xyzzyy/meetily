@@ -20,7 +20,13 @@ pub(crate) const MAX_AUDIO_SAMPLES: usize = 30 * 16_000;
 #[derive(Debug)]
 pub struct SidecarRequestError {
     message: String,
+    /// The helper started replying, so it may have processed the request.
+    /// Retrying could transcribe the same audio twice.
     pub response_received: bool,
+    /// The helper's reply stream is at a frame boundary. Only a complete,
+    /// well-formed reply (or nothing sent at all) leaves it there; after any
+    /// other failure, unread bytes would be misread as the next reply.
+    pub stream_in_sync: bool,
 }
 
 impl SidecarRequestError {
@@ -28,6 +34,16 @@ impl SidecarRequestError {
         Self {
             message: error.to_string(),
             response_received,
+            stream_in_sync: false,
+        }
+    }
+
+    /// An error raised before anything was written to the helper.
+    fn before_send(error: impl std::fmt::Display) -> Self {
+        Self {
+            message: error.to_string(),
+            response_received: false,
+            stream_in_sync: true,
         }
     }
 }
@@ -151,6 +167,7 @@ impl FunAsrSidecar {
         let request = build_request(request_id, opcode, language, audio)?;
 
         let mut response_received = false;
+        let mut frame_complete = false;
         let request_result: Result<String> = timeout(request_timeout, async {
             self.stdin.write_all(&request).await?;
             self.stdin.flush().await?;
@@ -184,6 +201,7 @@ impl FunAsrSidecar {
             let mut error = vec![0u8; error_len];
             self.stdout.read_exact(&mut text).await?;
             self.stdout.read_exact(&mut error).await?;
+            frame_complete = true;
 
             let text = String::from_utf8(text)
                 .context("FUN-ASR helper returned non-UTF-8 transcription text")?;
@@ -205,7 +223,10 @@ impl FunAsrSidecar {
         .map_err(|_| anyhow!("FUN-ASR helper request timed out"))
         .and_then(|result| result);
 
-        request_result.map_err(|error| SidecarRequestError::new(error, response_received))
+        request_result.map_err(|error| SidecarRequestError {
+            stream_in_sync: frame_complete,
+            ..SidecarRequestError::new(error, response_received)
+        })
     }
 }
 
@@ -217,12 +238,11 @@ fn build_request(
 ) -> std::result::Result<Vec<u8>, SidecarRequestError> {
     let language_bytes = language.as_bytes();
     if language_bytes.len() > u16::MAX as usize {
-        return Err(SidecarRequestError::new("Language hint is too long", false));
+        return Err(SidecarRequestError::before_send("Language hint is too long"));
     }
     if audio.len() > MAX_AUDIO_SAMPLES {
-        return Err(SidecarRequestError::new(
+        return Err(SidecarRequestError::before_send(
             "Audio request exceeds the 30-second limit",
-            false,
         ));
     }
 
@@ -390,6 +410,7 @@ mod tests {
             sidecar_with_response(b"NOPE00000000000000000000").await;
         let error = sidecar.request(OP_TRANSCRIBE, "en", &[]).await.unwrap_err();
         assert!(error.response_received);
+        assert!(!error.stream_in_sync, "an unparsable reply leaves the stream out of step");
         assert!(error.to_string().contains("invalid response magic"));
     }
 
@@ -409,7 +430,25 @@ mod tests {
 
         let error = sidecar.request(OP_TRANSCRIBE, "en", &[]).await.unwrap_err();
         assert!(error.response_received);
+        assert!(error.stream_in_sync, "a complete error reply keeps the stream in step");
         assert_eq!(error.to_string(), "fixture failure");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn oversized_reply_leaves_the_stream_out_of_step() {
+        let mut response = Vec::new();
+        response.extend_from_slice(RESPONSE_MAGIC);
+        response.extend_from_slice(&PROTOCOL_VERSION.to_le_bytes());
+        response.extend_from_slice(&0u16.to_le_bytes());
+        response.extend_from_slice(&1u64.to_le_bytes());
+        response.extend_from_slice(&((MAX_TEXT_BYTES + 1) as u32).to_le_bytes());
+        response.extend_from_slice(&0u32.to_le_bytes());
+        let (_response_file, mut sidecar) = sidecar_with_response(&response).await;
+
+        let error = sidecar.request(OP_TRANSCRIBE, "en", &[]).await.unwrap_err();
+        assert!(error.response_received);
+        assert!(!error.stream_in_sync);
     }
 
     #[cfg(unix)]

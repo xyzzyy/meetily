@@ -922,8 +922,19 @@ pub fn run() {
                             log::warn!("AppState not available for database cleanup (likely first launch)");
                         }
 
-                        // Stop the FUN-ASR helper process, if one is running
-                        funasr_engine::commands::shutdown().await;
+                        // Stop the FUN-ASR helper process, if one is running. A load or
+                        // transcription in progress can hold the engine for up to its
+                        // 120 s request timeout, so don't let that delay exit. If this
+                        // times out, the helper exits by itself once its stdin closes.
+                        if tokio::time::timeout(
+                            std::time::Duration::from_secs(5),
+                            funasr_engine::commands::shutdown(),
+                        )
+                        .await
+                        .is_err()
+                        {
+                            log::warn!("FUN-ASR helper shutdown timed out; it will exit when the app closes");
+                        }
 
                         // Clean up sidecar
                         log::info!("Cleaning up sidecar...");

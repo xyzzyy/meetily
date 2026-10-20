@@ -15,6 +15,9 @@ use tokio::io::AsyncWriteExt;
 use tokio::sync::{Mutex, RwLock};
 use tokio_util::sync::CancellationToken;
 
+/// A download fails if no data arrives for this long (same as Parakeet).
+const DOWNLOAD_STALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
 pub type ProgressCallback = Arc<dyn Fn(DownloadProgress) + Send + Sync>;
 
 pub struct FunAsrEngine {
@@ -185,6 +188,16 @@ impl FunAsrEngine {
             Err(error) => error,
         };
         if first_error.response_received {
+            // The helper may have processed this request, so don't retry it.
+            // If its reply stream is out of step, every later request would
+            // misread leftover bytes, so restart the helper for the next one.
+            if !first_error.stream_in_sync {
+                log::warn!("FUN-ASR helper reply stream is out of step; restarting it: {first_error}");
+                self.unload_model().await;
+                if let Err(error) = self.load_model(&model_id).await {
+                    log::error!("Failed to restart the FUN-ASR helper: {error}");
+                }
+            }
             return Err(anyhow!(first_error));
         }
         log::warn!(
@@ -350,7 +363,9 @@ impl FunAsrEngine {
             }
         }
 
-        let client = reqwest::Client::new();
+        let client = reqwest::Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(30))
+            .build()?;
         let mut request = client.get(self.download_url(artifact));
         if resume_at > 0 {
             request = request.header(reqwest::header::RANGE, format!("bytes={resume_at}-"));
@@ -370,11 +385,20 @@ impl FunAsrEngine {
             .open(&part)
             .await?;
         let mut stream = response.bytes_stream();
-        while let Some(chunk) = stream.next().await {
-            if token.is_cancelled() {
-                return Err(anyhow!("FUN-ASR model download cancelled"));
-            }
-            let chunk = chunk?;
+        loop {
+            // Wait on cancellation and a stall timeout too, so Cancel works and
+            // a dead connection fails instead of blocking forever.
+            let chunk = tokio::select! {
+                _ = token.cancelled() => return Err(anyhow!("FUN-ASR model download cancelled")),
+                next = tokio::time::timeout(DOWNLOAD_STALL_TIMEOUT, stream.next()) => match next {
+                    Ok(Some(chunk)) => chunk?,
+                    Ok(None) => break,
+                    Err(_) => return Err(anyhow!(
+                        "FUN-ASR model download stalled: no data for {} seconds",
+                        DOWNLOAD_STALL_TIMEOUT.as_secs()
+                    )),
+                },
+            };
             file.write_all(&chunk).await?;
             let total = downloaded_before
                 .fetch_add(chunk.len() as u64, std::sync::atomic::Ordering::Relaxed)
@@ -639,6 +663,40 @@ mod tests {
         assert!(!destination.exists());
         assert!(owned.path().join("model.gguf.part").exists());
         server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn cancelling_a_stalled_download_returns_promptly() {
+        // A server that sends headers and part of the body, then goes silent.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buffer = vec![0u8; 4096];
+            let _ = socket.read(&mut buffer).await.unwrap();
+            socket
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 8\r\nConnection: close\r\n\r\nGGUF")
+                .await
+                .unwrap();
+            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+        });
+        let owned = tempfile::tempdir().unwrap();
+        let mut engine = FunAsrEngine::new(owned.path().to_path_buf(), None).unwrap();
+        engine.download_base_url = Some(format!("http://{address}"));
+        let destination = owned.path().join("model.gguf");
+        let token = CancellationToken::new();
+        let canceller = token.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            canceller.cancel();
+        });
+
+        let started = Instant::now();
+        let error = download_tiny_artifact(&engine, &destination, &token).await.unwrap_err();
+        assert!(error.to_string().contains("cancelled"), "{error}");
+        assert!(started.elapsed() < std::time::Duration::from_secs(5), "cancel waited on the stalled stream");
+        assert!(!destination.exists());
+        server.abort();
     }
 
     #[tokio::test]

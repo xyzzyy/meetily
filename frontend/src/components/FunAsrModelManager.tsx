@@ -196,7 +196,11 @@ export function FunAsrModelManager({
   };
 
   const cancelDownload = async (modelName: string) => {
-    await FunAsrAPI.cancelDownload(modelName);
+    try {
+      await FunAsrAPI.cancelDownload(modelName);
+    } catch (error) {
+      toast.error('Could not cancel the download', { description: String(error) });
+    }
   };
 
   const deleteModel = async (model: FunAsrModelInfo) => {
@@ -205,9 +209,14 @@ export function FunAsrModelManager({
       { title: 'Delete FUN-ASR model?', kind: 'warning' }
     );
     if (!accepted) return;
-    await FunAsrAPI.deleteModel(model.name);
-    await refresh();
-    toast.success(`${model.display_name} deleted`);
+    try {
+      await FunAsrAPI.deleteModel(model.name);
+      toast.success(`${model.display_name} deleted`);
+    } catch (error) {
+      toast.error(`Could not delete ${model.display_name}`, { description: String(error) });
+    } finally {
+      await refresh();
+    }
   };
 
   if (loading) {

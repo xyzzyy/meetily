@@ -8,6 +8,9 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
 if(MSVC)
     add_compile_definitions(NOMINMAX _USE_MATH_DEFINES)
+    # Link the C runtime statically so the helper doesn't need the MSVC
+    # redistributable installed.
+    set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 endif()
 
 include(FetchContent)
@@ -25,6 +28,10 @@ set(GGML_METAL OFF CACHE BOOL "" FORCE)
 set(GGML_CUDA OFF CACHE BOOL "" FORCE)
 set(GGML_VULKAN OFF CACHE BOOL "" FORCE)
 set(GGML_HIP OFF CACHE BOOL "" FORCE)
+# ggml's own thread pool instead of OpenMP, so the helper has no libgomp
+# (GCC) or VCOMP140.dll (MSVC) runtime dependency. Apple's compiler has no
+# OpenMP, so this matches what macOS builds already do.
+set(GGML_OPENMP OFF CACHE BOOL "" FORCE)
 
 FetchContent_Declare(
     llama
