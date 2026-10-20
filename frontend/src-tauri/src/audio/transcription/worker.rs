@@ -168,7 +168,7 @@ fn assign_live_speaker(
             };
             if let Some(result) = session
                 .as_mut()
-                .and_then(|session| session.label_segment_detailed(samples))
+                .and_then(|session| session.label_segment_detailed(source, samples))
             {
                 let mut assignment = base(
                     result.profile_id.as_deref().unwrap_or_else(|| {

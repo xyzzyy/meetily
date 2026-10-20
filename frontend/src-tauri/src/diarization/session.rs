@@ -6,6 +6,7 @@
 
 use super::clustering::{ClusterAssignment, SpeakerClusterer};
 use super::embedding::{EmbeddingError, EmbeddingExtractor};
+use std::collections::HashMap;
 use std::path::Path;
 
 /// Segments shorter than this carry forward the previous speaker label
@@ -15,6 +16,7 @@ const MIN_SAMPLES_FOR_EMBEDDING: usize = 16_000;
 pub struct DiarizationSession {
     extractor: EmbeddingExtractor,
     clusterer: SpeakerClusterer,
+    previous_by_source: HashMap<String, ClusterAssignment>,
 }
 
 impl DiarizationSession {
@@ -35,6 +37,7 @@ impl DiarizationSession {
         Ok(Self {
             extractor: EmbeddingExtractor::new(embedding_model_path)?,
             clusterer,
+            previous_by_source: HashMap::new(),
         })
     }
 
@@ -52,38 +55,13 @@ impl DiarizationSession {
     /// is too short). Diarization failures must never break transcription —
     /// errors are logged and degrade to the previous label or None.
     pub fn label_segment(&mut self, samples_16k: &[f32]) -> Option<String> {
-        self.label_segment_detailed(samples_16k)
+        self.label_segment_detailed("mixed", samples_16k)
             .map(|assignment| assignment.label)
     }
 
-    pub fn label_segment_detailed(&mut self, samples_16k: &[f32]) -> Option<ClusterAssignment> {
-        if samples_16k.len() < MIN_SAMPLES_FOR_EMBEDDING {
-            // Too short to fingerprint: carry the previous speaker, including
-            // the remembered voice it matched, so one person stays one speaker.
-            let profile_id = self.clusterer.last_profile_id();
-            return self.clusterer.last_label().map(|label| ClusterAssignment {
-                label,
-                profile_id,
-                confidence: 0.0,
-                needs_review: false,
-            });
-        }
-        match self.extractor.compute(samples_16k) {
-            Ok(embedding) => Some(self.clusterer.assign_detailed(&embedding)),
-            Err(e) => {
-                log::warn!(
-                    "Diarization embedding failed, carrying previous label: {}",
-                    e
-                );
-                let profile_id = self.clusterer.last_profile_id();
-                self.clusterer.last_label().map(|label| ClusterAssignment {
-                    label,
-                    profile_id,
-                    confidence: 0.0,
-                    needs_review: true,
-                })
-            }
-        }
+    pub fn label_segment_detailed(&mut self, source: &str, samples_16k: &[f32]) -> Option<ClusterAssignment> {
+        label_for_source(&mut self.clusterer, &mut self.previous_by_source, source, samples_16k,
+            |samples| self.extractor.compute(samples))
     }
 
     pub fn clusterer(&self) -> &SpeakerClusterer {
@@ -92,5 +70,71 @@ impl DiarizationSession {
 
     pub fn clusterer_mut(&mut self) -> &mut SpeakerClusterer {
         &mut self.clusterer
+    }
+}
+
+// Share voice clusters across sources, but never carry a remote speaker into a
+// short microphone turn (or the reverse). The extractor is supplied separately
+// so these decisions can be tested without loading a model or recording audio.
+fn label_for_source(
+    clusterer: &mut SpeakerClusterer,
+    previous: &mut HashMap<String, ClusterAssignment>,
+    source: &str,
+    samples: &[f32],
+    compute: impl FnOnce(&[f32]) -> Result<Vec<f32>, EmbeddingError>,
+) -> Option<ClusterAssignment> {
+    let fallback = |needs_review| previous.get(source).cloned().map(|mut assignment| {
+        assignment.confidence = 0.0;
+        assignment.needs_review |= needs_review;
+        assignment
+    });
+    if samples.len() < MIN_SAMPLES_FOR_EMBEDDING {
+        return fallback(false);
+    }
+    match compute(samples) {
+        Ok(embedding) => {
+            let assignment = clusterer.assign_detailed(&embedding);
+            previous.insert(source.to_string(), assignment.clone());
+            Some(assignment)
+        }
+        Err(error) => {
+            log::warn!("Diarization embedding failed for {source}: {error}");
+            fallback(true)
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn short_turns_keep_only_the_previous_speaker_from_the_same_source() {
+        let mut clusterer = SpeakerClusterer::new();
+        clusterer.seed_profile("alice", "Alice", vec![1.0, 0.0]);
+        clusterer.seed_profile("bob", "Bob", vec![0.0, 1.0]);
+        let mut previous = HashMap::new();
+        let long = vec![0.0; MIN_SAMPLES_FOR_EMBEDDING];
+        label_for_source(&mut clusterer, &mut previous, "system", &long, |_| Ok(vec![0.0, 1.0]));
+        assert!(label_for_source(&mut clusterer, &mut previous, "microphone", &[], |_| panic!("short audio must not run the model")).is_none());
+        label_for_source(&mut clusterer, &mut previous, "microphone", &long, |_| Ok(vec![1.0, 0.0]));
+        for (source, profile) in [("system", "bob"), ("microphone", "alice")] {
+            let assignment = label_for_source(&mut clusterer, &mut previous, source, &[], |_| unreachable!()).unwrap();
+            assert_eq!(assignment.profile_id.as_deref(), Some(profile));
+            assert_eq!(assignment.confidence, 0.0);
+        }
+    }
+
+    #[test]
+    fn embedding_errors_do_not_copy_another_sources_speaker() {
+        let mut clusterer = SpeakerClusterer::new();
+        clusterer.seed_profile("bob", "Bob", vec![0.0, 1.0]);
+        let mut previous = HashMap::new();
+        let long = vec![0.0; MIN_SAMPLES_FOR_EMBEDDING];
+        label_for_source(&mut clusterer, &mut previous, "system", &long, |_| Ok(vec![0.0, 1.0]));
+        assert!(label_for_source(&mut clusterer, &mut previous, "microphone", &long, |_| Err(EmbeddingError::NoOutput)).is_none());
+        let assignment = label_for_source(&mut clusterer, &mut previous, "system", &long, |_| Err(EmbeddingError::NoOutput)).unwrap();
+        assert_eq!(assignment.profile_id.as_deref(), Some("bob"));
+        assert!(assignment.needs_review);
     }
 }
