@@ -15,7 +15,9 @@ jobs:
   review:
     runs-on: ubuntu-latest
     # A runner has no one to answer permission prompts, so bound the job.
-    timeout-minutes: 20
+    # Large pull requests can take just over 20 minutes; leave headroom so the
+    # review can post its findings instead of being cancelled mid-review.
+    timeout-minutes: 30
     permissions:
       contents: read
       pull-requests: write
