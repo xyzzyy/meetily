@@ -788,6 +788,32 @@ pub async fn api_delete_api_key<R: Runtime>(
     }
 }
 
+async fn delete_meeting_and_cleanup(
+    core_pool: &sqlx::SqlitePool,
+    speaker_pool: &sqlx::SqlitePool,
+    meeting_id: &str,
+) -> Result<bool, sqlx::Error> {
+    let deleted = MeetingsRepository::delete_meeting(core_pool, meeting_id).await?;
+    if deleted {
+        if let Err(error) =
+            crate::database::repositories::diarization::DiarizationRepository::delete_meeting_data(
+                speaker_pool,
+                meeting_id,
+            )
+            .await
+        {
+            // The core deletion has committed. Report success so the UI removes
+            // the meeting, even when the separate feature store cannot be cleaned.
+            log_warn!(
+                "Meeting {} was deleted, but speaker metadata cleanup failed: {}",
+                meeting_id,
+                error
+            );
+        }
+    }
+    Ok(deleted)
+}
+
 #[tauri::command]
 pub async fn api_delete_meeting<R: Runtime>(
     _app: AppHandle<R>,
@@ -803,14 +829,8 @@ pub async fn api_delete_meeting<R: Runtime>(
 
     let pool = state.db_manager.pool();
 
-    match MeetingsRepository::delete_meeting(pool, &meeting_id).await {
+    match delete_meeting_and_cleanup(pool, state.speaker_store.pool(), &meeting_id).await {
         Ok(true) => {
-            crate::database::repositories::diarization::DiarizationRepository::delete_meeting_data(
-                state.speaker_store.pool(),
-                &meeting_id,
-            )
-            .await
-            .map_err(|error| format!("Meeting was deleted, but speaker metadata cleanup failed: {error}"))?;
             log_info!("Successfully deleted meeting {}", meeting_id);
             Ok(serde_json::json!({
                 "status": "success",
@@ -1567,5 +1587,52 @@ pub async fn api_test_custom_openai_connection<R: Runtime>(
                 Err(format!("Connection failed: {}", e))
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod meeting_deletion_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn committed_deletion_succeeds_when_speaker_cleanup_fails() {
+        let core = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        let feature = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::raw_sql(
+            "CREATE TABLE meetings (id TEXT PRIMARY KEY);
+            CREATE TABLE transcripts (meeting_id TEXT);
+            CREATE TABLE transcript_chunks (meeting_id TEXT);
+            CREATE TABLE summary_processes (meeting_id TEXT);
+            INSERT INTO meetings VALUES ('meeting'), ('other');
+            INSERT INTO transcripts VALUES ('meeting'), ('other');",
+        )
+        .execute(&core)
+        .await
+        .unwrap();
+        // The empty feature database forces cleanup to fail after core commit.
+        assert!(delete_meeting_and_cleanup(&core, &feature, "meeting")
+            .await
+            .unwrap());
+        let remaining: Vec<String> = sqlx::query_scalar("SELECT id FROM meetings")
+            .fetch_all(&core)
+            .await
+            .unwrap();
+        assert_eq!(remaining, vec!["other"]);
+        let transcripts: Vec<String> = sqlx::query_scalar("SELECT meeting_id FROM transcripts")
+            .fetch_all(&core)
+            .await
+            .unwrap();
+        assert_eq!(transcripts, vec!["other"]);
+        assert!(!delete_meeting_and_cleanup(&core, &feature, "meeting")
+            .await
+            .unwrap());
     }
 }
