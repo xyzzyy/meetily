@@ -204,6 +204,10 @@ export function FunAsrModelManager({
   };
 
   const deleteModel = async (model: FunAsrModelInfo) => {
+    if (selectedModel === model.name) {
+      toast.error('Select another FUN-ASR model before deleting this one');
+      return;
+    }
     const accepted = await confirm(
       `Delete ${model.display_name}? The shared encoder is kept while another FUN-ASR variant is installed.`,
       { title: 'Delete FUN-ASR model?', kind: 'warning' }
@@ -286,13 +290,23 @@ export function FunAsrModelManager({
                   <HardDrive className="h-3 w-3" />
                   {model.decoder_size_mb} MB decoder · {model.size_mb} MB first install
                 </p>
+                {selectedModel === model.name && available && (
+                  <p className="mt-1 text-xs text-gray-500">
+                    The selected model can't be deleted. Choose another model first.
+                  </p>
+                )}
               </button>
               {available ? (
                 <Button
                   variant="ghost"
                   size="icon"
                   onClick={() => deleteModel(model)}
-                  title="Delete model"
+                  disabled={selectedModel === model.name}
+                  title={
+                    selectedModel === model.name
+                      ? 'Select another model before deleting this one'
+                      : 'Delete model'
+                  }
                 >
                   <Trash2 className="h-4 w-4" />
                 </Button>

@@ -898,10 +898,23 @@ pub async fn stop_recording<R: Runtime>(
             info!("Unloading FUN-ASR model...");
             // The helper owns the ~1.45 GB encoder/decoder/KV cache; leave
             // Whisper alone or FUN-ASR stays resident until app exit.
-            match crate::funasr_engine::commands::funasr_unload_model().await {
-                Ok(true) => info!("✅ FUN-ASR model unloaded successfully"),
-                Ok(false) => info!("ℹ️ No FUN-ASR model was loaded"),
-                Err(e) => warn!("⚠️ Failed to unload FUN-ASR model: {}", e),
+            //
+            // A transcription can hold the sidecar for up to its 120 s
+            // request timeout. Bound the unload so a shutdown that already
+            // timed out waiting for chunks does not block for two more
+            // minutes; the helper exits with the app if it is still busy.
+            match tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                crate::funasr_engine::commands::funasr_unload_model(),
+            )
+            .await
+            {
+                Ok(Ok(true)) => info!("✅ FUN-ASR model unloaded successfully"),
+                Ok(Ok(false)) => info!("ℹ️ No FUN-ASR model was loaded"),
+                Ok(Err(e)) => warn!("⚠️ Failed to unload FUN-ASR model: {}", e),
+                Err(_) => warn!(
+                    "⏱️ FUN-ASR unload timed out; the helper will exit when the app closes"
+                ),
             }
         }
         ModelUnload::Whisper => {

@@ -459,14 +459,29 @@ impl FunAsrEngine {
                 .clone()
         };
         let _decoder_guard = decoder_lock.lock().await;
+        let decoder = self.owned_models_root.join(decoder_relative_path(spec));
+        if !decoder.is_file() {
+            // Official models are exposed read-only; a delete that removed
+            // nothing must not look successful to the user.
+            let official_decoder = self
+                .official_models_root
+                .as_ref()
+                .map(|root| root.join(decoder_relative_path(spec)));
+            if official_decoder.as_ref().is_some_and(|path| path.is_file()) {
+                return Err(anyhow!(
+                    "{} is provided by the official Meetily installation and cannot be deleted from this app.",
+                    spec.display_name
+                ));
+            }
+            return Err(anyhow!(
+                "{} is not installed in this app's model folder.",
+                spec.display_name
+            ));
+        }
         if self.current_model.read().await.as_deref() == Some(model_id) {
             self.unload_model().await;
         }
-
-        let decoder = self.owned_models_root.join(decoder_relative_path(spec));
-        if decoder.is_file() {
-            fs::remove_file(&decoder).await?;
-        }
+        fs::remove_file(&decoder).await?;
         let _encoder_guard = self.encoder_download_lock.lock().await;
         let decoder_dir = self.owned_models_root.join(MODEL_DIR).join("decoders");
         let any_owned_decoder = MODELS
@@ -834,9 +849,24 @@ mod tests {
         )
         .unwrap();
 
-        engine.delete_model(MODELS[0].id).await.unwrap();
+        let error = engine.delete_model(MODELS[0].id).await.unwrap_err();
+        assert!(
+            error.to_string().contains("official Meetily installation"),
+            "unexpected error: {error}"
+        );
         assert!(fallback_decoder.is_file());
         assert!(fallback_encoder.is_file());
+    }
+
+    #[tokio::test]
+    async fn deleting_a_model_that_is_not_installed_is_an_error() {
+        let owned = tempfile::tempdir().unwrap();
+        let engine = FunAsrEngine::new(owned.path().to_path_buf(), None).unwrap();
+        let error = engine.delete_model(MODELS[0].id).await.unwrap_err();
+        assert!(
+            error.to_string().contains("not installed"),
+            "unexpected error: {error}"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

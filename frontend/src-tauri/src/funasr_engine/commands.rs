@@ -111,17 +111,32 @@ pub async fn funasr_validate_model_ready<R: Runtime>(app: AppHandle<R>) -> Resul
     validate_model_ready_with_config(&app).await
 }
 
+/// Read the FUN-ASR model from the saved settings without hiding read errors.
+///
+/// `Ok(None)` means "no FUN-ASR selection" and may fall back to an installed
+/// model. `Err` must reach the caller: a transient settings failure is not
+/// permission to transcribe with a different model than the configured one.
+fn configured_funasr_model(
+    result: Result<Option<crate::api::api::TranscriptConfig>, String>,
+) -> Result<Option<String>, String> {
+    match result {
+        Ok(Some(config)) if config.provider == "funasr" => Ok(Some(config.model)),
+        Ok(_) => Ok(None),
+        Err(error) => Err(format!(
+            "Could not load transcription settings: {}. Select a transcription model in Settings and try again.",
+            error
+        )),
+    }
+}
+
 pub async fn validate_model_ready_with_config<R: Runtime>(
     app: &AppHandle<R>,
 ) -> Result<String, String> {
     funasr_init().await?;
     let engine = engine()?;
-    let configured = crate::api::api::api_get_transcript_config(app.clone(), app.state(), None)
-        .await
-        .ok()
-        .flatten()
-        .filter(|config| config.provider == "funasr")
-        .map(|config| config.model);
+    let configured = configured_funasr_model(
+        crate::api::api::api_get_transcript_config(app.clone(), app.state(), None).await,
+    )?;
 
     let available = engine.discover_models().await;
     let selected = configured
@@ -265,5 +280,43 @@ pub async fn funasr_transcribe_audio(
 pub async fn shutdown() {
     if let Ok(engine) = engine() {
         engine.unload_model().await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::configured_funasr_model;
+    use crate::api::api::TranscriptConfig;
+
+    fn config(provider: &str, model: &str) -> TranscriptConfig {
+        TranscriptConfig {
+            provider: provider.to_string(),
+            model: model.to_string(),
+            api_key: None,
+        }
+    }
+
+    #[test]
+    fn settings_errors_are_not_treated_as_no_selection() {
+        let error = configured_funasr_model(Err("database is locked".to_string())).unwrap_err();
+        assert!(error.contains("database is locked"));
+        assert!(error.contains("Could not load transcription settings"));
+    }
+
+    #[test]
+    fn missing_or_other_provider_configs_allow_the_model_fallback() {
+        assert_eq!(configured_funasr_model(Ok(None)).unwrap(), None);
+        assert_eq!(
+            configured_funasr_model(Ok(Some(config("parakeet", "model-a")))).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn the_saved_funasr_model_is_returned() {
+        assert_eq!(
+            configured_funasr_model(Ok(Some(config("funasr", "model-a")))).unwrap(),
+            Some("model-a".to_string())
+        );
     }
 }
