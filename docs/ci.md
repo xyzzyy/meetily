@@ -8,8 +8,22 @@ The workflow has two checks:
 - **Frontend build and tests** installs the locked dependencies, runs each test
   file in its own process, and builds the production frontend on Ubuntu.
 - **macOS release build and test compilation** builds the summary helper, the
-  speaker helper when present, and the app on an Apple Silicon Mac. It also
-  compiles the Rust unit tests.
+  speaker helper when present, and the app on an Apple Silicon Mac with
+  GitHub's `macos-latest` runner. It also compiles the Rust unit tests. Xcode
+  and the Apple SDKs are already installed on the runner.
+
+The frontend is the React and Next.js interface shown in the Tauri window.
+The frontend job exports its production files to `frontend/out`. The macOS
+job uses those files when it compiles the native app with Cargo's release
+settings.
+
+The frontend tests cover model deletion commands, setup model selection,
+transcription provider selection, summary state recovery, transcript request
+handling, language preferences, summary parsing, Markdown conversion error
+handling, the Retry action, and analytics event limits. They use simulated
+native responses. They do not record audio, run model inference, remove real
+model files, or start the desktop app. The summary parser accepts an object
+or one JSON encoding of that object. It rejects nested JSON strings.
 
 Rust tests are compiled but are not run by this workflow. Some existing tests
 need audio devices or system permissions. The workflow does not test Windows

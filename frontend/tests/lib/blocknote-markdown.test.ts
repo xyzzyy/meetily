@@ -1,4 +1,5 @@
-import { afterEach, describe, expect, mock, test } from "bun:test";
+import { afterEach, describe, expect, mock, spyOn, test } from "bun:test";
+import type { Block } from "@blocknote/core";
 import { blocksToMarkdownSafely } from "../../src/lib/blocknote-markdown";
 
 describe("blocksToMarkdownSafely", () => {
@@ -6,12 +7,19 @@ describe("blocksToMarkdownSafely", () => {
     mock.restore();
   });
 
-  test("returns markdown when conversion succeeds", async () => {
+  test("passes the supplied blocks to the converter and returns its markdown", async () => {
+    const blocks: Block[] = [{
+      id: "block-1",
+      type: "paragraph",
+      props: { textColor: "default", backgroundColor: "default", textAlignment: "left" },
+      content: [{ type: "text", text: "Meeting notes", styles: {} }],
+      children: [],
+    }];
     const editor = {
-      blocksToMarkdownLossy: mock(async () => "# Summary"),
+      blocksToMarkdownLossy: mock(async (_blocks: Block[]) => "# Summary"),
     };
 
-    const result = await blocksToMarkdownSafely(editor, [] as any, {
+    const result = await blocksToMarkdownSafely(editor, blocks, {
       source: "test-success",
     });
 
@@ -20,6 +28,7 @@ describe("blocksToMarkdownSafely", () => {
       ok: true,
     });
     expect(editor.blocksToMarkdownLossy).toHaveBeenCalledTimes(1);
+    expect(editor.blocksToMarkdownLossy).toHaveBeenCalledWith(blocks);
   });
 
   test("returns fallback markdown when conversion throws", async () => {
@@ -29,8 +38,7 @@ describe("blocksToMarkdownSafely", () => {
         throw error;
       }),
     };
-    const consoleError = mock(() => {});
-    console.error = consoleError as any;
+    const consoleError = spyOn(console, "error").mockImplementation(() => {});
 
     const result = await blocksToMarkdownSafely(editor, [{ id: "block-1" }] as any, {
       source: "test-fallback",
@@ -58,7 +66,7 @@ describe("blocksToMarkdownSafely", () => {
         throw new Error("conversion failed");
       }),
     };
-    console.error = mock(() => {}) as any;
+    spyOn(console, "error").mockImplementation(() => {});
 
     const result = await blocksToMarkdownSafely(editor, [] as any, {
       source: "test-empty-fallback",

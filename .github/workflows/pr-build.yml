@@ -57,7 +57,7 @@ jobs:
   macos:
     name: macOS release build and test compilation
     needs: frontend
-    runs-on: macos-15
+    runs-on: macos-latest
     timeout-minutes: 60
     env:
       MACOSX_DEPLOYMENT_TARGET: '14.4'
