@@ -104,7 +104,7 @@ struct FinalTranscript {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
-struct CoreTranscriptBackup {
+pub(crate) struct CoreTranscriptBackup {
     id: String,
     meeting_id: String,
     transcript: String,
@@ -454,6 +454,7 @@ pub(crate) struct EnhancementSpeakerAnalysis {
     quality_flags: Vec<String>,
 }
 
+#[derive(Serialize, Deserialize)]
 pub(crate) struct EnhancementSpeakerLabels {
     windows: Vec<FinalWindow>,
     transcripts: Vec<FinalTranscript>,
@@ -566,12 +567,12 @@ impl EnhancementSpeakerLabels {
         meeting_id: &str,
     ) -> Result<()> {
         let run_id = format!("diarization-run-{}", Uuid::new_v4());
-        sqlx::query("INSERT INTO speaker_feature.diarization_runs (id, meeting_id, status, method, progress)
+        sqlx::query("INSERT INTO main.diarization_runs (id, meeting_id, status, method, progress)
             VALUES (?, ?, 'prepared', 'fluid_audio_offline_0.12.4', 95)")
             .bind(&run_id).bind(meeting_id).execute(&mut *connection).await?;
         write_speaker_rows(
             connection,
-            "speaker_feature",
+            "main",
             meeting_id,
             &run_id,
             &self.windows,
@@ -580,7 +581,7 @@ impl EnhancementSpeakerLabels {
         .await?;
         finish_speaker_run(
             connection,
-            "speaker_feature",
+            "main",
             meeting_id,
             &run_id,
             &self.quality_flags,
@@ -1515,6 +1516,7 @@ pub async fn reconcile_interrupted_runs(
     core_pool: &sqlx::SqlitePool,
     feature_pool: &sqlx::SqlitePool,
 ) -> Result<()> {
+    crate::audio::enhancement::reconcile_publications(core_pool, feature_pool).await?;
     let prepared: Vec<(String, String)> =
         sqlx::query_as("SELECT id, meeting_id FROM diarization_runs WHERE status = 'prepared'")
             .fetch_all(feature_pool)

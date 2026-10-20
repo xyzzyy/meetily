@@ -174,8 +174,102 @@ pub(crate) fn transcript_rows(meeting_id: &str, segments: &[TranscriptSegment]) 
         .collect()
 }
 
-/// Text and speaker metadata share one SQLite transaction. No new row IDs are
-/// visible without their labels. A dedicated connection keeps ATTACH local.
+// Separate WAL databases cannot share a crash-atomic commit. Persist the
+// publication intent first, then commit core rows, then speaker data. Startup
+// resolves the intent before it serves transcript data. FULL synchronization
+// makes each step durable before the next database is changed.
+const CORE_ROWS: &str = "SELECT id, meeting_id, transcript, timestamp, summary, action_items, key_points,
+    audio_start_time, audio_end_time, duration FROM transcripts WHERE meeting_id = ? ORDER BY audio_start_time, id";
+
+async fn durable_connection(pool: &SqlitePool) -> Result<SqliteConnection> {
+    Ok(SqliteConnection::connect_with(
+        &pool.connect_options().as_ref().clone().synchronous(sqlx::sqlite::SqliteSynchronous::Full),
+    ).await?)
+}
+
+async fn write_speakers(
+    connection: &mut SqliteConnection,
+    meeting_id: &str,
+    labels: Option<&EnhancementSpeakerLabels>,
+) -> Result<()> {
+    if let Some(labels) = labels {
+        labels.write(connection, meeting_id).await?;
+    } else {
+        for table in ["transcript_speakers", "speaker_segments"] {
+            sqlx::query(&format!("DELETE FROM {table} WHERE meeting_id = ?"))
+                .bind(meeting_id).execute(&mut *connection).await?;
+        }
+        sqlx::query("INSERT INTO meeting_diarization_status (meeting_id, current_status, progress)
+            VALUES (?, 'none', 0) ON CONFLICT(meeting_id) DO UPDATE SET current_status = 'none', progress = 0,
+            failure_reason = NULL, run_id = NULL, assigned_coverage = NULL, transcription_success_rate = NULL,
+            updated_at = CURRENT_TIMESTAMP").bind(meeting_id).execute(&mut *connection).await?;
+    }
+    sqlx::query("DELETE FROM enhancement_publications WHERE meeting_id = ?")
+        .bind(meeting_id).execute(connection).await?;
+    Ok(())
+}
+
+#[derive(sqlx::FromRow)]
+struct Publication {
+    meeting_id: String,
+    original_rows: String,
+    proposed_rows: String,
+    core_backup: String,
+    speaker_labels: Option<String>,
+}
+
+async fn remove_intent(feature: &SqlitePool, meeting_id: &str) -> Result<()> {
+    let mut connection = durable_connection(feature).await?;
+    sqlx::query("DELETE FROM enhancement_publications WHERE meeting_id = ?")
+        .bind(meeting_id).execute(&mut connection).await?;
+    Ok(())
+}
+
+pub(crate) async fn reconcile_publications(core: &SqlitePool, feature: &SqlitePool) -> Result<()> {
+    let pending: Vec<Publication> = sqlx::query_as("SELECT * FROM enhancement_publications")
+        .fetch_all(feature).await?;
+    for publication in pending {
+        let actual: Vec<Transcript> = sqlx::query_as(CORE_ROWS)
+            .bind(&publication.meeting_id).fetch_all(core).await?;
+        let actual = serde_json::to_string(&actual)?;
+        if actual == publication.original_rows {
+            // The core write never committed. Old speaker data is untouched.
+            remove_intent(feature, &publication.meeting_id).await?;
+        } else if actual == publication.proposed_rows {
+            let labels = publication.speaker_labels.as_deref()
+                .map(serde_json::from_str::<EnhancementSpeakerLabels>).transpose()?;
+            let mut connection = durable_connection(feature).await?;
+            let mut tx = connection.begin().await?;
+            write_speakers(&mut tx, &publication.meeting_id, labels.as_ref()).await?;
+            tx.commit().await?;
+        } else {
+            return Err(anyhow!("Enhance recovery could not match the saved transcript for {}. The recovery record was kept.", publication.meeting_id));
+        }
+    }
+    Ok(())
+}
+
+async fn restore_core(core: &SqlitePool, publication: &Publication) -> Result<()> {
+    let mut connection = durable_connection(core).await?;
+    let mut tx = connection.begin().await?;
+    let actual: Vec<Transcript> = sqlx::query_as(CORE_ROWS)
+        .bind(&publication.meeting_id).fetch_all(&mut *tx).await?;
+    if serde_json::to_string(&actual)? != publication.proposed_rows {
+        return Err(anyhow!("The transcript changed before Enhance recovery. The recovery record was kept."));
+    }
+    sqlx::query("DELETE FROM transcripts WHERE meeting_id = ?")
+        .bind(&publication.meeting_id).execute(&mut *tx).await?;
+    sqlx::query("INSERT INTO transcripts (id, meeting_id, transcript, timestamp, summary, action_items, key_points,
+            audio_start_time, audio_end_time, duration, speaker)
+        SELECT json_extract(value, '$.id'), json_extract(value, '$.meeting_id'), json_extract(value, '$.transcript'),
+            json_extract(value, '$.timestamp'), json_extract(value, '$.summary'), json_extract(value, '$.action_items'),
+            json_extract(value, '$.key_points'), json_extract(value, '$.audio_start_time'), json_extract(value, '$.audio_end_time'),
+            json_extract(value, '$.duration'), json_extract(value, '$.speaker') FROM json_each(?)")
+        .bind(&publication.core_backup).execute(&mut *tx).await?;
+    tx.commit().await?;
+    Ok(())
+}
+
 pub(crate) async fn publish(
     core: &SqlitePool,
     feature: &SqlitePool,
@@ -186,62 +280,73 @@ pub(crate) async fn publish(
     cancelled: &AtomicBool,
 ) -> Result<()> {
     if segments.is_empty() {
-        return Err(anyhow!(
-            "No transcript text was found. The saved transcript was kept."
-        ));
+        return Err(anyhow!("No transcript text was found. The saved transcript was kept."));
     }
-    let feature_path: String =
-        sqlx::query_scalar("SELECT file FROM pragma_database_list WHERE name = 'main'")
-            .fetch_one(feature)
-            .await?;
-    if feature_path.is_empty() {
-        return Err(anyhow!("Speaker storage has no database file"));
-    }
-    let mut connection = SqliteConnection::connect_with(&core.connect_options()).await?;
-    sqlx::query("ATTACH DATABASE ? AS speaker_feature")
-        .bind(&feature_path)
-        .execute(&mut connection)
-        .await?;
-    let mut tx = connection.begin().await?;
-    let current: Vec<Transcript> = sqlx::query_as("SELECT id, meeting_id, transcript, timestamp, summary, action_items, key_points,
-        audio_start_time, audio_end_time, duration FROM transcripts WHERE meeting_id = ? ORDER BY audio_start_time, id")
-        .bind(meeting_id).fetch_all(&mut *tx).await?;
+    let mut core_connection = durable_connection(core).await?;
+    let mut core_tx = core_connection.begin().await?;
+    let current: Vec<Transcript> = sqlx::query_as(CORE_ROWS)
+        .bind(meeting_id).fetch_all(&mut *core_tx).await?;
     if serde_json::to_string(&current)? != serde_json::to_string(original)? {
-        return Err(anyhow!(
-            "The transcript changed during enhancement. The saved transcript was kept."
-        ));
+        return Err(anyhow!("The transcript changed during enhancement. The saved transcript was kept."));
     }
-    sqlx::query("DELETE FROM transcripts WHERE meeting_id = ?")
-        .bind(meeting_id)
-        .execute(&mut *tx)
-        .await?;
-    for segment in segments {
-        sqlx::query("INSERT INTO transcripts (id, meeting_id, transcript, timestamp, audio_start_time, audio_end_time, duration)
-            VALUES (?, ?, ?, ?, ?, ?, ?)").bind(&segment.id).bind(meeting_id).bind(&segment.text).bind(&segment.timestamp)
-            .bind(segment.audio_start_time).bind(segment.audio_end_time).bind(segment.duration).execute(&mut *tx).await?;
+    let backup: Vec<crate::diarization::finalize::CoreTranscriptBackup> = sqlx::query_as(
+        "SELECT id, meeting_id, transcript, timestamp, summary, action_items, key_points,
+        audio_start_time, audio_end_time, duration, speaker FROM transcripts WHERE meeting_id = ? ORDER BY audio_start_time, id",
+    ).bind(meeting_id).fetch_all(&mut *core_tx).await?;
+    let mut proposed = transcript_rows(meeting_id, segments);
+    proposed.sort_by(|a, b| a.audio_start_time.partial_cmp(&b.audio_start_time)
+        .unwrap_or(std::cmp::Ordering::Equal).then_with(|| a.id.cmp(&b.id)));
+    let publication = Publication {
+        meeting_id: meeting_id.into(), original_rows: serde_json::to_string(original)?,
+        proposed_rows: serde_json::to_string(&proposed)?,
+        core_backup: serde_json::to_string(&backup)?,
+        speaker_labels: labels.map(serde_json::to_string).transpose()?,
+    };
+    let mut feature_connection = durable_connection(feature).await?;
+    sqlx::query("INSERT INTO enhancement_publications (meeting_id, original_rows, proposed_rows, core_backup, speaker_labels)
+        VALUES (?, ?, ?, ?, ?)")
+        .bind(meeting_id).bind(&publication.original_rows).bind(&publication.proposed_rows)
+        .bind(&publication.core_backup).bind(&publication.speaker_labels)
+        .execute(&mut feature_connection).await?;
+    let mut feature_tx = feature_connection.begin().await?;
+    let prepared: Result<()> = async {
+        // Validate and prepare speaker writes before changing the transcript.
+        // These writes and removal of the recovery record commit together.
+        write_speakers(&mut feature_tx, meeting_id, labels).await?;
+        sqlx::query("DELETE FROM transcripts WHERE meeting_id = ?")
+            .bind(meeting_id).execute(&mut *core_tx).await?;
+        for segment in segments {
+            sqlx::query("INSERT INTO transcripts (id, meeting_id, transcript, timestamp, audio_start_time, audio_end_time, duration)
+                VALUES (?, ?, ?, ?, ?, ?, ?)").bind(&segment.id).bind(meeting_id).bind(&segment.text).bind(&segment.timestamp)
+                .bind(segment.audio_start_time).bind(segment.audio_end_time).bind(segment.duration).execute(&mut *core_tx).await?;
+        }
+        if cancelled.load(Ordering::SeqCst) {
+            return Err(anyhow!("Enhancement cancelled. The saved transcript was kept."));
+        }
+        Ok(())
+    }.await;
+    if let Err(error) = prepared {
+        feature_tx.rollback().await?;
+        core_tx.rollback().await?;
+        remove_intent(feature, meeting_id).await?;
+        return Err(error);
     }
-    if let Some(labels) = labels {
-        labels.write(&mut tx, meeting_id).await?;
-    } else {
-        sqlx::query("DELETE FROM speaker_feature.transcript_speakers WHERE meeting_id = ?")
-            .bind(meeting_id)
-            .execute(&mut *tx)
-            .await?;
-        sqlx::query("DELETE FROM speaker_feature.speaker_segments WHERE meeting_id = ?")
-            .bind(meeting_id)
-            .execute(&mut *tx)
-            .await?;
-        sqlx::query("INSERT INTO speaker_feature.meeting_diarization_status (meeting_id, current_status, progress)
-            VALUES (?, 'none', 0) ON CONFLICT(meeting_id) DO UPDATE SET current_status = 'none', progress = 0,
-            failure_reason = NULL, run_id = NULL, assigned_coverage = NULL, transcription_success_rate = NULL,
-            updated_at = CURRENT_TIMESTAMP").bind(meeting_id).execute(&mut *tx).await?;
+    if let Err(error) = core_tx.commit().await {
+        feature_tx.rollback().await?;
+        // A failed COMMIT can be ambiguous. Resolve from the durable rows.
+        reconcile_publications(core, feature).await?;
+        let actual = crate::diarization::finalize::load_transcripts(core, meeting_id).await?;
+        if serde_json::to_string(&actual)? == publication.proposed_rows { return Ok(()); }
+        return Err(error.into());
     }
-    if cancelled.load(Ordering::SeqCst) {
-        return Err(anyhow!(
-            "Enhancement cancelled. The saved transcript was kept."
-        ));
+    if let Err(error) = feature_tx.commit().await {
+        let pending: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM enhancement_publications WHERE meeting_id = ?)")
+            .bind(meeting_id).fetch_one(feature).await?;
+        if !pending { return Ok(()); }
+        restore_core(core, &publication).await?;
+        remove_intent(feature, meeting_id).await?;
+        return Err(error.into());
     }
-    tx.commit().await?;
     Ok(())
 }
 
@@ -433,7 +538,8 @@ mod tests {
     async fn publication_fixture() -> (tempfile::TempDir, SqlitePool, SqlitePool, Vec<Transcript>) {
         use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
         let dir = tempfile::tempdir().unwrap();
-        let connect = |name: &str| SqliteConnectOptions::new().filename(dir.path().join(name)).create_if_missing(true);
+        let connect = |name: &str| SqliteConnectOptions::new().filename(dir.path().join(name)).create_if_missing(true)
+            .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal);
         let core = SqlitePoolOptions::new().connect_with(connect("core.sqlite")).await.unwrap();
         let feature = SqlitePoolOptions::new().connect_with(connect("speaker.sqlite")).await.unwrap();
         sqlx::migrate!("./migrations").run(&core).await.unwrap();
@@ -485,6 +591,101 @@ mod tests {
         let label: String = sqlx::query_scalar("SELECT speaker_label FROM transcript_speakers WHERE transcript_id='old'")
             .fetch_one(&feature).await.unwrap();
         assert_eq!(label,"Speaker 1");
+    }
+
+    fn speaker_labels(segments: &[TranscriptSegment]) -> EnhancementSpeakerLabels {
+        serde_json::from_value(serde_json::json!({
+            "windows": segments.iter().map(|row| serde_json::json!({
+                "source": "microphone", "start": row.audio_start_time.unwrap(), "end": row.audio_end_time.unwrap(),
+                "speaker_id": "alice", "speaker_profile_id": null, "candidate_speaker_ids": [],
+                "confidence": 0.9, "is_overlap": false,
+            })).collect::<Vec<_>>(),
+            "transcripts": segments.iter().map(|row| serde_json::json!({
+                "id": row.id, "text": row.text, "start": row.audio_start_time.unwrap(), "end": row.audio_end_time.unwrap(),
+                "speaker_id": "alice", "speaker_profile_id": null, "speaker_label": "Alice", "source": "microphone",
+                "is_overlap": false, "candidates": [], "confidence": 0.9,
+            })).collect::<Vec<_>>(),
+            "quality_flags": [], "coverage": 1.0,
+        })).unwrap()
+    }
+
+    #[tokio::test]
+    async fn wal_restart_resolves_each_publication_boundary() {
+        for core_committed in [false, true] {
+            let (_dir, core, feature, original) = publication_fixture().await;
+            let segments = fresh_segments();
+            let proposed = transcript_rows("m1", &segments);
+            let labels = speaker_labels(&segments);
+            // Simulate a process stop after the intent commits, either before
+            // or after the independent core transaction commits.
+            let mut feature_connection = durable_connection(&feature).await.unwrap();
+            sqlx::query("INSERT INTO enhancement_publications VALUES ('m1', ?, ?, '[]', ?)")
+                .bind(serde_json::to_string(&original).unwrap())
+                .bind(serde_json::to_string(&proposed).unwrap())
+                .bind(serde_json::to_string(&labels).unwrap())
+                .execute(&mut feature_connection).await.unwrap();
+            feature_connection.close().await.unwrap();
+            if core_committed {
+                let mut tx = core.begin().await.unwrap();
+                sqlx::query("DELETE FROM transcripts WHERE meeting_id = 'm1'").execute(&mut *tx).await.unwrap();
+                for segment in &segments {
+                    sqlx::query("INSERT INTO transcripts (id, meeting_id, transcript, timestamp, audio_start_time, audio_end_time, duration) VALUES (?, 'm1', ?, ?, ?, ?, ?)")
+                        .bind(&segment.id).bind(&segment.text).bind(&segment.timestamp)
+                        .bind(segment.audio_start_time).bind(segment.audio_end_time).bind(segment.duration)
+                        .execute(&mut *tx).await.unwrap();
+                }
+                tx.commit().await.unwrap();
+            }
+            let core_options = core.connect_options().as_ref().clone();
+            let feature_options = feature.connect_options().as_ref().clone();
+            core.close().await;
+            feature.close().await;
+            let core = SqlitePool::connect_with(core_options).await.unwrap();
+            let feature = SqlitePool::connect_with(feature_options).await.unwrap();
+            for _ in 0..2 {
+                crate::diarization::finalize::reconcile_interrupted_runs(&core, &feature).await.unwrap();
+            }
+            let rows = crate::diarization::finalize::load_transcripts(&core, "m1").await.unwrap();
+            assert_eq!(serde_json::to_string(&rows).unwrap(), serde_json::to_string(if core_committed { &proposed } else { &original }).unwrap());
+            let labels: Vec<String> = sqlx::query_scalar("SELECT speaker_label FROM transcript_speakers WHERE meeting_id = 'm1'")
+                .fetch_all(&feature).await.unwrap();
+            assert_eq!(labels, if core_committed { vec!["Alice", "Alice"] } else { vec!["Speaker 1"] });
+            let pending: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM enhancement_publications").fetch_one(&feature).await.unwrap();
+            assert_eq!(pending, 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_speaker_commit_failure_restores_the_complete_old_core_row() {
+        let (_dir, core, feature, _) = publication_fixture().await;
+        sqlx::query("UPDATE transcripts SET speaker = 'mic', summary = 'keep summary' WHERE id = 'old'")
+            .execute(&core).await.unwrap();
+        let original = crate::diarization::finalize::load_transcripts(&core, "m1").await.unwrap();
+        sqlx::raw_sql("CREATE TABLE fail_commit (profile_id TEXT REFERENCES speaker_profiles(id) DEFERRABLE INITIALLY DEFERRED);
+            CREATE TRIGGER fail_speaker_commit AFTER INSERT ON meeting_diarization_status BEGIN
+                INSERT INTO fail_commit VALUES ('missing-profile'); END;")
+            .execute(&feature).await.unwrap();
+        assert!(publish(&core, &feature, "m1", &original, &fresh_segments(), None, &AtomicBool::new(false)).await.is_err());
+        let rows = crate::diarization::finalize::load_transcripts(&core, "m1").await.unwrap();
+        assert_eq!(serde_json::to_string(&rows).unwrap(), serde_json::to_string(&original).unwrap());
+        let speaker: String = sqlx::query_scalar("SELECT speaker FROM transcripts WHERE id = 'old'").fetch_one(&core).await.unwrap();
+        assert_eq!(speaker, "mic");
+        let label: String = sqlx::query_scalar("SELECT speaker_label FROM transcript_speakers WHERE transcript_id = 'old'")
+            .fetch_one(&feature).await.unwrap();
+        assert_eq!(label, "Speaker 1");
+        let pending: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM enhancement_publications").fetch_one(&feature).await.unwrap();
+        assert_eq!(pending, 0);
+    }
+
+    #[tokio::test]
+    async fn wal_publication_commits_labels_with_fresh_rows() {
+        let (_dir, core, feature, original) = publication_fixture().await;
+        let segments = fresh_segments();
+        publish(&core, &feature, "m1", &original, &segments, Some(&speaker_labels(&segments)), &AtomicBool::new(false)).await.unwrap();
+        let labels: Vec<String> = sqlx::query_scalar("SELECT speaker_label FROM transcript_speakers WHERE meeting_id = 'm1'")
+            .fetch_all(&feature).await.unwrap();
+        assert_eq!(labels, vec!["Alice", "Alice"]);
+        reconcile_publications(&core, &feature).await.unwrap();
     }
 
 }
