@@ -670,6 +670,30 @@ pub async fn start_recording_with_devices_and_meeting<R: Runtime>(
     Ok(())
 }
 
+/// Local engine to release after a recording stops.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ModelUnload {
+    Whisper,
+    Parakeet,
+    FunAsr,
+    None,
+}
+
+/// Map the saved transcript provider to the engine that was actually used.
+///
+/// Unknown providers deliberately map to `None`: the old catch-all unloaded
+/// Whisper, which both leaked the real engine and could force an unnecessary
+/// reload. `None` for the provider means the config could not be read and
+/// keeps the previous Whisper fallback.
+fn model_to_unload(provider: Option<&str>) -> ModelUnload {
+    match provider {
+        Some("parakeet") => ModelUnload::Parakeet,
+        Some("funasr") => ModelUnload::FunAsr,
+        Some("localWhisper") | None => ModelUnload::Whisper,
+        Some(_) => ModelUnload::None,
+    }
+}
+
 /// Stop recording with optimized graceful shutdown ensuring NO transcript chunks are lost
 pub async fn stop_recording<R: Runtime>(
     app: AppHandle<R>,
@@ -841,8 +865,8 @@ pub async fn stop_recording<R: Runtime>(
         }
     };
 
-    match config.as_deref() {
-        Some("parakeet") => {
+    match model_to_unload(config.as_deref()) {
+        ModelUnload::Parakeet => {
             info!("🦜 Unloading Parakeet model...");
             let engine_clone = {
                 let engine_guard = crate::parakeet_engine::commands::PARAKEET_ENGINE
@@ -870,8 +894,17 @@ pub async fn stop_recording<R: Runtime>(
                 warn!("⚠️ No Parakeet engine found to unload model");
             }
         }
-        _ => {
-            // Default to Whisper
+        ModelUnload::FunAsr => {
+            info!("Unloading FUN-ASR model...");
+            // The helper owns the ~1.45 GB encoder/decoder/KV cache; leave
+            // Whisper alone or FUN-ASR stays resident until app exit.
+            match crate::funasr_engine::commands::funasr_unload_model().await {
+                Ok(true) => info!("✅ FUN-ASR model unloaded successfully"),
+                Ok(false) => info!("ℹ️ No FUN-ASR model was loaded"),
+                Err(e) => warn!("⚠️ Failed to unload FUN-ASR model: {}", e),
+            }
+        }
+        ModelUnload::Whisper => {
             info!("🎤 Unloading Whisper model...");
             let engine_clone = {
                 let engine_guard = crate::whisper_engine::commands::WHISPER_ENGINE
@@ -895,6 +928,9 @@ pub async fn stop_recording<R: Runtime>(
             } else {
                 warn!("⚠️ No Whisper engine found to unload model");
             }
+        }
+        ModelUnload::None => {
+            warn!("⚠️ Unrecognized transcription provider; leaving local models loaded");
         }
     }
 
@@ -1702,5 +1738,27 @@ async fn trigger_mic_fallback_to_default<R: Runtime>(
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod unload_tests {
+    use super::{model_to_unload, ModelUnload};
+
+    #[test]
+    fn funasr_stop_unloads_the_funasr_engine() {
+        assert_eq!(model_to_unload(Some("funasr")), ModelUnload::FunAsr);
+    }
+
+    #[test]
+    fn each_local_provider_maps_to_its_own_engine() {
+        assert_eq!(model_to_unload(Some("localWhisper")), ModelUnload::Whisper);
+        assert_eq!(model_to_unload(Some("parakeet")), ModelUnload::Parakeet);
+    }
+
+    #[test]
+    fn unknown_providers_do_not_fall_back_to_whisper() {
+        assert_eq!(model_to_unload(Some("deepgram")), ModelUnload::None);
+        assert_eq!(model_to_unload(Some("bogus")), ModelUnload::None);
     }
 }

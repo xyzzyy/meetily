@@ -179,7 +179,10 @@ impl SettingsRepository {
     ) -> std::result::Result<(), sqlx::Error> {
         let api_key_column = match provider {
             "localWhisper" => "whisperApiKey",
-            "parakeet" => return Ok(()), // Parakeet doesn't need an API key, return early
+            // Local models do not use an API key. FUN-ASR used to fall through
+            // to the error arm, which made api_get_transcript_config fail for
+            // every saved FUN-ASR configuration.
+            "parakeet" | "funasr" => return Ok(()),
             "deepgram" => "deepgramApiKey",
             "elevenLabs" => "elevenLabsApiKey",
             "groq" => "groqApiKey",
@@ -211,7 +214,10 @@ impl SettingsRepository {
     ) -> std::result::Result<Option<String>, sqlx::Error> {
         let api_key_column = match provider {
             "localWhisper" => "whisperApiKey",
-            "parakeet" => return Ok(None), // Parakeet doesn't need an API key
+            // Local models do not use an API key. FUN-ASR used to fall through
+            // to the error arm, which made api_get_transcript_config fail for
+            // every saved FUN-ASR configuration.
+            "parakeet" | "funasr" => return Ok(None),
             "deepgram" => "deepgramApiKey",
             "elevenLabs" => "elevenLabsApiKey",
             "groq" => "groqApiKey",
@@ -344,5 +350,69 @@ impl SettingsRepository {
         .await?;
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod transcript_settings_tests {
+    use super::*;
+    use sqlx::sqlite::SqlitePoolOptions;
+
+    async fn test_pool() -> SqlitePool {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+        pool
+    }
+
+    #[tokio::test]
+    async fn funasr_config_round_trips_without_an_api_key() {
+        let pool = test_pool().await;
+        SettingsRepository::save_transcript_config(
+            &pool,
+            "funasr",
+            crate::config::DEFAULT_FUNASR_MODEL,
+        )
+        .await
+        .unwrap();
+
+        // The settings UI can still send a key value for a local provider.
+        SettingsRepository::save_transcript_api_key(&pool, "funasr", "unused")
+            .await
+            .unwrap();
+
+        let saved = SettingsRepository::get_transcript_config(&pool)
+            .await
+            .unwrap()
+            .expect("FUN-ASR config should be readable");
+        assert_eq!(saved.provider, "funasr");
+        assert_eq!(saved.model, crate::config::DEFAULT_FUNASR_MODEL);
+        assert_eq!(
+            SettingsRepository::get_transcript_api_key(&pool, "funasr")
+                .await
+                .unwrap(),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn remote_api_keys_are_still_stored() {
+        let pool = test_pool().await;
+        SettingsRepository::save_transcript_config(&pool, "deepgram", "nova-2")
+            .await
+            .unwrap();
+        SettingsRepository::save_transcript_api_key(&pool, "deepgram", "secret")
+            .await
+            .unwrap();
+
+        assert_eq!(
+            SettingsRepository::get_transcript_api_key(&pool, "deepgram")
+                .await
+                .unwrap(),
+            Some("secret".to_string())
+        );
     }
 }
