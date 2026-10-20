@@ -251,7 +251,20 @@ pub(crate) async fn reconcile_publications(core: &SqlitePool, feature: &SqlitePo
             write_speakers(&mut tx, &publication.meeting_id, labels.as_ref()).await?;
             tx.commit().await?;
         } else {
-            return Err(anyhow!("Enhance recovery could not match the saved transcript for {}. The recovery record was kept.", publication.meeting_id));
+            log::warn!("Enhance recovery could not match the saved transcript for {}; current transcript retained and speaker review required", publication.meeting_id);
+            let mut connection = durable_connection(feature).await?;
+            let mut tx = connection.begin().await?;
+            sqlx::query("INSERT INTO meeting_diarization_status (meeting_id, current_status, progress, failure_reason)
+                VALUES (?, 'needs_review', 0, ?)
+                ON CONFLICT(meeting_id) DO UPDATE SET current_status = 'needs_review', progress = 0,
+                    failure_reason = excluded.failure_reason, assigned_coverage = NULL,
+                    transcription_success_rate = NULL, updated_at = CURRENT_TIMESTAMP")
+                .bind(&publication.meeting_id)
+                .bind("Enhance recovery could not match the saved transcript. The current transcript was kept. Review the speaker labels or run speaker identification again.")
+                .execute(&mut *tx).await?;
+            sqlx::query("DELETE FROM enhancement_publications WHERE meeting_id = ?")
+                .bind(&publication.meeting_id).execute(&mut *tx).await?;
+            tx.commit().await?;
         }
     }
     Ok(())
@@ -694,6 +707,59 @@ mod tests {
             .fetch_all(&feature).await.unwrap();
         assert_eq!(labels, vec!["Alice", "Alice"]);
         reconcile_publications(&core, &feature).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn unmatched_recovery_keeps_current_rows_and_does_not_block_other_meetings() {
+        let (_dir, core, feature, original) = publication_fixture().await;
+        sqlx::query("INSERT INTO enhancement_publications VALUES ('m1', ?, '[]', '[]', NULL)")
+            .bind(serde_json::to_string(&original).unwrap()).execute(&feature).await.unwrap();
+        sqlx::query("UPDATE transcripts SET transcript = 'Edited after Enhance' WHERE id = 'old'")
+            .execute(&core).await.unwrap();
+        sqlx::query("INSERT INTO meeting_diarization_status (meeting_id, current_status, progress, assigned_coverage)
+            VALUES ('m1', 'completed', 100, 1)").execute(&feature).await.unwrap();
+        sqlx::query("INSERT INTO meetings(id,title,created_at,updated_at) VALUES ('m2','Other',CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)")
+            .execute(&core).await.unwrap();
+        // An independent publication must still finish after the mismatch.
+        sqlx::query("INSERT INTO enhancement_publications VALUES ('m2', '[{}]', '[]', '[]', NULL)")
+            .execute(&feature).await.unwrap();
+        for _ in 0..2 {
+            crate::diarization::finalize::reconcile_interrupted_runs(&core, &feature).await.unwrap();
+        }
+        let rows = crate::diarization::finalize::load_transcripts(&core, "m1").await.unwrap();
+        let mut expected = original;
+        expected[0].transcript = "Edited after Enhance".into();
+        assert_eq!(serde_json::to_string(&rows).unwrap(), serde_json::to_string(&expected).unwrap());
+        let status: (String, i64, Option<f64>, String) = sqlx::query_as(
+            "SELECT current_status, progress, assigned_coverage, failure_reason FROM meeting_diarization_status WHERE meeting_id = 'm1'"
+        ).fetch_one(&feature).await.unwrap();
+        assert_eq!(status.0, "needs_review");
+        assert_eq!(status.1, 0);
+        assert_eq!(status.2, None);
+        assert!(status.3.contains("current transcript was kept"));
+        let label: String = sqlx::query_scalar("SELECT speaker_label FROM transcript_speakers WHERE transcript_id = 'old'")
+            .fetch_one(&feature).await.unwrap();
+        assert_eq!(label, "Speaker 1");
+        let other_status: String = sqlx::query_scalar("SELECT current_status FROM meeting_diarization_status WHERE meeting_id = 'm2'")
+            .fetch_one(&feature).await.unwrap();
+        assert_eq!(other_status, "none");
+        let pending: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM enhancement_publications")
+            .fetch_one(&feature).await.unwrap();
+        assert_eq!(pending, 0);
+    }
+
+    #[tokio::test]
+    async fn unmatched_recovery_keeps_intent_if_review_status_cannot_be_saved() {
+        let (_dir, core, feature, _) = publication_fixture().await;
+        sqlx::query("INSERT INTO enhancement_publications VALUES ('m1', '[]', '[]', '[]', NULL)")
+            .execute(&feature).await.unwrap();
+        sqlx::query("CREATE TRIGGER fail_review BEFORE INSERT ON meeting_diarization_status
+            BEGIN SELECT RAISE(ABORT, 'test review status failure'); END")
+            .execute(&feature).await.unwrap();
+        assert!(reconcile_publications(&core, &feature).await.is_err());
+        let pending: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM enhancement_publications")
+            .fetch_one(&feature).await.unwrap();
+        assert_eq!(pending, 1);
     }
 
     #[tokio::test]
