@@ -538,11 +538,27 @@ impl EnhancementSpeakerAnalysis {
     }
 
     pub(crate) fn turn_boundaries(&self) -> Vec<f64> {
-        self.windows
-            .windows(2)
-            .filter(|pair| pair[0].speaker_id != pair[1].speaker_id)
-            .map(|pair| (pair[0].end + pair[1].start) / 2.0)
-            .collect()
+        // Windows from different tracks can cover the same audio time. Only
+        // compare consecutive windows within one track, and do not infer a
+        // turn across an ambiguous same-source overlap window.
+        let mut by_source: BTreeMap<&str, Vec<&FinalWindow>> = BTreeMap::new();
+        for window in &self.windows {
+            by_source.entry(&window.source).or_default().push(window);
+        }
+        let mut cuts = Vec::new();
+        for windows in by_source.values_mut() {
+            windows.sort_by(|a, b| a.start.total_cmp(&b.start));
+            for pair in windows.windows(2) {
+                if let (Some(before), Some(after)) = (&pair[0].speaker_id, &pair[1].speaker_id) {
+                    if before != after && pair[0].end <= pair[1].start {
+                        cuts.push((pair[0].end + pair[1].start) / 2.0);
+                    }
+                }
+            }
+        }
+        cuts.sort_by(f64::total_cmp);
+        cuts.dedup_by(|a, b| (*a - *b).abs() < 0.000001);
+        cuts
     }
 
     pub(crate) fn label(self, rows: &[Transcript]) -> Result<EnhancementSpeakerLabels> {
@@ -2036,6 +2052,43 @@ mod tests {
             .iter()
             .filter(|window| window.end <= 1.0 || window.start >= 2.0)
             .all(|window| !window.is_overlap));
+    }
+
+    fn enhancement_analysis(intervals: &[SidecarInterval]) -> EnhancementSpeakerAnalysis {
+        EnhancementSpeakerAnalysis { windows: rebuild_windows(intervals), labels: HashMap::new(), quality_flags: vec![] }
+    }
+
+    fn source_interval(source: &str, speaker: &str, start: f64, end: f64) -> SidecarInterval {
+        SidecarInterval { source: source.into(), speaker_id: speaker.into(), start, end,
+            confidence: 1.0, is_overlap: false, candidate_speaker_ids: vec![] }
+    }
+
+    #[test]
+    fn whisper_turns_ignore_cross_source_overlap() {
+        let analysis = enhancement_analysis(&[
+            source_interval("microphone", "you", 0.0, 2.0),
+            source_interval("system", "remote", 1.0, 3.0),
+        ]);
+        assert!(analysis.turn_boundaries().is_empty(), "overlap is not a turn at 1.5 seconds");
+    }
+
+    #[test]
+    fn whisper_turns_keep_real_changes_among_interleaved_sources() {
+        let analysis = enhancement_analysis(&[
+            source_interval("microphone", "you", 1.0, 5.0),
+            source_interval("system", "alice", 0.0, 3.0),
+            source_interval("system", "bob", 3.0, 6.0),
+        ]);
+        assert_eq!(analysis.turn_boundaries(), vec![3.0]);
+    }
+
+    #[test]
+    fn whisper_turns_do_not_cut_through_ambiguous_same_source_overlap() {
+        let analysis = enhancement_analysis(&[
+            source_interval("system", "alice", 0.0, 2.0),
+            source_interval("system", "bob", 1.0, 3.0),
+        ]);
+        assert!(analysis.turn_boundaries().is_empty());
     }
 
     #[test]
