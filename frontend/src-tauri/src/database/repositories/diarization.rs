@@ -174,6 +174,7 @@ impl DiarizationRepository {
              FROM transcript_speakers
              WHERE meeting_id = ?
                 AND published = 1
+                AND is_overlap = 0
                 AND speaker_id IS NOT NULL
                 AND TRIM(speaker_id) <> ''
              GROUP BY speaker_id
@@ -202,7 +203,7 @@ impl DiarizationRepository {
             "INSERT INTO meeting_speaker_colors (meeting_id, speaker_id, color)
              SELECT ?, ?, ? WHERE EXISTS (
                  SELECT 1 FROM transcript_speakers
-                 WHERE meeting_id = ? AND speaker_id = ? AND published = 1
+                 WHERE meeting_id = ? AND speaker_id = ? AND is_overlap = 0 AND published = 1
              ) ON CONFLICT(meeting_id, speaker_id) DO UPDATE SET color = excluded.color",
         )
         .bind(meeting_id)
@@ -227,7 +228,7 @@ impl DiarizationRepository {
             "UPDATE transcript_speakers
              SET speaker_label = ?, diarization_method = 'manual',
                  updated_at = CURRENT_TIMESTAMP
-             WHERE meeting_id = ? AND speaker_id = ?",
+             WHERE meeting_id = ? AND speaker_id = ? AND is_overlap = 0",
         )
         .bind(speaker_label)
         .bind(meeting_id)
@@ -238,7 +239,7 @@ impl DiarizationRepository {
         let segment_result = sqlx::query(
             "UPDATE speaker_segments
              SET speaker_label = ?, diarization_method = 'manual'
-             WHERE meeting_id = ? AND speaker_id = ?",
+             WHERE meeting_id = ? AND speaker_id = ? AND is_overlap = 0",
         )
         .bind(speaker_label)
         .bind(meeting_id)
@@ -270,7 +271,7 @@ impl DiarizationRepository {
         let mut transaction = pool.begin().await?;
         let target_color: Option<String> = sqlx::query_scalar(
             "SELECT MAX(speaker_color) FROM transcript_speakers
-             WHERE meeting_id = ? AND speaker_id = ? AND published = 1",
+             WHERE meeting_id = ? AND speaker_id = ? AND is_overlap = 0 AND published = 1",
         )
         .bind(meeting_id)
         .bind(target_speaker_id)
@@ -286,7 +287,7 @@ impl DiarizationRepository {
                     speaker_id = ?, speaker_label = ?, speaker_profile_id = NULL,
                     speaker_color = ?, diarization_method = 'manual',
                     updated_at = CURRENT_TIMESTAMP
-                 WHERE meeting_id = ? AND speaker_id = ?",
+                 WHERE meeting_id = ? AND speaker_id = ? AND is_overlap = 0",
             )
             .bind(target_speaker_id)
             .bind(target_label)
@@ -300,7 +301,7 @@ impl DiarizationRepository {
             sqlx::query(
                 "UPDATE speaker_segments SET speaker_id = ?, speaker_label = ?,
                     diarization_method = 'manual'
-                 WHERE meeting_id = ? AND speaker_id = ?",
+                 WHERE meeting_id = ? AND speaker_id = ? AND is_overlap = 0",
             )
             .bind(target_speaker_id)
             .bind(target_label)
@@ -700,6 +701,21 @@ mod tests {
         assert_eq!(speakers[1].speaker_id, "speaker-2");
         assert_eq!(speakers[1].speaker_label, "Speaker 2");
         assert_eq!(speakers[1].segment_count, 1);
+    }
+
+    #[tokio::test]
+    async fn legacy_overlap_rows_are_not_individual_speakers() {
+        let pool = speaker_test_pool().await;
+        sqlx::query("UPDATE transcript_speakers SET is_overlap = 1, speaker_id = 'multiple-speakers', speaker_label = 'Multiple speakers' WHERE transcript_id = 't-1'")
+            .execute(&pool).await.unwrap();
+        let speakers = DiarizationRepository::get_meeting_speakers(&pool, "meeting-1").await.unwrap();
+        assert!(speakers.iter().all(|speaker| speaker.speaker_id != "multiple-speakers"));
+        assert_eq!(speakers[0].segment_count, 1);
+        assert_eq!(DiarizationRepository::rename_speaker(&pool, "meeting-1", "multiple-speakers", "Alice").await.unwrap(), 0);
+        assert_eq!(DiarizationRepository::merge_speakers(&pool, "meeting-1", &["multiple-speakers".into()], "speaker-2", "Bob").await.unwrap(), 0);
+        let label: String = sqlx::query_scalar("SELECT speaker_label FROM transcript_speakers WHERE transcript_id = 't-1'")
+            .fetch_one(&pool).await.unwrap();
+        assert_eq!(label, "Multiple speakers");
     }
 
     #[tokio::test]

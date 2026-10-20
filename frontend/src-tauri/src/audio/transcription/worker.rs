@@ -152,6 +152,7 @@ fn assign_live_speaker(
     match (activity.microphone_active, activity.system_active) {
         (true, true) if activity.overlap_detected => {
             let mut assignment = base("multiple-speakers", "Multiple speakers", "mixed", true);
+            assignment.speaker_id = None;
             assignment.candidate_speaker_ids = Some(vec!["local-you".to_string()]);
             assignment
         }
@@ -896,6 +897,8 @@ fn format_recording_time(seconds: f64) -> String {
             let assignment = assign_live_speaker(Some(&activity), &[], &mut None);
             assert_eq!(assignment.speaker_label.as_deref(), Some("Multiple speakers"));
             assert_eq!(assignment.is_overlap, Some(true));
+            assert_eq!(assignment.speaker_id, None);
+            assert_eq!(assignment.candidate_speaker_ids, Some(vec!["local-you".to_string()]));
         }
 
         #[test]

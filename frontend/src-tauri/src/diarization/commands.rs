@@ -783,6 +783,15 @@ async fn apply_attribution(
     voice: Option<(Vec<f32>, f64, i64)>,
     mut voice_note: Option<String>,
 ) -> Result<AttributeSpeakerResponse, String> {
+    let exists: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM transcript_speakers
+         WHERE meeting_id = ? AND speaker_id = ? AND published = 1 AND is_overlap = 0)",
+    )
+    .bind(&request.meeting_id).bind(&request.speaker_id)
+    .fetch_one(pool).await.map_err(|error| error.to_string())?;
+    if !exists {
+        return Err("Speaker not found for meeting".into());
+    }
     let source = || SampleSource {
         meeting_id: &request.meeting_id,
         speaker_id: &request.speaker_id,
@@ -846,7 +855,7 @@ async fn apply_attribution(
     }
     for table in ["transcript_speakers", "speaker_segments"] {
         sqlx::query(&format!(
-            "UPDATE {table} SET speaker_profile_id = ? WHERE meeting_id = ? AND speaker_id = ?"
+            "UPDATE {table} SET speaker_profile_id = ? WHERE meeting_id = ? AND speaker_id = ? AND is_overlap = 0"
         ))
         .bind(&profile_id)
         .bind(&request.meeting_id)
@@ -1088,6 +1097,22 @@ fn normalize_speaker_label(label: &str) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn overlap_cannot_create_a_remembered_voice() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new().max_connections(1)
+            .connect("sqlite::memory:").await.unwrap();
+        sqlx::migrate!("./speaker-migrations").run(&pool).await.unwrap();
+        sqlx::query("INSERT INTO transcript_speakers (transcript_id, meeting_id, speaker_id, is_overlap) VALUES ('row', 'meeting', 'multiple-speakers', 1)")
+            .execute(&pool).await.unwrap();
+        let request = AttributeSpeakerRequest { meeting_id: "meeting".into(),
+            speaker_id: "multiple-speakers".into(), profile_id: None, name: Some("Alice".into()) };
+        assert!(apply_attribution(&pool, &request, "Alice".into(), None,
+            Some((vec![1.0, 0.0], 10.0, 1)), None).await.is_err());
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM speaker_profiles")
+            .fetch_one(&pool).await.unwrap();
+        assert_eq!(count, 0);
+    }
 
     #[tokio::test]
     async fn voice_storage_failures_still_apply_the_speaker_name() {
