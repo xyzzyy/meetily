@@ -721,7 +721,10 @@ fn discover_sources(folder: &Path) -> Result<(Vec<SidecarSource>, Vec<String>)> 
                 SidecarSource {
                     kind: "microphone".to_string(),
                     path: mic.to_string_lossy().into_owned(),
-                    forced_speaker_id: Some("local-you".to_string()),
+                    // A microphone can capture a room. The presence of a
+                    // system stem (which can contain only silence) does not
+                    // establish that exactly one person used the microphone.
+                    forced_speaker_id: None,
                 },
                 SidecarSource {
                     kind: "system".to_string(),
@@ -1752,6 +1755,18 @@ fn quality_flags_from_json(value: Option<&str>) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::parse_macos_version;
+
+    #[test]
+    fn microphone_stems_do_not_imply_one_local_speaker() {
+        let directory = tempfile::tempdir().unwrap();
+        let stems = directory.path().join(".diarization");
+        std::fs::create_dir(&stems).unwrap();
+        std::fs::write(stems.join("microphone.flac"), []).unwrap();
+        std::fs::write(stems.join("system.flac"), []).unwrap();
+        let (sources, _) = discover_sources(directory.path()).unwrap();
+        assert_eq!(sources.len(), 2);
+        assert!(sources.iter().all(|source| source.forced_speaker_id.is_none()));
+    }
 
     #[test]
     fn parses_macos_versions_for_the_refinement_check() {
