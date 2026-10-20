@@ -77,6 +77,12 @@ jobs:
         with:
           name: frontend-build
           path: frontend/out
+      - name: Configure the active Xcode SDK
+        run: |
+          xcodebuild -version
+          sdk_path=$(xcrun --sdk macosx --show-sdk-path)
+          test -d "$sdk_path"
+          echo "SDKROOT=$sdk_path" >> "$GITHUB_ENV"
       - name: Configure OpenSSL
         run: |
           brew list --versions openssl@3 >/dev/null || brew install openssl@3

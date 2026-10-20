@@ -12,6 +12,10 @@ The workflow has two checks:
   GitHub's `macos-latest` runner. It also compiles the Rust unit tests. Xcode
   and the Apple SDKs are already installed on the runner.
 
+The macOS job sets `SDKROOT` to the SDK from the active Xcode installation.
+This keeps the Swift compiler and the speaker helper's C++ headers on the
+same SDK when Command Line Tools are also installed.
+
 The frontend is the React and Next.js interface shown in the Tauri window.
 The frontend job exports its production files to `frontend/out`. The macOS
 job uses those files when it compiles the native app with Cargo's release
