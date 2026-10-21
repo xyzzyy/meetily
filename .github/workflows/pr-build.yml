@@ -42,7 +42,26 @@ jobs:
         working-directory: frontend
         run: pnpm install --frozen-lockfile
       - name: Run frontend tests
-        run: bash scripts/test-frontend.sh
+        working-directory: frontend
+        run: |
+          set -euo pipefail
+          test_list=$(mktemp)
+          trap 'rm -f "$test_list"' EXIT
+          if ! find tests -type f \( -name '*.test.mjs' -o -name '*.test.js' -o -name '*.test.ts' -o -name '*.test.tsx' \) -print0 > "$test_list"; then
+            echo "Failed to discover frontend tests." >&2
+            exit 1
+          fi
+          if [[ ! -s "$test_list" ]]; then
+            echo "No frontend test files found." >&2
+            exit 1
+          fi
+          while IFS= read -r -d '' test_file; do
+            if grep -q 'bun:test' "$test_file"; then
+              bun test "./$test_file"
+            else
+              node --test "$test_file"
+            fi
+          done < "$test_list"
       - name: Build frontend for production
         working-directory: frontend
         run: pnpm build

@@ -5,8 +5,9 @@
 
 The workflow has two checks:
 
-- **Frontend build and tests** installs the locked dependencies, runs each test
-  file in its own process, and builds the production frontend on Ubuntu.
+- **Frontend build and tests** installs the locked dependencies, runs the
+  existing test suite one file per process, and builds the production frontend
+  on Ubuntu.
 - **macOS release build and test compilation** builds the summary helper, the
   speaker helper when present, and the app on an Apple Silicon Mac with
   GitHub's `macos-latest` runner. It also compiles the Rust unit tests. Xcode
@@ -23,13 +24,13 @@ The frontend job exports its production files to `frontend/out`. The macOS
 job uses those files when it compiles the native app with Cargo's release
 settings.
 
-The frontend tests cover model deletion commands, setup model selection,
-transcription provider selection, summary state recovery, transcript request
-handling, language preferences, summary parsing, Markdown conversion error
-handling, the Retry action, and analytics event limits. They use simulated
+The existing frontend tests cover model deletion commands, setup model
+selection, transcription provider selection, summary state recovery,
+transcript request handling, language preferences, summary parsing, Markdown
+conversion error handling, and analytics event limits. They use simulated
 native responses. They do not record audio, run model inference, remove real
-model files, or start the desktop app. The summary parser accepts an object
-or one JSON encoding of that object. It rejects nested JSON strings.
+model files, or start the desktop app. The summary parser accepts a summary
+object or its JSON encoding and rejects malformed JSON.
 
 Rust tests are compiled but are not run by this workflow. Some existing tests
 need audio devices or system permissions. The workflow does not test Windows
@@ -41,17 +42,18 @@ publish releases or install the app. Frontend output is kept for three days
 so the native job can use it. A new commit cancels an older run for the same
 pull request.
 
-To run the frontend checks locally, install Node.js 22, pnpm 9.15.9, and
+To run the frontend build locally, install Node.js 22, pnpm 9.15.9, and
 Bun 1.3.14. Then run:
 
 ```sh
 cd frontend
 pnpm install --frozen-lockfile
-cd ..
-bash scripts/test-frontend.sh
-cd frontend
 pnpm build
 ```
+
+The test step in `.github/workflows/pr-build.yml` shows how the suite is run:
+each file gets its own process and uses either Bun or Node's test runner,
+depending on its imports.
 
 To compile the native app and tests, use the macOS job steps in the workflow.
 The frontend output and the helper binaries must be built first.
