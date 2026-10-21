@@ -196,11 +196,14 @@ export function FunAsrModelManager({
         next.delete(modelName);
         return next;
       });
-      // Some failures happen before the backend can emit an event.
-      reportDownloadError(modelName, String(error));
+      const message = error instanceof Error ? error.message : String(error);
+      const cancelled = message === 'FUN-ASR model download cancelled';
+      // The worker also rejects the command on a normal cancellation. Show
+      // actual failures even if the user requested Cancel before they occurred.
+      if (!cancelled) reportDownloadError(modelName, message);
       try { await refresh(); } catch (refreshError) {
         setModels(current => current.map(model => model.name === modelName
-          ? { ...model, status: { Error: String(error) } } : model));
+          ? { ...model, status: cancelled ? 'Missing' : { Error: message } } : model));
         console.error('Could not refresh FUN-ASR models:', refreshError);
       }
     }
@@ -208,7 +211,10 @@ export function FunAsrModelManager({
 
   const cancelDownload = async (modelName: string) => {
     try {
-      await FunAsrAPI.cancelDownload(modelName);
+      const requested = await FunAsrAPI.cancelDownload(modelName);
+      // A transfer may finish between rendering the Cancel button and clicking
+      // it. Refresh that state without claiming that a transfer was cancelled.
+      if (!requested) await refresh();
     } catch (error) {
       toast.error('Could not cancel the download', { description: String(error) });
     }

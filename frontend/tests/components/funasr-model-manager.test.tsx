@@ -48,7 +48,8 @@ const selected = mock((_name: string) => {});
 beforeEach(() => {
   available = [{ ...model }];
   invoke.mockClear(); errorToast.mockClear(); selected.mockClear(); handlers.clear(); confirm.mockClear();
-  reply = command => command === 'funasr_get_available_models' ? available : undefined;
+  reply = command => command === 'funasr_get_available_models' ? available
+    : command === 'funasr_cancel_download' ? true : undefined;
 });
 afterEach(async () => {
   if (renderer) await act(async () => renderer!.unmount());
@@ -135,4 +136,77 @@ test('offers cleanup for a completed encoder with no decoder or partial file', a
   expect(invoke).toHaveBeenCalledWith('funasr_delete_model', { modelName: 'nano-q4' });
   expect(confirm.mock.calls[0]?.[0]).toContain('unused shared FUN-ASR encoder');
   expect(renderer!.root.findAllByProps({ title: 'Delete unused encoder' })).toHaveLength(0);
+});
+
+test('a cancellation rejection without an event is not shown as a failure', async () => {
+  available = [{ ...model, status: 'Missing' }];
+  reply = command => {
+    if (command === 'funasr_download_model') {
+      available = [{ ...model, status: 'Missing', has_partial_download: true }];
+      return Promise.reject('FUN-ASR model download cancelled');
+    }
+    return command === 'funasr_get_available_models' ? available : undefined;
+  };
+  await show();
+  const download = renderer!.root.findAllByType('button').find(button => button.props.children?.[1] === 'Download')!;
+  await act(async () => { await download.props.onClick(); });
+  expect(errorToast).not.toHaveBeenCalled();
+  expect(renderer!.root.findAllByType('progress')).toHaveLength(0);
+  expect(renderer!.root.findAllByProps({ title: 'Delete partial download' }).length).toBeGreaterThan(0);
+});
+for (const eventFirst of [true, false]) {
+  test(`a cancelled event and rejection do not show a failure (event first: ${eventFirst})`, async () => {
+    available = [{ ...model, status: 'Missing' }];
+    let rejectDownload: (error: unknown) => void = () => {};
+    const pending = new Promise<void>((_resolve, reject) => { rejectDownload = reject; });
+    reply = command => command === 'funasr_download_model' ? pending
+      : command === 'funasr_get_available_models' ? available : undefined;
+    await show();
+    const button = renderer!.root.findAllByType('button').find(button => button.props.children?.[1] === 'Download')!;
+    let download: Promise<void>;
+    await act(async () => { download = button.props.onClick(); });
+    available = [{ ...model, status: 'Missing', has_partial_download: true }];
+    const event = () => handlers.get('funasr-model-download-error')!({ payload: {
+      modelName: model.name, error: 'FUN-ASR model download cancelled', status: 'cancelled',
+    } });
+    await act(async () => {
+      if (eventFirst) event();
+      rejectDownload(new Error('FUN-ASR model download cancelled'));
+      await download!;
+      if (!eventFirst) event();
+    });
+    expect(errorToast).not.toHaveBeenCalled();
+    expect(renderer!.root.findAllByType('progress')).toHaveLength(0);
+  });
+}
+test('a no-op cancel refreshes the finished transfer instead of claiming cancellation', async () => {
+  available = [{ ...model, status: { Downloading: { progress: 99 } } }];
+  reply = command => {
+    if (command === 'funasr_cancel_download') {
+      available = [{ ...model }];
+      return false;
+    }
+    return command === 'funasr_get_available_models' ? available : undefined;
+  };
+  await show();
+  await click('Cancel download');
+  expect(errorToast).not.toHaveBeenCalled();
+  expect(renderer!.root.findAllByType('progress')).toHaveLength(0);
+  expect(renderer!.root.findAllByProps({ title: 'Delete model' }).length).toBeGreaterThan(0);
+});
+test('an actual failure after requesting Cancel is still reported', async () => {
+  available = [{ ...model, status: 'Missing' }];
+  let rejectDownload: (error: unknown) => void = () => {};
+  const pending = new Promise<void>((_resolve, reject) => { rejectDownload = reject; });
+  reply = command => command === 'funasr_download_model' ? pending
+    : command === 'funasr_get_available_models' ? available
+      : command === 'funasr_cancel_download' ? true : undefined;
+  await show();
+  const button = renderer!.root.findAllByType('button').find(button => button.props.children?.[1] === 'Download')!;
+  let download: Promise<void>;
+  await act(async () => { download = button.props.onClick(); });
+  await click('Cancel download');
+  expect(renderer!.root.findAllByType('progress')).toHaveLength(1);
+  await act(async () => { rejectDownload('Checksum mismatch'); await download!; });
+  expect(errorToast.mock.calls.length).toBe(1);
 });

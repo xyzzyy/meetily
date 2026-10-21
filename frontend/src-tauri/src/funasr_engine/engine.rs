@@ -801,6 +801,7 @@ mod tests {
         let mut engine = FunAsrEngine::new(owned.path().to_path_buf(), None).unwrap();
         engine.download_base_url = Some(format!("http://{address}"));
         let engine = Arc::new(engine);
+        assert!(!engine.cancel_download(MODELS[0].id).await);
         let (sent, mut received) = tokio::sync::mpsc::unbounded_channel();
         let download_engine = engine.clone();
         let download = tokio::spawn(async move {
@@ -841,6 +842,8 @@ mod tests {
             engine.discover_models().await[0].status,
             ModelStatus::Missing
         ));
+        // The worker has now stopped; another Cancel must report no active transfer.
+        assert!(!engine.cancel_download(MODELS[0].id).await);
         engine.delete_model(MODELS[0].id).await.unwrap();
         assert!(!partial_path(&owned.path().join(encoder_relative_path())).exists());
         server.abort();

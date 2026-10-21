@@ -216,26 +216,11 @@ pub async fn funasr_download_model<R: Runtime>(
     result
 }
 
+/// True means an active worker received the cancellation request; false means
+/// no transfer was active. Only the worker emits its terminal download event.
 #[tauri::command]
-pub async fn funasr_cancel_download<R: Runtime>(
-    app: AppHandle<R>,
-    model_name: String,
-) -> Result<(), String> {
-    engine()?.cancel_download(&model_name).await;
-    app.emit(
-        "funasr-model-download-progress",
-        serde_json::json!({
-            "modelName": model_name,
-            "phase": "cancelled",
-            "progress": 0,
-            "downloaded_bytes": 0,
-            "total_bytes": 0,
-            "status": "cancelled",
-            "cancelled": true
-        }),
-    )
-    .ok();
-    Ok(())
+pub async fn funasr_cancel_download(model_name: String) -> Result<bool, String> {
+    Ok(engine()?.cancel_download(&model_name).await)
 }
 
 #[tauri::command]

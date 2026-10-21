@@ -43,7 +43,8 @@ export class FunAsrAPI {
     return invoke('funasr_download_model', { modelName });
   }
 
-  static cancelDownload(modelName: string): Promise<void> {
+  /** True: cancellation requested. False: no active download. */
+  static cancelDownload(modelName: string): Promise<boolean> {
     return invoke('funasr_cancel_download', { modelName });
   }
 
