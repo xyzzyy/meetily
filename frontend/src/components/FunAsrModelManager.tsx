@@ -265,6 +265,7 @@ export function FunAsrModelManager({
           <div className="mt-2 flex items-center justify-between gap-2">
             <span>No model uses this encoder. You can delete it to free disk space.</span>
             <Button variant="outline" size="sm" title="Delete unused encoder"
+              className="hover:text-red-600 transition-colors"
               onClick={() => deleteModel(models.find(model => model.has_orphaned_encoder)!)}>
               <Trash2 className="mr-1 h-4 w-4" />
               Delete unused encoder
@@ -327,6 +328,7 @@ export function FunAsrModelManager({
                   variant="ghost"
                   size="icon"
                   onClick={() => deleteModel(model)}
+                  className="text-gray-400 hover:text-red-600 transition-colors"
                   disabled={selectedModel === model.name || savingModel !== null}
                   title={
                     selectedModel === model.name
@@ -352,7 +354,8 @@ export function FunAsrModelManager({
                     {model.has_partial_download ? 'Resume' : 'Download'}
                   </Button>
                   {model.has_partial_download && (
-                    <Button variant="ghost" size="icon" onClick={() => deleteModel(model)} title="Delete partial download">
+                    <Button variant="ghost" size="icon" onClick={() => deleteModel(model)} title="Delete partial download"
+                      className="text-gray-400 hover:text-red-600 transition-colors">
                       <Trash2 className="h-4 w-4" />
                     </Button>
                   )}
