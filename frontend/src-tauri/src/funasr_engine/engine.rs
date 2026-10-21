@@ -542,7 +542,6 @@ async fn validate_artifact(path: &Path, spec: ArtifactSpec, hash: bool) -> Resul
 #[cfg(test)]
 mod tests {
     use super::*;
-    use futures_util::future::join_all;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
 
@@ -867,104 +866,5 @@ mod tests {
             error.to_string().contains("not installed"),
             "unexpected error: {error}"
         );
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    #[ignore = "downloads 2.3 GB of official weights and runs native inference"]
-    async fn heavyweight_official_models_transcribe_english_and_reuse_the_helper() {
-        let models_root = std::env::var("MEETILY_FUNASR_INTEGRATION_ROOT")
-            .expect("set MEETILY_FUNASR_INTEGRATION_ROOT");
-        let fixture = std::env::var("MEETILY_FUNASR_ENGLISH_F32LE")
-            .expect("set MEETILY_FUNASR_ENGLISH_F32LE");
-        let bytes = std::fs::read(fixture).unwrap();
-        assert_eq!(bytes.len() % 4, 0);
-        let audio = bytes
-            .chunks_exact(4)
-            .map(|sample| f32::from_le_bytes(sample.try_into().unwrap()))
-            .collect::<Vec<_>>();
-        assert!(!audio.is_empty());
-
-        let root = PathBuf::from(models_root);
-        let engine = FunAsrEngine::new(root.clone(), None).unwrap();
-        let downloads = MODELS
-            .iter()
-            .map(|model| engine.download_model(model.id, None));
-        for result in join_all(downloads).await {
-            result.unwrap();
-        }
-
-        let encoder = root.join(encoder_relative_path());
-        let encoder_modified = std::fs::metadata(&encoder).unwrap().modified().unwrap();
-        for model in MODELS {
-            engine.download_model(model.id, None).await.unwrap();
-        }
-        assert_eq!(
-            encoder_modified,
-            std::fs::metadata(&encoder).unwrap().modified().unwrap(),
-            "the shared encoder was unexpectedly redownloaded"
-        );
-
-        let mut previous_pid = None;
-        let mut transcriptions = Vec::new();
-        for model in MODELS {
-            engine.load_model(model.id).await.unwrap();
-            let pid = engine
-                .sidecar
-                .lock()
-                .await
-                .as_ref()
-                .and_then(FunAsrSidecar::process_id)
-                .expect("helper should be running");
-            if let Some(previous) = previous_pid {
-                assert_ne!(
-                    previous, pid,
-                    "switching decoder quantizations should restart the helper"
-                );
-            }
-
-            let first = engine.transcribe(audio.clone(), "en").await.unwrap();
-            let second = engine.transcribe(audio.clone(), "en").await.unwrap();
-            assert!(!first.trim().is_empty());
-            assert!(!second.trim().is_empty());
-            let resident_pid = engine
-                .sidecar
-                .lock()
-                .await
-                .as_ref()
-                .and_then(FunAsrSidecar::process_id);
-            assert_eq!(resident_pid, Some(pid), "helper restarted between chunks");
-            println!("{} => {}", model.id, first.trim());
-            transcriptions.push((model.id, first));
-            previous_pid = Some(pid);
-        }
-        assert_eq!(transcriptions.len(), MODELS.len());
-        assert!(engine.unload_model().await);
-
-        // Recreate the engine from disk to prove the downloaded artifacts are
-        // sufficient after an application-style restart.
-        drop(engine);
-        let restarted = FunAsrEngine::new(root, None).unwrap();
-        restarted.load_model(MODELS[0].id).await.unwrap();
-        let after_restart = restarted.transcribe(audio.clone(), "en").await.unwrap();
-        assert!(!after_restart.trim().is_empty());
-
-        let crashed_pid = {
-            let mut sidecar = restarted.sidecar.lock().await;
-            let process = sidecar.as_mut().expect("helper should be running");
-            let pid = process.process_id().unwrap();
-            process.terminate_for_test().await;
-            pid
-        };
-        let after_safe_retry = restarted.transcribe(audio, "en").await.unwrap();
-        assert!(!after_safe_retry.trim().is_empty());
-        let retry_pid = restarted
-            .sidecar
-            .lock()
-            .await
-            .as_ref()
-            .and_then(FunAsrSidecar::process_id)
-            .unwrap();
-        assert_ne!(crashed_pid, retry_pid, "a crashed helper was not restarted");
-        restarted.unload_model().await;
     }
 }

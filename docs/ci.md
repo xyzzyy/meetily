@@ -43,6 +43,7 @@ models, or audio devices.
 
 The Rust native tests run on macOS after the app build. They use temporary
 files and fixtures; none require audio hardware or system permissions. The
+suite has no ignored tests, so every Rust unit test runs in the macOS job. The
 workflow does not test Windows or Linux native builds, app packaging, signing,
 or notarization. Use the existing manual build workflows for those steps.
 

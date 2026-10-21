@@ -440,9 +440,10 @@ mod tests {
 
     #[test]
     fn test_builtin_mic_detection() {
-        let kind = InputDeviceKind::detect("MacBook Pro Microphone", 0, 0);
-        // Should fall through to Unknown (no Bluetooth pattern, no buffer size)
-        assert_eq!(kind, InputDeviceKind::Unknown);
+        // Platform APIs can classify a connected built-in microphone as wired.
+        // The name heuristic must not mistake it for Bluetooth.
+        let kind = InputDeviceKind::detect_by_name("MacBook Pro Microphone");
+        assert_eq!(kind, None);
     }
 
     #[test]

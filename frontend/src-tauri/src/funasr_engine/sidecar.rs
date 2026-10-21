@@ -121,11 +121,6 @@ impl FunAsrSidecar {
     }
 
     #[cfg(test)]
-    pub(super) fn process_id(&self) -> Option<u32> {
-        self.child.id()
-    }
-
-    #[cfg(test)]
     pub(super) async fn terminate_for_test(&mut self) {
         let _ = self.child.kill().await;
         let _ = self.child.wait().await;
