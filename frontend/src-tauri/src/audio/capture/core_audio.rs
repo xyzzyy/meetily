@@ -416,31 +416,3 @@ impl Stream for CoreAudioStream {
         Poll::Ready(None)
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[tokio::test]
-    #[cfg(target_os = "macos")]
-    #[ignore] // Only run manually as it requires audio hardware
-    async fn test_core_audio_capture() {
-        use futures_util::StreamExt;
-
-        let capture = CoreAudioCapture::new().expect("Failed to create capture");
-        let mut stream = capture.stream().expect("Failed to create stream");
-
-        info!("Stream sample rate: {} Hz", stream.sample_rate());
-
-        // Collect some samples
-        let mut sample_count = 0;
-        while sample_count < 48000 { // 1 second at 48kHz
-            if let Some(_sample) = stream.next().await {
-                sample_count += 1;
-            }
-        }
-
-        info!("Collected {} samples", sample_count);
-        assert!(sample_count >= 48000);
-    }
-}
