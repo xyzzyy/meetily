@@ -1,7 +1,7 @@
 // Meetily's persistent Fun-ASR-Nano helper on the llama.cpp / ggml stack.
 //
 //   wav(16k mono) -> kaldi fbank -> SAN-M encoder + adaptor (ggml) ->
-//   low-frame-rate truncation -> [prefix tokens | audio embeds | suffix tokens]
+//   low-frame-rate audio embeds -> [prefix tokens | audio embeds | suffix tokens]
 //   -> Qwen3 LLM (llama.cpp) -> transcription.
 //
 // This is the whisper.cpp-style native path: no Python at runtime.
@@ -13,6 +13,7 @@
 #include "ggml-backend.h"
 #include "gguf.h"
 #include "llama.h"
+#include "audio_embeddings.h"
 
 #include <cmath>
 #include <cstdint>
@@ -304,9 +305,8 @@ struct runtime {
         auto fbank = compute_fbank(audio, frames);
         int embedding_size = 0;
         auto embeddings = run_encoder(encoder, fbank, frames, 560, embedding_size);
-        int output_length = 1 + (frames - 3 + 2) / 2;
-        output_length = 1 + (output_length - 3 + 2) / 2;
-        int audio_tokens = (output_length - 1) / 2 + 1;
+        const int audio_tokens = funasr_audio_tokens(
+            frames, embeddings.size(), embedding_size, llama_model_n_embd(model));
 
         llama_memory_clear(llama_get_memory(context), true);
         llama_sampler_reset(sampler);

@@ -124,6 +124,10 @@ jobs:
       - name: Build the local speaker helper
         if: ${{ hashFiles('frontend/scripts/build-diarization-sidecar.js') != '' }}
         run: node frontend/scripts/build-diarization-sidecar.js
+      - name: Test FUN-ASR embedding lengths
+        run: |
+          c++ -std=c++17 funasr-helper/tests/audio_embeddings.cpp -o "$RUNNER_TEMP/funasr-embedding-tests"
+          "$RUNNER_TEMP/funasr-embedding-tests"
       - name: Build the FUN-ASR helper
         run: node frontend/scripts/build-funasr-sidecar.js
       - name: Run diarization interval tests

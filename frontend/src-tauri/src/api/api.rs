@@ -680,12 +680,8 @@ pub async fn api_get_transcript_config<R: Runtime>(
             }
         }
         Ok(None) => {
-            log_info!("No transcript config found, returning default.");
-            Ok(Some(TranscriptConfig {
-                provider: "parakeet".to_string(),
-                model: crate::config::DEFAULT_PARAKEET_MODEL.to_string(),
-                api_key: None,
-            }))
+            log_info!("No transcript model has been selected.");
+            Ok(None)
         }
         Err(e) => {
             log_error!("Failed to get transcript config: {}", e);
@@ -707,6 +703,9 @@ pub async fn api_save_transcript_config<R: Runtime>(
         "api_save_transcript_config called (native) for provider '{}'",
         &provider
     );
+    if provider.trim().is_empty() || model.trim().is_empty() {
+        return Err("Select a transcription provider and model before saving.".to_string());
+    }
     let pool = state.db_manager.pool();
 
     if let Err(e) = SettingsRepository::save_transcript_config(pool, &provider, &model).await {

@@ -8,7 +8,10 @@ use futures_util::StreamExt;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicU8, Ordering},
+    Arc,
+};
 use std::time::Instant;
 use tokio::fs::{self, OpenOptions};
 use tokio::io::AsyncWriteExt;
@@ -20,6 +23,15 @@ const DOWNLOAD_STALL_TIMEOUT: std::time::Duration = std::time::Duration::from_se
 
 pub type ProgressCallback = Arc<dyn Fn(DownloadProgress) + Send + Sync>;
 
+struct ActiveDownload {
+    token: CancellationToken,
+    progress: Arc<AtomicU8>,
+}
+
+fn partial_path(path: &Path) -> PathBuf {
+    path.with_extension("gguf.part")
+}
+
 pub struct FunAsrEngine {
     owned_models_root: PathBuf,
     official_models_root: Option<PathBuf>,
@@ -27,7 +39,7 @@ pub struct FunAsrEngine {
     current_model: RwLock<Option<String>>,
     sidecar: Mutex<Option<FunAsrSidecar>>,
     model_lifecycle_lock: Mutex<()>,
-    cancellation_tokens: Mutex<HashMap<String, CancellationToken>>,
+    cancellation_tokens: Mutex<HashMap<String, ActiveDownload>>,
     encoder_download_lock: Mutex<()>,
     decoder_download_locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
 }
@@ -46,6 +58,20 @@ impl FunAsrEngine {
             encoder_download_lock: Mutex::new(()),
             decoder_download_locks: Mutex::new(HashMap::new()),
         })
+    }
+
+    /// A separate inference session shares model files, not model state or a helper.
+    pub(crate) fn new_session(&self) -> Result<Self> {
+        Self::new(
+            self.owned_models_root.clone(),
+            self.official_models_root.clone(),
+        )
+    }
+
+    pub async fn load_selected_model(&self, model_id: &str) -> Result<()> {
+        self.load_model(model_id).await.map_err(|error| anyhow!(
+            "Could not load selected FUN-ASR model '{model_id}': {error}. Download this model or select another model in Settings."
+        ))
     }
 
     fn download_url(&self, artifact: ArtifactSpec) -> String {
@@ -83,10 +109,37 @@ impl FunAsrEngine {
         Ok(self.resolve_for_read(&decoder_relative_path(spec)))
     }
 
+    /// A completed branch encoder can outlive its last decoder if deletion
+    /// overlaps another download. Keep it reachable for cleanup, but never
+    /// treat an official encoder or one needed by a decoder as an orphan.
+    fn has_orphaned_encoder_files(&self) -> bool {
+        self.owned_models_root
+            .join(encoder_relative_path())
+            .is_file()
+            && !MODELS.iter().any(|spec| {
+                self.resolve_for_read(&decoder_relative_path(spec))
+                    .is_file()
+                    || partial_path(&self.owned_models_root.join(decoder_relative_path(spec)))
+                        .is_file()
+            })
+    }
+
     pub async fn discover_models(&self) -> Vec<ModelInfo> {
         let encoder_ready = validate_artifact(&self.encoder_path(), ENCODER, false)
             .await
             .is_ok();
+        let active: HashMap<String, u8> = self
+            .cancellation_tokens
+            .lock()
+            .await
+            .iter()
+            .map(|(name, download)| (name.clone(), download.progress.load(Ordering::Relaxed)))
+            .collect();
+        let encoder_partial =
+            partial_path(&self.owned_models_root.join(encoder_relative_path())).is_file();
+        let has_orphaned_encoder = active.is_empty()
+            && self.get_current_model().await.is_none()
+            && self.has_orphaned_encoder_files();
         let mut models = Vec::with_capacity(MODELS.len());
         for spec in MODELS {
             let decoder_path = self.resolve_for_read(&decoder_relative_path(spec));
@@ -98,12 +151,20 @@ impl FunAsrEngine {
                 display_name: spec.display_name.to_string(),
                 path: decoder_path,
                 encoder_available: encoder_ready,
+                has_orphaned_encoder,
+                has_partial_download: encoder_partial
+                    || partial_path(&self.owned_models_root.join(decoder_relative_path(spec)))
+                        .is_file(),
                 size_mb: (ENCODER.size + spec.decoder.size) / 1_000_000,
                 decoder_size_mb: spec.decoder.size / 1_000_000,
                 encoder_size_mb: ENCODER.size / 1_000_000,
                 description: spec.description.to_string(),
                 recommended: spec.id == super::model::DEFAULT_FUNASR_MODEL,
-                status: if encoder_ready && decoder_ready {
+                status: if let Some(progress) = active.get(spec.id) {
+                    ModelStatus::Downloading {
+                        progress: *progress,
+                    }
+                } else if encoder_ready && decoder_ready {
                     ModelStatus::Available
                 } else {
                     ModelStatus::Missing
@@ -192,7 +253,9 @@ impl FunAsrEngine {
             // If its reply stream is out of step, every later request would
             // misread leftover bytes, so restart the helper for the next one.
             if !first_error.stream_in_sync {
-                log::warn!("FUN-ASR helper reply stream is out of step; restarting it: {first_error}");
+                log::warn!(
+                    "FUN-ASR helper reply stream is out of step; restarting it: {first_error}"
+                );
                 self.unload_model().await;
                 if let Err(error) = self.load_model(&model_id).await {
                     log::error!("Failed to restart the FUN-ASR helper: {error}");
@@ -223,6 +286,14 @@ impl FunAsrEngine {
         let spec =
             *model_spec(model_id).ok_or_else(|| anyhow!("Unknown FUN-ASR model: {model_id}"))?;
         let token = CancellationToken::new();
+        let latest_progress = Arc::new(AtomicU8::new(0));
+        let callback_progress = latest_progress.clone();
+        let callback: ProgressCallback = Arc::new(move |update| {
+            callback_progress.store(update.percent, Ordering::Relaxed);
+            if let Some(callback) = &progress {
+                callback(update);
+            }
+        });
         {
             let mut tokens = self.cancellation_tokens.lock().await;
             if tokens.contains_key(model_id) {
@@ -230,7 +301,13 @@ impl FunAsrEngine {
                     "A download for FUN-ASR model '{model_id}' is already in progress"
                 ));
             }
-            tokens.insert(model_id.to_string(), token.clone());
+            tokens.insert(
+                model_id.to_string(),
+                ActiveDownload {
+                    token: token.clone(),
+                    progress: latest_progress,
+                },
+            );
         }
 
         let decoder_lock = {
@@ -281,7 +358,7 @@ impl FunAsrEngine {
                         total_bytes,
                         downloaded.clone(),
                         started,
-                        progress.clone(),
+                        Some(callback.clone()),
                     )
                     .await?;
                 } else {
@@ -301,7 +378,7 @@ impl FunAsrEngine {
                     total_bytes,
                     downloaded.clone(),
                     started,
-                    progress.clone(),
+                    Some(callback.clone()),
                 )
                 .await?;
             }
@@ -335,13 +412,7 @@ impl FunAsrEngine {
             // never has to replace an existing destination.
             fs::remove_file(destination).await?;
         }
-        let part = destination.with_extension(format!(
-            "{}.part",
-            destination
-                .extension()
-                .and_then(|value| value.to_str())
-                .unwrap_or("gguf")
-        ));
+        let part = partial_path(destination);
         let mut resume_at = fs::metadata(&part)
             .await
             .map(|metadata| metadata.len())
@@ -440,8 +511,8 @@ impl FunAsrEngine {
     }
 
     pub async fn cancel_download(&self, model_id: &str) -> bool {
-        if let Some(token) = self.cancellation_tokens.lock().await.get(model_id) {
-            token.cancel();
+        if let Some(download) = self.cancellation_tokens.lock().await.get(model_id) {
+            download.token.cancel();
             true
         } else {
             false
@@ -451,6 +522,11 @@ impl FunAsrEngine {
     pub async fn delete_model(&self, model_id: &str) -> Result<()> {
         let spec =
             model_spec(model_id).ok_or_else(|| anyhow!("Unknown FUN-ASR model: {model_id}"))?;
+        if self.cancellation_tokens.lock().await.contains_key(model_id) {
+            return Err(anyhow!(
+                "Cancel the download and wait for it to stop before deleting its files."
+            ));
+        }
         let decoder_lock = {
             let mut locks = self.decoder_download_locks.lock().await;
             locks
@@ -459,10 +535,39 @@ impl FunAsrEngine {
                 .clone()
         };
         let _decoder_guard = decoder_lock.lock().await;
+        if self.cancellation_tokens.lock().await.contains_key(model_id) {
+            return Err(anyhow!(
+                "Cancel the download and wait for it to stop before deleting its files."
+            ));
+        }
+        // All deletion paths are branch-owned, including partial artifacts.
         let decoder = self.owned_models_root.join(decoder_relative_path(spec));
-        if !decoder.is_file() {
-            // Official models are exposed read-only; a delete that removed
-            // nothing must not look successful to the user.
+        let decoder_partial = partial_path(&decoder);
+        let encoder = self.owned_models_root.join(encoder_relative_path());
+        let encoder_partial = partial_path(&encoder);
+        let encoder_only_cleanup =
+            !decoder.is_file() && !decoder_partial.is_file() && !encoder_partial.is_file();
+        if encoder_only_cleanup {
+            // Recheck under both locks before removing an encoder-only orphan.
+            // A new download must not register until cleanup has finished.
+            if self.has_orphaned_encoder_files() {
+                let _encoder_guard = self.encoder_download_lock.try_lock().map_err(|_| {
+                    anyhow!("The shared encoder is in use. Try cleanup after the download stops.")
+                })?;
+                let downloads = self.cancellation_tokens.lock().await;
+                let _lifecycle_guard = self.model_lifecycle_lock.try_lock().map_err(|_| {
+                    anyhow!("The shared encoder is in use. Try cleanup after the model stops.")
+                })?;
+                if !downloads.is_empty()
+                    || self.current_model.read().await.is_some()
+                    || !self.has_orphaned_encoder_files()
+                {
+                    return Err(anyhow!("The shared encoder is in use. Try cleanup after the model or download stops."));
+                }
+                fs::remove_file(&encoder).await?;
+                return Ok(());
+            }
+
             let official_decoder = self
                 .official_models_root
                 .as_ref()
@@ -481,17 +586,30 @@ impl FunAsrEngine {
         if self.current_model.read().await.as_deref() == Some(model_id) {
             self.unload_model().await;
         }
-        fs::remove_file(&decoder).await?;
-        let _encoder_guard = self.encoder_download_lock.lock().await;
-        let decoder_dir = self.owned_models_root.join(MODEL_DIR).join("decoders");
-        let any_owned_decoder = MODELS
-            .iter()
-            .any(|candidate| decoder_dir.join(candidate.decoder.filename).is_file());
-        let any_active_download = !self.cancellation_tokens.lock().await.is_empty();
-        if !any_owned_decoder && !any_active_download {
-            let encoder = self.owned_models_root.join(encoder_relative_path());
-            if encoder.is_file() {
-                fs::remove_file(encoder).await?;
+        for file in [&decoder, &decoder_partial] {
+            if file.is_file() {
+                fs::remove_file(file).await?;
+            }
+        }
+        // A different model can be downloading the shared encoder. Leave it
+        // alone rather than wait for that transfer to finish.
+        let Ok(_encoder_guard) = self.encoder_download_lock.try_lock() else {
+            return Ok(());
+        };
+        let any_owned_decoder = MODELS.iter().any(|candidate| {
+            let path = self
+                .owned_models_root
+                .join(decoder_relative_path(candidate));
+            path.is_file() || partial_path(&path).is_file()
+        });
+        // Hold the registration lock until removal finishes. A new download
+        // must see the resulting file state when it decides what to fetch.
+        let downloads = self.cancellation_tokens.lock().await;
+        if !any_owned_decoder && downloads.is_empty() {
+            for file in [&encoder, &encoder_partial] {
+                if file.is_file() {
+                    fs::remove_file(file).await?;
+                }
             }
         }
         Ok(())
@@ -620,6 +738,283 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_missing_selected_model_does_not_load_an_installed_variant() {
+        let owned = tempfile::tempdir().unwrap();
+        let engine = FunAsrEngine::new(owned.path().to_path_buf(), None).unwrap();
+        // Sparse GGUF fixtures pass discovery without downloading real models.
+        for (path, size) in [
+            (owned.path().join(encoder_relative_path()), ENCODER.size),
+            (
+                owned.path().join(decoder_relative_path(&MODELS[1])),
+                MODELS[1].decoder.size,
+            ),
+        ] {
+            write_file(&path, b"GGUF");
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(path)
+                .unwrap()
+                .set_len(size)
+                .unwrap();
+        }
+        assert!(matches!(
+            engine.discover_models().await[1].status,
+            ModelStatus::Available
+        ));
+        let error = engine.load_selected_model(MODELS[0].id).await.unwrap_err();
+        assert!(error.to_string().contains(MODELS[0].id));
+        assert_eq!(engine.get_current_model().await, None);
+    }
+
+    #[tokio::test]
+    async fn batch_session_model_changes_and_cleanup_do_not_change_the_recording_session() {
+        let owned = tempfile::tempdir().unwrap();
+        let recording = FunAsrEngine::new(owned.path().to_path_buf(), None).unwrap();
+        *recording.current_model.write().await = Some(MODELS[0].id.to_string());
+        let batch = recording.new_session().unwrap();
+        assert_eq!(batch.get_current_model().await, None);
+        *batch.current_model.write().await = Some(MODELS[1].id.to_string());
+        batch.unload_model().await;
+        assert_eq!(
+            recording.get_current_model().await.as_deref(),
+            Some(MODELS[0].id)
+        );
+        assert_eq!(batch.owned_directory(), recording.owned_directory());
+    }
+
+    #[tokio::test]
+    async fn discovery_keeps_an_active_download_visible_and_cancelled_files_can_be_deleted() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0u8; 4096];
+            socket.read(&mut request).await.unwrap();
+            socket
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 469331008\r\n\r\nGGUF")
+                .await
+                .unwrap();
+            std::future::pending::<()>().await;
+            drop(socket);
+        });
+        let owned = tempfile::tempdir().unwrap();
+        let mut engine = FunAsrEngine::new(owned.path().to_path_buf(), None).unwrap();
+        engine.download_base_url = Some(format!("http://{address}"));
+        let engine = Arc::new(engine);
+        assert!(!engine.cancel_download(MODELS[0].id).await);
+        let (sent, mut received) = tokio::sync::mpsc::unbounded_channel();
+        let download_engine = engine.clone();
+        let download = tokio::spawn(async move {
+            download_engine
+                .download_model(
+                    MODELS[0].id,
+                    Some(Arc::new(move |progress| {
+                        sent.send(progress).unwrap();
+                    })),
+                )
+                .await
+        });
+        let progress = tokio::time::timeout(std::time::Duration::from_secs(5), received.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let models = engine.discover_models().await;
+        assert!(
+            matches!(models[0].status, ModelStatus::Downloading { progress: p } if p == progress.percent)
+        );
+        assert!(models[0].has_partial_download);
+        // Deletion must not wait forever on an active download.
+        let delete = tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            engine.delete_model(MODELS[0].id),
+        )
+        .await;
+        assert!(delete.is_ok(), "delete waited for an active transfer");
+        assert!(delete.unwrap().unwrap_err().to_string().contains("Cancel"));
+        assert!(engine.cancel_download(MODELS[0].id).await);
+        assert!(download
+            .await
+            .unwrap()
+            .unwrap_err()
+            .to_string()
+            .contains("cancelled"));
+        assert!(matches!(
+            engine.discover_models().await[0].status,
+            ModelStatus::Missing
+        ));
+        // The worker has now stopped; another Cancel must report no active transfer.
+        assert!(!engine.cancel_download(MODELS[0].id).await);
+        engine.delete_model(MODELS[0].id).await.unwrap();
+        assert!(!partial_path(&owned.path().join(encoder_relative_path())).exists());
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn partial_cleanup_keeps_files_needed_by_other_variants_and_never_changes_official_files()
+    {
+        let owned = tempfile::tempdir().unwrap();
+        let official = tempfile::tempdir().unwrap();
+        let engine = FunAsrEngine::new(
+            owned.path().to_path_buf(),
+            Some(official.path().to_path_buf()),
+        )
+        .unwrap();
+        let encoder = partial_path(&owned.path().join(encoder_relative_path()));
+        let first = partial_path(&owned.path().join(decoder_relative_path(&MODELS[0])));
+        let second = partial_path(&owned.path().join(decoder_relative_path(&MODELS[1])));
+        let official_decoder = official.path().join(decoder_relative_path(&MODELS[0]));
+        write_file(&encoder, b"encoder part");
+        write_file(&first, b"first part");
+        write_file(&second, b"second part");
+        write_file(&official_decoder, b"official");
+        engine.delete_model(MODELS[0].id).await.unwrap();
+        assert!(!first.exists());
+        assert!(second.is_file());
+        assert!(encoder.is_file());
+        engine.delete_model(MODELS[1].id).await.unwrap();
+        assert!(!second.exists());
+        assert!(!encoder.exists());
+        assert_eq!(std::fs::read(&official_decoder).unwrap(), b"official");
+    }
+
+    #[tokio::test]
+    async fn encoder_left_after_a_failed_concurrent_download_is_discoverable_and_deletable() {
+        let owned = tempfile::tempdir().unwrap();
+        let engine = FunAsrEngine::new(owned.path().to_path_buf(), None).unwrap();
+        let encoder = owned.path().join(encoder_relative_path());
+        write_file(&encoder, b"GGUF");
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&encoder)
+            .unwrap()
+            .set_len(ENCODER.size)
+            .unwrap();
+        let decoder = owned.path().join(decoder_relative_path(&MODELS[0]));
+        write_file(&decoder, b"decoder");
+        let encoder_guard = engine.encoder_download_lock.lock().await;
+        engine.cancellation_tokens.lock().await.insert(
+            MODELS[1].id.to_string(),
+            ActiveDownload {
+                token: CancellationToken::new(),
+                progress: Arc::new(AtomicU8::new(0)),
+            },
+        );
+        engine.delete_model(MODELS[0].id).await.unwrap();
+        assert!(!decoder.exists());
+        assert!(encoder.is_file());
+        assert!(engine
+            .discover_models()
+            .await
+            .iter()
+            .all(|model| !model.has_orphaned_encoder));
+        // The second transfer fails without creating a decoder or partial file.
+        drop(encoder_guard);
+        engine.cancellation_tokens.lock().await.remove(MODELS[1].id);
+        let models = engine.discover_models().await;
+        assert!(models
+            .iter()
+            .all(|model| matches!(model.status, ModelStatus::Missing)
+                && model.has_orphaned_encoder
+                && !model.has_partial_download
+                && model.encoder_available));
+        engine.delete_model(MODELS[0].id).await.unwrap();
+        assert!(!encoder.exists());
+        assert!(engine
+            .discover_models()
+            .await
+            .iter()
+            .all(|model| !model.has_orphaned_encoder));
+    }
+
+    #[tokio::test]
+    async fn encoder_only_cleanup_is_blocked_if_a_download_or_loaded_model_needs_it() {
+        let owned = tempfile::tempdir().unwrap();
+        let engine = FunAsrEngine::new(owned.path().to_path_buf(), None).unwrap();
+        let encoder = owned.path().join(encoder_relative_path());
+        write_file(&encoder, b"encoder");
+        engine.cancellation_tokens.lock().await.insert(
+            MODELS[1].id.to_string(),
+            ActiveDownload {
+                token: CancellationToken::new(),
+                progress: Arc::new(AtomicU8::new(0)),
+            },
+        );
+        assert!(engine
+            .delete_model(MODELS[0].id)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("in use"));
+        assert!(encoder.is_file());
+        engine.cancellation_tokens.lock().await.clear();
+        let model_guard = engine.model_lifecycle_lock.lock().await;
+        let result = tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            engine.delete_model(MODELS[0].id),
+        )
+        .await
+        .expect("cleanup waited for a model operation");
+        assert!(result.unwrap_err().to_string().contains("in use"));
+        drop(model_guard);
+        *engine.current_model.write().await = Some(MODELS[1].id.to_string());
+        assert!(engine
+            .discover_models()
+            .await
+            .iter()
+            .all(|model| !model.has_orphaned_encoder));
+        assert!(engine
+            .delete_model(MODELS[0].id)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("in use"));
+        assert!(encoder.is_file());
+    }
+
+    #[tokio::test]
+    async fn orphan_detection_never_offers_cleanup_for_official_or_needed_encoder_files() {
+        let owned = tempfile::tempdir().unwrap();
+        let official = tempfile::tempdir().unwrap();
+        let engine = FunAsrEngine::new(
+            owned.path().to_path_buf(),
+            Some(official.path().to_path_buf()),
+        )
+        .unwrap();
+        let official_encoder = official.path().join(encoder_relative_path());
+        write_file(&official_encoder, b"official encoder");
+        assert!(engine
+            .discover_models()
+            .await
+            .iter()
+            .all(|model| !model.has_orphaned_encoder));
+        assert!(engine.delete_model(MODELS[0].id).await.is_err());
+        assert!(official_encoder.is_file());
+        let encoder = owned.path().join(encoder_relative_path());
+        write_file(&encoder, b"owned encoder");
+        let official_decoder = official.path().join(decoder_relative_path(&MODELS[1]));
+        write_file(&official_decoder, b"official decoder");
+        assert!(engine
+            .discover_models()
+            .await
+            .iter()
+            .all(|model| !model.has_orphaned_encoder));
+        assert!(engine.delete_model(MODELS[0].id).await.is_err());
+        assert!(encoder.is_file());
+        assert!(official_decoder.is_file());
+        std::fs::remove_file(&official_decoder).unwrap();
+        let decoder_partial = partial_path(&owned.path().join(decoder_relative_path(&MODELS[1])));
+        write_file(&decoder_partial, b"decoder part");
+        assert!(engine
+            .discover_models()
+            .await
+            .iter()
+            .all(|model| !model.has_orphaned_encoder));
+        assert!(engine.delete_model(MODELS[0].id).await.is_err());
+        assert!(encoder.is_file());
+        assert!(decoder_partial.is_file());
+    }
+
+    #[tokio::test]
     async fn artifact_validation_checks_header_size_and_hash() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("model.gguf");
@@ -688,7 +1083,10 @@ mod tests {
         assert!(error.to_string().contains("cancelled"));
         assert!(!destination.exists());
         assert!(owned.path().join("model.gguf.part").exists());
-        assert_eq!(std::fs::read(owned.path().join("model.gguf.part")).unwrap(), b"GGUF");
+        assert_eq!(
+            std::fs::read(owned.path().join("model.gguf.part")).unwrap(),
+            b"GGUF"
+        );
         server.abort();
     }
 
@@ -716,11 +1114,16 @@ mod tests {
             accepted.await.unwrap();
             canceller.cancel();
         });
-        let result = tokio::time::timeout(std::time::Duration::from_secs(2),
-            download_tiny_artifact(&engine, &destination, &token)).await;
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            download_tiny_artifact(&engine, &destination, &token),
+        )
+        .await;
         server.abort();
         cancel.abort();
-        let error = result.expect("Cancel waited for the response headers").unwrap_err();
+        let error = result
+            .expect("Cancel waited for the response headers")
+            .unwrap_err();
         assert!(error.to_string().contains("cancelled"), "{error}");
         assert!(!destination.exists());
     }
@@ -752,9 +1155,14 @@ mod tests {
         });
 
         let started = Instant::now();
-        let error = download_tiny_artifact(&engine, &destination, &token).await.unwrap_err();
+        let error = download_tiny_artifact(&engine, &destination, &token)
+            .await
+            .unwrap_err();
         assert!(error.to_string().contains("cancelled"), "{error}");
-        assert!(started.elapsed() < std::time::Duration::from_secs(5), "cancel waited on the stalled stream");
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "cancel waited on the stalled stream"
+        );
         assert!(!destination.exists());
         server.abort();
     }

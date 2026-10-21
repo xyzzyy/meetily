@@ -1,5 +1,5 @@
 use super::engine::{FunAsrEngine, ProgressCallback};
-use super::model::{DownloadProgress, ModelInfo, ModelStatus, DEFAULT_FUNASR_MODEL};
+use super::model::{DownloadProgress, ModelInfo, ModelStatus};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Emitter, Manager, Runtime};
@@ -111,17 +111,16 @@ pub async fn funasr_validate_model_ready<R: Runtime>(app: AppHandle<R>) -> Resul
     validate_model_ready_with_config(&app).await
 }
 
-/// Read the FUN-ASR model from the saved settings without hiding read errors.
-///
-/// `Ok(None)` means "no FUN-ASR selection" and may fall back to an installed
-/// model. `Err` must reach the caller: a transient settings failure is not
-/// permission to transcribe with a different model than the configured one.
-fn configured_funasr_model(
+/// Require an explicit saved FUN-ASR selection. A missing model or settings
+/// failure must not authorize the use of another model.
+pub(crate) fn configured_funasr_model(
     result: Result<Option<crate::api::api::TranscriptConfig>, String>,
-) -> Result<Option<String>, String> {
+) -> Result<String, String> {
     match result {
-        Ok(Some(config)) if config.provider == "funasr" => Ok(Some(config.model)),
-        Ok(_) => Ok(None),
+        Ok(Some(config)) if config.provider == "funasr" && !config.model.trim().is_empty() => {
+            Ok(config.model)
+        }
+        Ok(_) => Err("No FUN-ASR model is selected. Select a model in Settings.".to_string()),
         Err(error) => Err(format!(
             "Could not load transcription settings: {}. Select a transcription model in Settings and try again.",
             error
@@ -134,40 +133,23 @@ pub async fn validate_model_ready_with_config<R: Runtime>(
 ) -> Result<String, String> {
     funasr_init().await?;
     let engine = engine()?;
-    let configured = configured_funasr_model(
+    let selected = configured_funasr_model(
         crate::api::api::api_get_transcript_config(app.clone(), app.state(), None).await,
     )?;
-
-    let available = engine.discover_models().await;
-    let selected = configured
-        .filter(|model| {
-            available.iter().any(|candidate| {
-                candidate.name == *model && matches!(candidate.status, ModelStatus::Available)
-            })
-        })
-        .or_else(|| {
-            available
-                .iter()
-                .find(|candidate| {
-                    candidate.name == DEFAULT_FUNASR_MODEL
-                        && matches!(candidate.status, ModelStatus::Available)
-                })
-                .map(|candidate| candidate.name.clone())
-        })
-        .or_else(|| {
-            available
-                .iter()
-                .find(|candidate| matches!(candidate.status, ModelStatus::Available))
-                .map(|candidate| candidate.name.clone())
-        })
-        .ok_or_else(|| {
-            "No FUN-ASR models are available. Download a FUN-ASR Nano model first.".to_string()
-        })?;
     engine
-        .load_model(&selected)
+        .load_selected_model(&selected)
         .await
         .map_err(|error| error.to_string())?;
     Ok(selected)
+}
+
+/// Batch jobs own a separate helper. They must never load or unload the engine
+/// used by a live recording, even when both jobs select the same model.
+pub(crate) fn batch_engine() -> Result<Arc<FunAsrEngine>, String> {
+    engine()?
+        .new_session()
+        .map(Arc::new)
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -234,26 +216,11 @@ pub async fn funasr_download_model<R: Runtime>(
     result
 }
 
+/// True means an active worker received the cancellation request; false means
+/// no transfer was active. Only the worker emits its terminal download event.
 #[tauri::command]
-pub async fn funasr_cancel_download<R: Runtime>(
-    app: AppHandle<R>,
-    model_name: String,
-) -> Result<(), String> {
-    engine()?.cancel_download(&model_name).await;
-    app.emit(
-        "funasr-model-download-progress",
-        serde_json::json!({
-            "modelName": model_name,
-            "phase": "cancelled",
-            "progress": 0,
-            "downloaded_bytes": 0,
-            "total_bytes": 0,
-            "status": "cancelled",
-            "cancelled": true
-        }),
-    )
-    .ok();
-    Ok(())
+pub async fn funasr_cancel_download(model_name: String) -> Result<bool, String> {
+    Ok(engine()?.cancel_download(&model_name).await)
 }
 
 #[tauri::command]
@@ -304,19 +271,17 @@ mod tests {
     }
 
     #[test]
-    fn missing_or_other_provider_configs_allow_the_model_fallback() {
-        assert_eq!(configured_funasr_model(Ok(None)).unwrap(), None);
-        assert_eq!(
-            configured_funasr_model(Ok(Some(config("parakeet", "model-a")))).unwrap(),
-            None
-        );
+    fn missing_or_other_provider_configs_require_an_explicit_selection() {
+        assert!(configured_funasr_model(Ok(None)).is_err());
+        assert!(configured_funasr_model(Ok(Some(config("parakeet", "model-a")))).is_err());
+        assert!(configured_funasr_model(Ok(Some(config("funasr", "  ")))).is_err());
     }
 
     #[test]
     fn the_saved_funasr_model_is_returned() {
         assert_eq!(
             configured_funasr_model(Ok(Some(config("funasr", "model-a")))).unwrap(),
-            Some("model-a".to_string())
+            "model-a".to_string()
         );
     }
 }

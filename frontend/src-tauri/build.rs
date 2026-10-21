@@ -4,6 +4,8 @@ mod ffmpeg;
 mod onnxruntime;
 
 fn main() {
+    // Use Cargo's exact target, including architecture and ABI, for sidecar names.
+    println!("cargo:rustc-env=MEETILY_TARGET_TRIPLE={}", std::env::var("TARGET").unwrap());
     // GPU Acceleration Detection and Build Guidance
     detect_and_report_gpu_capabilities();
 

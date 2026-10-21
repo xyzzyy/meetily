@@ -11,6 +11,8 @@ export interface FunAsrModelInfo {
   display_name: string;
   path: string;
   encoder_available: boolean;
+  has_partial_download: boolean;
+  has_orphaned_encoder: boolean;
   size_mb: number;
   decoder_size_mb: number;
   encoder_size_mb: number;
@@ -41,7 +43,8 @@ export class FunAsrAPI {
     return invoke('funasr_download_model', { modelName });
   }
 
-  static cancelDownload(modelName: string): Promise<void> {
+  /** True: cancellation requested. False: no active download. */
+  static cancelDownload(modelName: string): Promise<boolean> {
     return invoke('funasr_cancel_download', { modelName });
   }
 

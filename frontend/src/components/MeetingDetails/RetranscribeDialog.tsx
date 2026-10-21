@@ -77,6 +77,7 @@ export function RetranscribeDialog({
     selectedModelKey,
     setSelectedModelKey,
     loadingModels,
+    modelNotice,
     fetchModels,
     resetSelection,
   } = useTranscriptionModels(transcriptModelConfig);
@@ -368,6 +369,9 @@ export function RetranscribeDialog({
             )
           )}
 
+          {!isProcessing && !error && modelNotice && (
+            <p className="text-sm text-amber-700" role="status">{modelNotice}</p>
+          )}
           {!isProcessing && !error && availableModels.length > 0 && (
             <div className="space-y-3">
               <div className="flex items-center gap-2">
