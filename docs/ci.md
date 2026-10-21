@@ -6,8 +6,8 @@
 The workflow has two checks:
 
 - **Frontend build and tests** installs the locked dependencies, runs the
-  build guard tests and the existing frontend suite one file per process, and
-  builds the production frontend on Ubuntu.
+  build guard tests, the existing frontend suite one file per process, and the
+  diarization benchmark tests, then builds the production frontend on Ubuntu.
 - **macOS release build and tests** builds the summary helper, the speaker
   helper when present, and the app on an Apple Silicon Mac with GitHub's
   `macos-latest` runner. It also runs the Rust unit tests. Xcode and the Apple
@@ -31,6 +31,10 @@ conversion error handling, and analytics event limits. They use simulated
 native responses. They do not record audio, run model inference, remove real
 model files, or start the desktop app. The summary parser accepts a summary
 object or its JSON encoding and rejects malformed JSON.
+
+The diarization benchmark tests use Python's unittest runner. They cover the
+scorer's speaker mapping and overlap calculations and do not call the
+ElevenLabs API or read audio files.
 
 The native tests run on macOS after the app build. They use temporary files
 and fixtures; none require audio hardware or system permissions. The workflow
@@ -57,6 +61,7 @@ depending on its imports. The build guard tests run from the repository root:
 
 ```sh
 node --test .github/verify-portable-ggml.test.cjs
+python3 -m unittest discover -s diarization-sidecar/Benchmarks -p 'test_*.py' -v
 ```
 
 To run the native tests locally, use the macOS job steps in the workflow. The

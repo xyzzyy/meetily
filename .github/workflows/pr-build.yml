@@ -64,6 +64,8 @@ jobs:
               node --test "$test_file"
             fi
           done < "$test_list"
+      - name: Run diarization benchmark tests
+        run: python3 -m unittest discover -s diarization-sidecar/Benchmarks -p 'test_*.py' -v
       - name: Build frontend for production
         working-directory: frontend
         run: pnpm build
