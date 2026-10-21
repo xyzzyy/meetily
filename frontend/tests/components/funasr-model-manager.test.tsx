@@ -13,7 +13,7 @@ let reply: (command: string, args?: any) => unknown | Promise<unknown>;
 const invoke = mock((command: string, args?: any) => Promise.resolve().then(() => reply(command, args)));
 const errorToast = mock(() => {});
 const handlers = new Map<string, (event: any) => void | Promise<void>>();
-const confirm = mock(async () => true);
+const confirm = mock(async (_message: string, _options?: unknown) => true);
 mock.module('@tauri-apps/api/core', () => ({ ...core, invoke }));
 mock.module('@tauri-apps/api/event', () => ({ ...events, listen: async (name: string, handler: any) => {
   handlers.set(name, handler);
@@ -38,7 +38,7 @@ afterAll(() => {
 });
 const model: FunAsrModelInfo = {
   name: 'nano-q4', display_name: 'Nano Q4', path: '/fixture/model',
-  encoder_available: true, has_partial_download: false, size_mb: 950,
+  encoder_available: true, has_partial_download: false, has_orphaned_encoder: false, size_mb: 950,
   decoder_size_mb: 484, encoder_size_mb: 469, description: 'Test model',
   recommended: false, status: 'Available',
 };
@@ -121,4 +121,18 @@ test('finishing a download does not change the saved model without a selection',
   await act(async () => { await handlers.get('funasr-model-download-complete')!({ payload: { modelName: 'nano-q4' } }); });
   expect(selected).not.toHaveBeenCalled();
   expect(invoke.mock.calls.some(([command]) => command === 'api_save_transcript_config')).toBe(false);
+});
+
+test('offers cleanup for a completed encoder with no decoder or partial file', async () => {
+  available = [{ ...model, status: 'Missing', has_orphaned_encoder: true }];
+  reply = command => {
+    if (command === 'funasr_delete_model') available = [{ ...model, status: 'Missing', encoder_available: false }];
+    return command === 'funasr_get_available_models' ? available : undefined;
+  };
+  await show();
+  expect(renderer!.root.findAllByProps({ title: 'Delete partial download' })).toHaveLength(0);
+  await click('Delete unused encoder');
+  expect(invoke).toHaveBeenCalledWith('funasr_delete_model', { modelName: 'nano-q4' });
+  expect(confirm.mock.calls[0]?.[0]).toContain('unused shared FUN-ASR encoder');
+  expect(renderer!.root.findAllByProps({ title: 'Delete unused encoder' })).toHaveLength(0);
 });

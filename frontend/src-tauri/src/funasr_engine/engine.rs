@@ -109,6 +109,21 @@ impl FunAsrEngine {
         Ok(self.resolve_for_read(&decoder_relative_path(spec)))
     }
 
+    /// A completed branch encoder can outlive its last decoder if deletion
+    /// overlaps another download. Keep it reachable for cleanup, but never
+    /// treat an official encoder or one needed by a decoder as an orphan.
+    fn has_orphaned_encoder_files(&self) -> bool {
+        self.owned_models_root
+            .join(encoder_relative_path())
+            .is_file()
+            && !MODELS.iter().any(|spec| {
+                self.resolve_for_read(&decoder_relative_path(spec))
+                    .is_file()
+                    || partial_path(&self.owned_models_root.join(decoder_relative_path(spec)))
+                        .is_file()
+            })
+    }
+
     pub async fn discover_models(&self) -> Vec<ModelInfo> {
         let encoder_ready = validate_artifact(&self.encoder_path(), ENCODER, false)
             .await
@@ -122,6 +137,9 @@ impl FunAsrEngine {
             .collect();
         let encoder_partial =
             partial_path(&self.owned_models_root.join(encoder_relative_path())).is_file();
+        let has_orphaned_encoder = active.is_empty()
+            && self.get_current_model().await.is_none()
+            && self.has_orphaned_encoder_files();
         let mut models = Vec::with_capacity(MODELS.len());
         for spec in MODELS {
             let decoder_path = self.resolve_for_read(&decoder_relative_path(spec));
@@ -133,6 +151,7 @@ impl FunAsrEngine {
                 display_name: spec.display_name.to_string(),
                 path: decoder_path,
                 encoder_available: encoder_ready,
+                has_orphaned_encoder,
                 has_partial_download: encoder_partial
                     || partial_path(&self.owned_models_root.join(decoder_relative_path(spec)))
                         .is_file(),
@@ -526,7 +545,29 @@ impl FunAsrEngine {
         let decoder_partial = partial_path(&decoder);
         let encoder = self.owned_models_root.join(encoder_relative_path());
         let encoder_partial = partial_path(&encoder);
-        if !decoder.is_file() && !decoder_partial.is_file() && !encoder_partial.is_file() {
+        let encoder_only_cleanup =
+            !decoder.is_file() && !decoder_partial.is_file() && !encoder_partial.is_file();
+        if encoder_only_cleanup {
+            // Recheck under both locks before removing an encoder-only orphan.
+            // A new download must not register until cleanup has finished.
+            if self.has_orphaned_encoder_files() {
+                let _encoder_guard = self.encoder_download_lock.try_lock().map_err(|_| {
+                    anyhow!("The shared encoder is in use. Try cleanup after the download stops.")
+                })?;
+                let downloads = self.cancellation_tokens.lock().await;
+                let _lifecycle_guard = self.model_lifecycle_lock.try_lock().map_err(|_| {
+                    anyhow!("The shared encoder is in use. Try cleanup after the model stops.")
+                })?;
+                if !downloads.is_empty()
+                    || self.current_model.read().await.is_some()
+                    || !self.has_orphaned_encoder_files()
+                {
+                    return Err(anyhow!("The shared encoder is in use. Try cleanup after the model or download stops."));
+                }
+                fs::remove_file(&encoder).await?;
+                return Ok(());
+            }
+
             let official_decoder = self
                 .official_models_root
                 .as_ref()
@@ -831,6 +872,143 @@ mod tests {
         assert!(!second.exists());
         assert!(!encoder.exists());
         assert_eq!(std::fs::read(&official_decoder).unwrap(), b"official");
+    }
+
+    #[tokio::test]
+    async fn encoder_left_after_a_failed_concurrent_download_is_discoverable_and_deletable() {
+        let owned = tempfile::tempdir().unwrap();
+        let engine = FunAsrEngine::new(owned.path().to_path_buf(), None).unwrap();
+        let encoder = owned.path().join(encoder_relative_path());
+        write_file(&encoder, b"GGUF");
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&encoder)
+            .unwrap()
+            .set_len(ENCODER.size)
+            .unwrap();
+        let decoder = owned.path().join(decoder_relative_path(&MODELS[0]));
+        write_file(&decoder, b"decoder");
+        let encoder_guard = engine.encoder_download_lock.lock().await;
+        engine.cancellation_tokens.lock().await.insert(
+            MODELS[1].id.to_string(),
+            ActiveDownload {
+                token: CancellationToken::new(),
+                progress: Arc::new(AtomicU8::new(0)),
+            },
+        );
+        engine.delete_model(MODELS[0].id).await.unwrap();
+        assert!(!decoder.exists());
+        assert!(encoder.is_file());
+        assert!(engine
+            .discover_models()
+            .await
+            .iter()
+            .all(|model| !model.has_orphaned_encoder));
+        // The second transfer fails without creating a decoder or partial file.
+        drop(encoder_guard);
+        engine.cancellation_tokens.lock().await.remove(MODELS[1].id);
+        let models = engine.discover_models().await;
+        assert!(models
+            .iter()
+            .all(|model| matches!(model.status, ModelStatus::Missing)
+                && model.has_orphaned_encoder
+                && !model.has_partial_download
+                && model.encoder_available));
+        engine.delete_model(MODELS[0].id).await.unwrap();
+        assert!(!encoder.exists());
+        assert!(engine
+            .discover_models()
+            .await
+            .iter()
+            .all(|model| !model.has_orphaned_encoder));
+    }
+
+    #[tokio::test]
+    async fn encoder_only_cleanup_is_blocked_if_a_download_or_loaded_model_needs_it() {
+        let owned = tempfile::tempdir().unwrap();
+        let engine = FunAsrEngine::new(owned.path().to_path_buf(), None).unwrap();
+        let encoder = owned.path().join(encoder_relative_path());
+        write_file(&encoder, b"encoder");
+        engine.cancellation_tokens.lock().await.insert(
+            MODELS[1].id.to_string(),
+            ActiveDownload {
+                token: CancellationToken::new(),
+                progress: Arc::new(AtomicU8::new(0)),
+            },
+        );
+        assert!(engine
+            .delete_model(MODELS[0].id)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("in use"));
+        assert!(encoder.is_file());
+        engine.cancellation_tokens.lock().await.clear();
+        let model_guard = engine.model_lifecycle_lock.lock().await;
+        let result = tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            engine.delete_model(MODELS[0].id),
+        )
+        .await
+        .expect("cleanup waited for a model operation");
+        assert!(result.unwrap_err().to_string().contains("in use"));
+        drop(model_guard);
+        *engine.current_model.write().await = Some(MODELS[1].id.to_string());
+        assert!(engine
+            .discover_models()
+            .await
+            .iter()
+            .all(|model| !model.has_orphaned_encoder));
+        assert!(engine
+            .delete_model(MODELS[0].id)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("in use"));
+        assert!(encoder.is_file());
+    }
+
+    #[tokio::test]
+    async fn orphan_detection_never_offers_cleanup_for_official_or_needed_encoder_files() {
+        let owned = tempfile::tempdir().unwrap();
+        let official = tempfile::tempdir().unwrap();
+        let engine = FunAsrEngine::new(
+            owned.path().to_path_buf(),
+            Some(official.path().to_path_buf()),
+        )
+        .unwrap();
+        let official_encoder = official.path().join(encoder_relative_path());
+        write_file(&official_encoder, b"official encoder");
+        assert!(engine
+            .discover_models()
+            .await
+            .iter()
+            .all(|model| !model.has_orphaned_encoder));
+        assert!(engine.delete_model(MODELS[0].id).await.is_err());
+        assert!(official_encoder.is_file());
+        let encoder = owned.path().join(encoder_relative_path());
+        write_file(&encoder, b"owned encoder");
+        let official_decoder = official.path().join(decoder_relative_path(&MODELS[1]));
+        write_file(&official_decoder, b"official decoder");
+        assert!(engine
+            .discover_models()
+            .await
+            .iter()
+            .all(|model| !model.has_orphaned_encoder));
+        assert!(engine.delete_model(MODELS[0].id).await.is_err());
+        assert!(encoder.is_file());
+        assert!(official_decoder.is_file());
+        std::fs::remove_file(&official_decoder).unwrap();
+        let decoder_partial = partial_path(&owned.path().join(decoder_relative_path(&MODELS[1])));
+        write_file(&decoder_partial, b"decoder part");
+        assert!(engine
+            .discover_models()
+            .await
+            .iter()
+            .all(|model| !model.has_orphaned_encoder));
+        assert!(engine.delete_model(MODELS[0].id).await.is_err());
+        assert!(encoder.is_file());
+        assert!(decoder_partial.is_file());
     }
 
     #[tokio::test]

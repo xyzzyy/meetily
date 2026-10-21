@@ -12,6 +12,7 @@ export interface FunAsrModelInfo {
   path: string;
   encoder_available: boolean;
   has_partial_download: boolean;
+  has_orphaned_encoder: boolean;
   size_mb: number;
   decoder_size_mb: number;
   encoder_size_mb: number;

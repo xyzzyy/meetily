@@ -220,13 +220,17 @@ export function FunAsrModelManager({
       return;
     }
     const accepted = await confirm(
-      `Delete the files for ${model.display_name}, including any partial download? The shared encoder is kept while another FUN-ASR variant needs it.`,
-      { title: 'Delete FUN-ASR model?', kind: 'warning' }
+      model.has_orphaned_encoder
+        ? 'Delete the unused shared FUN-ASR encoder? No model uses it. You will need to download it again to install a FUN-ASR model.'
+        : `Delete the files for ${model.display_name}, including any partial download? The shared encoder is kept while another FUN-ASR variant needs it.`,
+      { title: model.has_orphaned_encoder ? 'Delete unused encoder?' : 'Delete FUN-ASR model?', kind: 'warning' }
     );
     if (!accepted) return;
     try {
       await FunAsrAPI.deleteModel(model.name);
-      toast.success(`Files for ${model.display_name} deleted from this app`);
+      toast.success(model.has_orphaned_encoder
+        ? 'Unused FUN-ASR encoder deleted'
+        : `Files for ${model.display_name} deleted from this app`);
     } catch (error) {
       toast.error(`Could not delete ${model.display_name}`, { description: String(error) });
     } finally {
@@ -257,6 +261,16 @@ export function FunAsrModelManager({
         <p className="mt-1">
           Installing another option downloads only its Qwen3 decoder.
         </p>
+        {models.some(model => model.has_orphaned_encoder) && (
+          <div className="mt-2 flex items-center justify-between gap-2">
+            <span>No model uses this encoder. You can delete it to free disk space.</span>
+            <Button variant="outline" size="sm" title="Delete unused encoder"
+              onClick={() => deleteModel(models.find(model => model.has_orphaned_encoder)!)}>
+              <Trash2 className="mr-1 h-4 w-4" />
+              Delete unused encoder
+            </Button>
+          </div>
+        )}
       </div>
       {models.map((model) => {
         const available = model.status === 'Available';
