@@ -118,8 +118,8 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
 
   // Transcript model configuration state
   const [transcriptModelConfig, setTranscriptModelConfig] = useState<TranscriptModelProps>({
-    provider: 'parakeet',
-    model: 'parakeet-tdt-0.6b-v3-int8',
+    provider: '',
+    model: '',
     apiKey: null
   });
 
@@ -217,13 +217,14 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
         if (config) {
           console.log('[ConfigContext] Loaded saved transcript config:', config);
           setTranscriptModelConfig({
-            provider: config.provider || 'parakeet',
-            model: config.model || 'parakeet-tdt-0.6b-v3-int8',
+            provider: config.provider || '',
+            model: config.model || '',
             apiKey: config.apiKey || null
           });
         }
       } catch (error) {
         console.error('[ConfigContext] Failed to load transcript config:', error);
+        toast.error('Could not load transcription settings', { description: String(error) });
       }
     };
     loadTranscriptConfig();

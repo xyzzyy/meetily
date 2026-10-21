@@ -12,7 +12,7 @@ import { SpeakerDiarizationSettings } from './SpeakerDiarizationSettings';
 
 
 export interface TranscriptModelProps {
-    provider: 'localWhisper' | 'parakeet' | 'funasr' | 'deepgram' | 'elevenLabs' | 'groq' | 'openai';
+    provider: '' | 'localWhisper' | 'parakeet' | 'funasr' | 'deepgram' | 'elevenLabs' | 'groq' | 'openai';
     model: string;
     apiKey?: string | null;
 }
@@ -149,7 +149,7 @@ export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelCo
                                 </SelectContent>
                             </Select>
 
-                            {!isLocalProvider(uiProvider) && (
+                            {!!uiProvider && !isLocalProvider(uiProvider) && (
                                 <Select
                                     value={transcriptModelConfig.model}
                                     onValueChange={(value) => {
@@ -170,6 +170,12 @@ export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelCo
 
                         </div>
                     </div>
+
+                    {!transcriptModelConfig.provider && (
+                        <p className="text-sm text-muted-foreground" role="status">
+                            No transcription model is selected. Choose a provider, then select a model.
+                        </p>
+                    )}
 
                     {uiProvider === 'localWhisper' && (
                         <div className="mt-6">

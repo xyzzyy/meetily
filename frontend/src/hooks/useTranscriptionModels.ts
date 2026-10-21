@@ -1,4 +1,4 @@
-import { useState, useCallback, useRef } from 'react';
+import { useState, useCallback, useRef, useEffect } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 
 export interface RawModelInfo {
@@ -41,90 +41,60 @@ export function useTranscriptionModels(transcriptModelConfig: TranscriptModelCon
     setSelectedModelKey(key);
   }, []);
 
+  const [modelLoadError, setModelLoadError] = useState<string | null>(null);
+  const requestIdRef = useRef(0);
+
   const fetchModels = useCallback(async () => {
+    const requestId = ++requestIdRef.current;
     setLoadingModels(true);
-    const allModels: ModelOption[] = [];
-
-    // Fetch Whisper models
-    try {
-      const whisperModels = await invoke<RawModelInfo[]>('whisper_get_available_models');
-      const availableWhisper = whisperModels
-        .filter((m) => m.status === 'Available')
-        .map((m) => ({
-          provider: 'whisper' as const,
-          name: m.name,
-          displayName: `🏠 Whisper: ${m.name}`,
-          size_mb: m.size_mb,
-        }));
-      allModels.push(...availableWhisper);
-    } catch (err) {
-      console.error('Failed to fetch Whisper models:', err);
-    }
-
-    // Fetch Parakeet models
-    try {
-      const parakeetModels = await invoke<RawModelInfo[]>('parakeet_get_available_models');
-      const availableParakeet = parakeetModels
-        .filter((m) => m.status === 'Available')
-        .map((m) => ({
-          provider: 'parakeet' as const,
-          name: m.name,
-          displayName: `⚡ Parakeet: ${m.name}`,
-          size_mb: m.size_mb,
-        }));
-      allModels.push(...availableParakeet);
-    } catch (err) {
-      console.error('Failed to fetch Parakeet models:', err);
-    }
-
-    // Fetch FUN-ASR models
-    try {
-      const funAsrModels = await invoke<Array<RawModelInfo & { display_name?: string }>>('funasr_get_available_models');
-      const availableFunAsr = funAsrModels
-        .filter((m) => m.status === 'Available')
-        .map((m) => ({
-          provider: 'funasr' as const,
-          name: m.name,
-          displayName: `🌏 ${m.display_name ?? m.name}`,
-          size_mb: m.size_mb,
-        }));
-      allModels.push(...availableFunAsr);
-    } catch (err) {
-      console.error('Failed to fetch FUN-ASR models:', err);
-    }
-
-    setAvailableModels(allModels);
-
-    // Set default model based on user's saved configuration
-    const configuredProvider = transcriptModelConfig?.provider || '';
-    const configuredModel = transcriptModelConfig?.model || '';
-
-    // Try to match the configured model
-    // Note: 'localWhisper' in config maps to 'whisper' provider in model list
-    const configuredMatch = allModels.find(
-      (m) =>
-        (configuredProvider === 'localWhisper' && m.provider === 'whisper' && m.name === configuredModel) ||
-        (configuredProvider === 'parakeet' && m.provider === 'parakeet' && m.name === configuredModel) ||
-        (configuredProvider === 'funasr' && m.provider === 'funasr' && m.name === configuredModel)
-    );
-
-    // Only set default model if user hasn't manually selected one
-    if (!userSelectedRef.current) {
-      if (configuredMatch) {
-        // Use the configured model if available
-        setSelectedModelKey(`${configuredMatch.provider}:${configuredMatch.name}`);
-      } else if (allModels.length > 0) {
-        // Fall back to first available model
-        setSelectedModelKey(`${allModels[0].provider}:${allModels[0].name}`);
+    setModelLoadError(null);
+    const providers = [
+      { provider: 'whisper' as const, label: 'Whisper', init: 'whisper_init', list: 'whisper_get_available_models' },
+      { provider: 'parakeet' as const, label: 'Parakeet', init: 'parakeet_init', list: 'parakeet_get_available_models' },
+      { provider: 'funasr' as const, label: 'FUN-ASR', init: 'funasr_init', list: 'funasr_get_available_models' },
+    ];
+    const results = await Promise.all(providers.map(async ({ provider, label, init, list }) => {
+      try {
+        // Startup initializes engines in the background. Await initialization
+        // here too, so a dialog opened at startup has a complete model list.
+        await invoke(init);
+        const models = await invoke<Array<RawModelInfo & { display_name?: string }>>(list);
+        return { models: models.filter(model => model.status === 'Available').map(model => ({
+          provider, name: model.name, size_mb: model.size_mb,
+          displayName: `${label}: ${model.display_name ?? model.name}`,
+        })), error: null };
+      } catch (error) {
+        return { models: [], error: `Could not load ${label} models: ${String(error)}` };
       }
-    }
-
+    }));
+    if (requestId !== requestIdRef.current) return;
+    setAvailableModels(results.flatMap(result => result.models));
+    setModelLoadError(results.flatMap(result => result.error ? [result.error] : []).join(' ') || null);
     setLoadingModels(false);
-  }, [transcriptModelConfig]);
+  }, []);
+
+  useEffect(() => {
+    const configuredProvider = transcriptModelConfig?.provider === 'localWhisper'
+      ? 'whisper' : transcriptModelConfig?.provider;
+    setSelectedModelKey(current => {
+      if (userSelectedRef.current) {
+        return availableModels.some(model => `${model.provider}:${model.name}` === current) ? current : '';
+      }
+      const match = availableModels.find(model => model.provider === configuredProvider && model.name === transcriptModelConfig?.model);
+      return match ? `${match.provider}:${match.name}` : '';
+    });
+  }, [availableModels, transcriptModelConfig?.provider, transcriptModelConfig?.model]);
+
+  const modelNotice = modelLoadError || (!loadingModels && !selectedModelKey
+    ? transcriptModelConfig?.provider && transcriptModelConfig?.model
+      ? `The saved model (${transcriptModelConfig.model}) is not available. Download it in Settings or select another model.`
+      : 'Select a transcription model. No model will be selected automatically.'
+    : null);
 
   // Reset user selection tracking (call when dialog opens fresh)
   const resetSelection = useCallback(() => {
     userSelectedRef.current = false;
+    setSelectedModelKey('');
   }, []);
 
   return {
@@ -132,6 +102,7 @@ export function useTranscriptionModels(transcriptModelConfig: TranscriptModelCon
     selectedModelKey,
     setSelectedModelKey: setSelectedModelKeyWithTracking,
     loadingModels,
+    modelNotice,
     fetchModels,
     resetSelection,
   };

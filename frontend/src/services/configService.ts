@@ -51,8 +51,8 @@ export class ConfigService {
    * Get saved transcript model configuration
    * @returns Promise with { provider, model, apiKey }
    */
-  async getTranscriptConfig(): Promise<TranscriptModelProps> {
-    return invoke<TranscriptModelProps>('api_get_transcript_config');
+  async getTranscriptConfig(): Promise<TranscriptModelProps | null> {
+    return invoke<TranscriptModelProps | null>('api_get_transcript_config');
   }
 
   /**

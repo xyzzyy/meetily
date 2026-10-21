@@ -57,15 +57,8 @@ pub(crate) async fn unload_engine_after_batch(engine: BatchEngine) {
             }
         }
         BatchEngine::FunAsr => {
-            // Unloading also stops the helper process and frees its memory.
-            use crate::funasr_engine::commands::FUNASR_ENGINE;
-            let engine = {
-                let guard = FUNASR_ENGINE.lock().unwrap_or_else(|e| e.into_inner());
-                guard.as_ref().cloned()
-            };
-            if let Some(e) = engine {
-                e.unload_model().await;
-            }
+            // Batch helpers belong to the job and stop when its provider drops.
+            // Never unload the global recording engine here.
         }
         BatchEngine::Whisper => {
             use crate::whisper_engine::commands::WHISPER_ENGINE;
@@ -80,34 +73,24 @@ pub(crate) async fn unload_engine_after_batch(engine: BatchEngine) {
     }
 }
 
-/// Get the FUN-ASR engine with a model loaded for a batch job: the requested
-/// model, or else the configured one (falling back to the default or any
-/// downloaded model).
+/// Load the exact requested or saved model in a job-owned FUN-ASR engine.
 pub(crate) async fn get_or_init_funasr<R: tauri::Runtime>(
     app: &tauri::AppHandle<R>,
     requested_model: Option<&str>,
     language: Option<&str>,
 ) -> Result<Arc<crate::funasr_engine::FunAsrEngine>> {
-    use crate::funasr_engine::commands::{funasr_init, validate_model_ready_with_config, FUNASR_ENGINE};
-    // Fail before any work if every segment would be rejected.
+    use crate::funasr_engine::commands::{batch_engine, configured_funasr_model, funasr_init};
+    use tauri::Manager;
     crate::funasr_engine::normalize_language(language).map_err(anyhow::Error::msg)?;
     funasr_init().await.map_err(anyhow::Error::msg)?;
-    let engine = {
-        let guard = FUNASR_ENGINE.lock().unwrap_or_else(|e| e.into_inner());
-        guard.as_ref().cloned()
-    }
-    .ok_or_else(|| anyhow::anyhow!("FUN-ASR engine not initialized"))?;
-    match requested_model {
-        Some(model) => {
-            if engine.get_current_model().await.as_deref() != Some(model) {
-                info!("Loading FUN-ASR model '{}'", model);
-                engine.load_model(model).await?;
-            }
-        }
-        None => {
-            validate_model_ready_with_config(app).await.map_err(anyhow::Error::msg)?;
-        }
-    }
+    let selected = match requested_model {
+        Some(model) => model.to_string(),
+        None => configured_funasr_model(
+            crate::api::api::api_get_transcript_config(app.clone(), app.state(), None).await,
+        ).map_err(anyhow::Error::msg)?,
+    };
+    let engine = batch_engine().map_err(anyhow::Error::msg)?;
+    engine.load_selected_model(&selected).await?;
     Ok(engine)
 }
 

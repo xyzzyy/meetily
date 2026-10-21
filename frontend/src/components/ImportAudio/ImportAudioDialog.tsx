@@ -91,6 +91,7 @@ export function ImportAudioDialog({
     selectedModelKey,
     setSelectedModelKey,
     loadingModels,
+    modelNotice,
     fetchModels,
     resetSelection,
   } = useTranscriptionModels(transcriptModelConfig);
@@ -197,7 +198,7 @@ export function ImportAudioDialog({
   };
 
   const handleStartImport = async () => {
-    if (!fileInfo) return;
+    if (!fileInfo || loadingModels || !selectedModel) return;
 
     await startImport(
       fileInfo.path,
@@ -386,6 +387,7 @@ export function ImportAudioDialog({
                         </div>
                       )}
 
+                      {modelNotice && <p className="text-sm text-amber-700" role="status">{modelNotice}</p>}
                       {/* Model selector */}
                       {availableModels.length > 0 && (
                         <div className="space-y-2">
@@ -457,7 +459,7 @@ export function ImportAudioDialog({
               <Button
                 onClick={handleStartImport}
                 className="bg-blue-600 hover:bg-blue-700"
-                disabled={!fileInfo}
+                disabled={!fileInfo || loadingModels || !selectedModel}
               >
                 <Upload className="h-4 w-4 mr-2" />
                 Import

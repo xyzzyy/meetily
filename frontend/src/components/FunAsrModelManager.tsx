@@ -39,17 +39,22 @@ export function FunAsrModelManager({
   const [downloadDetails, setDownloadDetails] = useState<
     Record<string, DownloadEvent>
   >({});
-  const selectRef = useRef(onModelSelect);
-  const autoSaveRef = useRef(autoSave);
-
-  useEffect(() => {
-    selectRef.current = onModelSelect;
-    autoSaveRef.current = autoSave;
-  }, [onModelSelect, autoSave]);
+  const [savingModel, setSavingModel] = useState<string | null>(null);
+  const savingRef = useRef(false);
+  const downloadErrors = useRef(new Map<string, string>());
 
   const refresh = useCallback(async () => {
     await FunAsrAPI.init();
-    setModels(await FunAsrAPI.getAvailableModels());
+    const latest = await FunAsrAPI.getAvailableModels();
+    setModels(latest);
+    setDownloading(new Set(latest.filter(model => funAsrProgress(model.status) !== null).map(model => model.name)));
+  }, []);
+
+  const reportDownloadError = useCallback((modelName: string, error: string) => {
+    if (downloadErrors.current.get(modelName) !== error) {
+      downloadErrors.current.set(modelName, error);
+      toast.error('FUN-ASR download failed', { description: error });
+    }
   }, []);
 
   useEffect(() => {
@@ -71,32 +76,27 @@ export function FunAsrModelManager({
         'funasr-model-download-progress',
         (event) => {
           const { modelName, progress, status } = event.payload;
+          // Cancel is a request. Keep the active controls until the worker
+          // stops and sends its terminal event.
+          if (status === 'cancelled') return;
           setDownloadDetails((current) => ({
             ...current,
             [modelName]: event.payload,
           }));
-          if (status === 'cancelled') {
-            setDownloading((current) => {
-              const next = new Set(current);
-              next.delete(modelName);
-              return next;
-            });
-          }
           setModels((current) =>
             current.map((model) =>
               model.name === modelName
                 ? {
                     ...model,
-                    status:
-                      status === 'cancelled'
-                        ? 'Missing'
-                        : ({ Downloading: { progress } } as FunAsrModelStatus),
+                    status: { Downloading: { progress } } as FunAsrModelStatus,
                   }
                 : model
             )
           );
         }
       );
+      if (disposed) { progress(); return; }
+      unlisteners.push(progress);
       const complete = await listen<{ modelName: string }>(
         'funasr-model-download-complete',
         async (event) => {
@@ -110,14 +110,12 @@ export function FunAsrModelManager({
             delete next[event.payload.modelName];
             return next;
           });
-          await refresh();
-          selectRef.current?.(event.payload.modelName);
-          if (autoSaveRef.current) {
-            await saveSelection(event.payload.modelName);
-          }
-          toast.success('FUN-ASR model is ready');
+          await refresh().catch((error) => toast.error('Could not refresh FUN-ASR models', { description: String(error) }));
+          toast.success('FUN-ASR model is ready. Select it to use it.');
         }
       );
+      if (disposed) { complete(); return; }
+      unlisteners.push(complete);
       const error = await listen<{
         modelName: string;
         error: string;
@@ -135,36 +133,26 @@ export function FunAsrModelManager({
             delete next[event.payload.modelName];
             return next;
           });
-          if (event.payload.status === 'cancelled') {
-            refresh().catch(console.error);
-          } else {
-            setModels((current) =>
-              current.map((model) =>
-                model.name === event.payload.modelName
-                  ? { ...model, status: { Error: event.payload.error } }
-                  : model
-              )
-            );
-            toast.error('FUN-ASR download failed', {
-              description: event.payload.error,
-            });
+          // A rejected duplicate request can arrive while the first download
+          // still runs. Read the backend state instead of hiding that download.
+          refresh().catch((error) => toast.error('Could not refresh FUN-ASR models', { description: String(error) }));
+          if (event.payload.status !== 'cancelled') {
+            reportDownloadError(event.payload.modelName, event.payload.error);
           }
         }
       );
       if (disposed) {
-        progress();
-        complete();
         error();
       } else {
-        unlisteners.push(progress, complete, error);
+        unlisteners.push(error);
       }
     };
-    setup();
+    setup().catch((error) => toast.error('Could not listen for FUN-ASR downloads', { description: String(error) }));
     return () => {
       disposed = true;
       unlisteners.forEach((unlisten) => unlisten());
     };
-  }, [refresh]);
+  }, [refresh, reportDownloadError]);
 
   const saveSelection = async (modelName: string) => {
     await invoke('api_save_transcript_config', {
@@ -175,11 +163,23 @@ export function FunAsrModelManager({
   };
 
   const selectModel = async (modelName: string) => {
-    onModelSelect?.(modelName);
-    if (autoSave) await saveSelection(modelName);
+    if (savingRef.current) return;
+    savingRef.current = true;
+    setSavingModel(modelName);
+    try {
+      // Keep the displayed selection and modal unchanged until saving succeeds.
+      if (autoSave) await saveSelection(modelName);
+      onModelSelect?.(modelName);
+    } catch (error) {
+      toast.error('Could not save the transcription model', { description: String(error) });
+    } finally {
+      savingRef.current = false;
+      setSavingModel(null);
+    }
   };
 
   const downloadModel = async (modelName: string) => {
+    downloadErrors.current.delete(modelName);
     setDownloading((current) => new Set(current).add(modelName));
     setModels((current) =>
       current.map((model) =>
@@ -190,8 +190,19 @@ export function FunAsrModelManager({
     );
     try {
       await FunAsrAPI.downloadModel(modelName);
-    } catch {
-      // The backend event contains the actionable error.
+    } catch (error) {
+      setDownloading(current => {
+        const next = new Set(current);
+        next.delete(modelName);
+        return next;
+      });
+      // Some failures happen before the backend can emit an event.
+      reportDownloadError(modelName, String(error));
+      try { await refresh(); } catch (refreshError) {
+        setModels(current => current.map(model => model.name === modelName
+          ? { ...model, status: { Error: String(error) } } : model));
+        console.error('Could not refresh FUN-ASR models:', refreshError);
+      }
     }
   };
 
@@ -204,22 +215,22 @@ export function FunAsrModelManager({
   };
 
   const deleteModel = async (model: FunAsrModelInfo) => {
-    if (selectedModel === model.name) {
+    if (selectedModel === model.name && model.status === 'Available') {
       toast.error('Select another FUN-ASR model before deleting this one');
       return;
     }
     const accepted = await confirm(
-      `Delete ${model.display_name}? The shared encoder is kept while another FUN-ASR variant is installed.`,
+      `Delete the files for ${model.display_name}, including any partial download? The shared encoder is kept while another FUN-ASR variant needs it.`,
       { title: 'Delete FUN-ASR model?', kind: 'warning' }
     );
     if (!accepted) return;
     try {
       await FunAsrAPI.deleteModel(model.name);
-      toast.success(`${model.display_name} deleted`);
+      toast.success(`Files for ${model.display_name} deleted from this app`);
     } catch (error) {
       toast.error(`Could not delete ${model.display_name}`, { description: String(error) });
     } finally {
-      await refresh();
+      await refresh().catch(error => toast.error('Could not refresh FUN-ASR models', { description: String(error) }));
     }
   };
 
@@ -269,7 +280,7 @@ export function FunAsrModelManager({
               <button
                 type="button"
                 className="min-w-0 flex-1 text-left"
-                disabled={!available}
+                disabled={!available || savingModel !== null}
                 onClick={() => selectModel(model.name)}
               >
                 <div className="flex items-center gap-2">
@@ -281,6 +292,7 @@ export function FunAsrModelManager({
                       Default
                     </span>
                   )}
+                  {savingModel === model.name && <Loader2 className="h-4 w-4 animate-spin" />}
                   {selectedModel === model.name && available && (
                     <Check className="h-4 w-4 text-blue-600" />
                   )}
@@ -301,7 +313,7 @@ export function FunAsrModelManager({
                   variant="ghost"
                   size="icon"
                   onClick={() => deleteModel(model)}
-                  disabled={selectedModel === model.name}
+                  disabled={selectedModel === model.name || savingModel !== null}
                   title={
                     selectedModel === model.name
                       ? 'Select another model before deleting this one'
@@ -320,14 +332,17 @@ export function FunAsrModelManager({
                   <X className="h-4 w-4" />
                 </Button>
               ) : (
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={() => downloadModel(model.name)}
-                >
-                  <Download className="mr-1 h-4 w-4" />
-                  Download
-                </Button>
+                <div className="flex items-center gap-1">
+                  <Button variant="outline" size="sm" onClick={() => downloadModel(model.name)}>
+                    <Download className="mr-1 h-4 w-4" />
+                    {model.has_partial_download ? 'Resume' : 'Download'}
+                  </Button>
+                  {model.has_partial_download && (
+                    <Button variant="ghost" size="icon" onClick={() => deleteModel(model)} title="Delete partial download">
+                      <Trash2 className="h-4 w-4" />
+                    </Button>
+                  )}
+                </div>
               )}
             </div>
             {progress !== null && (

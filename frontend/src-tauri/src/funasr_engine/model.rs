@@ -75,6 +75,7 @@ pub struct ModelInfo {
     pub display_name: String,
     pub path: PathBuf,
     pub encoder_available: bool,
+    pub has_partial_download: bool,
     pub size_mb: u64,
     pub decoder_size_mb: u64,
     pub encoder_size_mb: u64,

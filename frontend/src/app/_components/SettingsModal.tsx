@@ -226,7 +226,7 @@ export function SettingsModals({
             selectedLanguage={selectedLanguage}
             onLanguageChange={setSelectedLanguage}
             disabled={isRecording}
-            provider={transcriptModelConfig.provider}
+            provider={transcriptModelConfig.provider || undefined}
           />
 
           <div className="mt-6 flex justify-end">

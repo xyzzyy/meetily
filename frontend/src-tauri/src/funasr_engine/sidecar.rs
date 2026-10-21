@@ -73,7 +73,10 @@ impl FunAsrSidecar {
             decoder.display()
         );
 
-        let mut child = Command::new(&helper)
+        let mut command = Command::new(&helper);
+        #[cfg(windows)]
+        command.creation_flags(0x08000000); // CREATE_NO_WINDOW
+        let mut child = command
             .arg("--encoder")
             .arg(encoder)
             .arg("--decoder")
@@ -233,7 +236,9 @@ fn build_request(
 ) -> std::result::Result<Vec<u8>, SidecarRequestError> {
     let language_bytes = language.as_bytes();
     if language_bytes.len() > u16::MAX as usize {
-        return Err(SidecarRequestError::before_send("Language hint is too long"));
+        return Err(SidecarRequestError::before_send(
+            "Language hint is too long",
+        ));
     }
     if audio.len() > MAX_AUDIO_SAMPLES {
         return Err(SidecarRequestError::before_send(
@@ -265,20 +270,16 @@ fn helper_filename() -> String {
 }
 
 fn target_helper_filename() -> String {
-    let triple = if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
-        "aarch64-apple-darwin"
-    } else if cfg!(all(target_os = "macos", target_arch = "x86_64")) {
-        "x86_64-apple-darwin"
-    } else if cfg!(windows) {
-        "x86_64-pc-windows-msvc"
+    helper_filename_for_target(env!("MEETILY_TARGET_TRIPLE"))
+}
+
+fn helper_filename_for_target(triple: &str) -> String {
+    let extension = if triple.contains("windows") {
+        ".exe"
     } else {
-        "x86_64-unknown-linux-gnu"
+        ""
     };
-    if cfg!(windows) {
-        format!("funasr-helper-{triple}.exe")
-    } else {
-        format!("funasr-helper-{triple}")
-    }
+    format!("funasr-helper-{triple}{extension}")
 }
 
 fn resolve_helper_binary() -> Result<PathBuf> {
@@ -365,10 +366,28 @@ mod tests {
     }
 
     #[test]
-    fn bundled_filename_contains_the_target_triple() {
-        let name = target_helper_filename();
-        assert!(name.starts_with("funasr-helper-"));
-        assert!(name.contains("darwin") || name.contains("windows") || name.contains("linux"));
+    fn bundled_filename_uses_the_exact_cargo_target() {
+        assert_eq!(
+            target_helper_filename(),
+            helper_filename_for_target(env!("MEETILY_TARGET_TRIPLE"))
+        );
+        for (target, expected) in [
+            (
+                "aarch64-pc-windows-msvc",
+                "funasr-helper-aarch64-pc-windows-msvc.exe",
+            ),
+            (
+                "aarch64-unknown-linux-gnu",
+                "funasr-helper-aarch64-unknown-linux-gnu",
+            ),
+            (
+                "aarch64-unknown-linux-musl",
+                "funasr-helper-aarch64-unknown-linux-musl",
+            ),
+            ("x86_64-apple-darwin", "funasr-helper-x86_64-apple-darwin"),
+        ] {
+            assert_eq!(helper_filename_for_target(target), expected);
+        }
     }
 
     #[test]
@@ -405,7 +424,10 @@ mod tests {
             sidecar_with_response(b"NOPE00000000000000000000").await;
         let error = sidecar.request(OP_TRANSCRIBE, "en", &[]).await.unwrap_err();
         assert!(error.response_received);
-        assert!(!error.stream_in_sync, "an unparsable reply leaves the stream out of step");
+        assert!(
+            !error.stream_in_sync,
+            "an unparsable reply leaves the stream out of step"
+        );
         assert!(error.to_string().contains("invalid response magic"));
     }
 
@@ -425,7 +447,10 @@ mod tests {
 
         let error = sidecar.request(OP_TRANSCRIBE, "en", &[]).await.unwrap_err();
         assert!(error.response_received);
-        assert!(error.stream_in_sync, "a complete error reply keeps the stream in step");
+        assert!(
+            error.stream_in_sync,
+            "a complete error reply keeps the stream in step"
+        );
         assert_eq!(error.to_string(), "fixture failure");
     }
 
