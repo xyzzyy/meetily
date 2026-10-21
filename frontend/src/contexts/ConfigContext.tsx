@@ -6,6 +6,8 @@ import { SelectedDevices } from '@/components/DeviceSelection';
 import { configService, ModelConfig } from '@/services/configService';
 import { invoke } from '@tauri-apps/api/core';
 import Analytics from '@/lib/analytics';
+import { FUNASR_SUPPORTED_LANGUAGES } from '@/lib/funasr';
+import { toast } from 'sonner';
 import { BetaFeatures, BetaFeatureKey, loadBetaFeatures, saveBetaFeatures } from '@/types/betaFeatures';
 import { DEFAULT_DIARIZATION_SETTINGS, type DiarizationSettings } from '@/types/diarization';
 
@@ -539,6 +541,20 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
       console.error('Failed to sync language preference to Rust:', err)
     );
   }, []);
+
+  // FUN-ASR rejects other languages, and recording would refuse to start, so
+  // fall back to auto-detect when it is selected with an unsupported language.
+  useEffect(() => {
+    if (
+      transcriptModelConfig.provider === 'funasr'
+      && !FUNASR_SUPPORTED_LANGUAGES.has(selectedLanguage)
+    ) {
+      handleSetSelectedLanguage('auto');
+      toast.info('Transcription language set to Auto Detect', {
+        description: 'FUN-ASR Nano supports auto-detect, English, Chinese and Japanese.',
+      });
+    }
+  }, [transcriptModelConfig.provider, selectedLanguage, handleSetSelectedLanguage]);
 
   const value: ConfigContextType = useMemo(() => ({
     modelConfig,

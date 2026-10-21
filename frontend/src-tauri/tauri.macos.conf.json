@@ -3,7 +3,8 @@
         "externalBin": [
             "binaries/llama-helper",
             "binaries/ffmpeg",
-            "binaries/meetily-diarization"
+            "binaries/meetily-diarization",
+            "binaries/funasr-helper"
         ]
     }
 }

@@ -23,6 +23,7 @@ import { toast } from 'sonner';
 import { useConfig } from '@/contexts/ConfigContext';
 import { useSpeakerRefinementAvailability } from '@/hooks/useSpeakerRefinementAvailability';
 import { LANGUAGES } from '@/constants/languages';
+import { languagesForProvider } from '@/lib/funasr';
 import { useTranscriptionModels, ModelOption } from '@/hooks/useTranscriptionModels';
 import Analytics from '@/lib/analytics';
 
@@ -99,6 +100,17 @@ export function RetranscribeDialog({
     return availableModels.find(m => m.provider === provider && m.name === name);
   }, [selectedModelKey, availableModels]);
   const isParakeetModel = selectedModelDetails?.provider === 'parakeet';
+  const languageOptions = useMemo(
+    () => languagesForProvider(selectedModelDetails?.provider, LANGUAGES),
+    [selectedModelDetails?.provider],
+  );
+
+  // FUN-ASR supports fewer languages; fall back to auto-detect for any other.
+  useEffect(() => {
+    if (!languageOptions.some((language) => language.code === selectedLang)) {
+      setSelectedLang('auto');
+    }
+  }, [languageOptions, selectedLang]);
 
   useEffect(() => {
     if (isParakeetModel && selectedLang !== 'auto') {
@@ -332,7 +344,7 @@ export function RetranscribeDialog({
                     <SelectValue placeholder="Select language" />
                   </SelectTrigger>
                   <SelectContent className="max-h-60">
-                    {LANGUAGES.map((lang) => (
+                    {languageOptions.map((lang) => (
                       <SelectItem key={lang.code} value={lang.code}>
                         {lang.name}
                       </SelectItem>

@@ -34,6 +34,13 @@ function dialog(provider, loading = false, selected = true, supported = true, ch
       selectedModelKey: selected ? `${provider}:${model.name}` : '', loadingModels: loading,
       setSelectedModelKey() {}, fetchModels() {}, resetSelection() {} }) };
     if (name === '@/lib/analytics') return { default: { track: async () => {}, trackError: async () => {} } };
+    if (name === '@/lib/funasr') {
+      const helper = { exports: {} };
+      const helperSource = fs.readFileSync(new URL('../../src/lib/funasr.ts', import.meta.url), 'utf8');
+      const compiledHelper = ts.transpileModule(helperSource, { compilerOptions: { module: ts.ModuleKind.CommonJS } });
+      vm.runInNewContext(compiledHelper.outputText, { require, module: helper, exports: helper.exports });
+      return helper.exports;
+    }
     if (name === '@/constants/languages') return { LANGUAGES: [] };
     if (name === '@tauri-apps/api/core') return { invoke: async (command, args) => { calls.push({ command, args }); } };
     return new Proxy({}, { get: (_, key) => String(key) });
@@ -51,7 +58,7 @@ function nodes(node) {
   return [node, ...nodes(node.props?.children)];
 }
 const start = tree => nodes(tree).find(node => node.type === 'Button' && node.props.className === 'bg-blue-600 hover:bg-blue-700');
-for (const provider of ['parakeet', 'whisper']) {
+for (const provider of ['parakeet', 'whisper', 'funasr']) {
   const instance = dialog(provider);
   assert.equal(start(instance.tree).props.disabled, false);
   await start(instance.tree).props.onClick();

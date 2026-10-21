@@ -36,6 +36,7 @@ import { useImportAudio, ImportResult } from '@/hooks/useImportAudio';
 import { useRouter } from 'next/navigation';
 import { useSidebar } from '../Sidebar/SidebarProvider';
 import { LANGUAGES } from '@/constants/languages';
+import { languagesForProvider } from '@/lib/funasr';
 import { useTranscriptionModels, ModelOption } from '@/hooks/useTranscriptionModels';
 
 
@@ -170,6 +171,17 @@ export function ImportAudioDialog({
     return availableModels.find((m) => m.provider === provider && m.name === name);
   }, [selectedModelKey, availableModels]);
   const isParakeetModel = selectedModel?.provider === 'parakeet';
+  const languageOptions = useMemo(
+    () => languagesForProvider(selectedModel?.provider, LANGUAGES),
+    [selectedModel?.provider],
+  );
+
+  // FUN-ASR supports fewer languages; fall back to auto-detect for any other.
+  useEffect(() => {
+    if (!languageOptions.some((language) => language.code === selectedLang)) {
+      setSelectedLang('auto');
+    }
+  }, [languageOptions, selectedLang]);
 
   useEffect(() => {
     if (isParakeetModel && selectedLang !== 'auto') {
@@ -354,7 +366,7 @@ export function ImportAudioDialog({
                               <SelectValue placeholder="Select language" />
                             </SelectTrigger>
                             <SelectContent className="max-h-60">
-                              {LANGUAGES.map((lang) => (
+                              {languageOptions.map((lang) => (
                                 <SelectItem key={lang.code} value={lang.code}>
                                   {lang.name}
                                 </SelectItem>

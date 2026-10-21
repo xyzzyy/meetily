@@ -8,7 +8,7 @@ export interface RawModelInfo {
 }
 
 export interface ModelOption {
-  provider: 'whisper' | 'parakeet';
+  provider: 'whisper' | 'parakeet' | 'funasr';
   name: string;
   displayName: string;
   size_mb: number;
@@ -20,7 +20,7 @@ interface TranscriptModelConfig {
 }
 
 /**
- * Custom hook for fetching and managing transcription models (Whisper and Parakeet).
+ * Custom hook for fetching and managing transcription models (Whisper, Parakeet and FUN-ASR).
  *
  * This hook centralizes the model fetching logic that was previously duplicated
  * in ImportAudioDialog and RetranscribeDialog components.
@@ -77,6 +77,22 @@ export function useTranscriptionModels(transcriptModelConfig: TranscriptModelCon
       console.error('Failed to fetch Parakeet models:', err);
     }
 
+    // Fetch FUN-ASR models
+    try {
+      const funAsrModels = await invoke<Array<RawModelInfo & { display_name?: string }>>('funasr_get_available_models');
+      const availableFunAsr = funAsrModels
+        .filter((m) => m.status === 'Available')
+        .map((m) => ({
+          provider: 'funasr' as const,
+          name: m.name,
+          displayName: `🌏 ${m.display_name ?? m.name}`,
+          size_mb: m.size_mb,
+        }));
+      allModels.push(...availableFunAsr);
+    } catch (err) {
+      console.error('Failed to fetch FUN-ASR models:', err);
+    }
+
     setAvailableModels(allModels);
 
     // Set default model based on user's saved configuration
@@ -88,7 +104,8 @@ export function useTranscriptionModels(transcriptModelConfig: TranscriptModelCon
     const configuredMatch = allModels.find(
       (m) =>
         (configuredProvider === 'localWhisper' && m.provider === 'whisper' && m.name === configuredModel) ||
-        (configuredProvider === 'parakeet' && m.provider === 'parakeet' && m.name === configuredModel)
+        (configuredProvider === 'parakeet' && m.provider === 'parakeet' && m.name === configuredModel) ||
+        (configuredProvider === 'funasr' && m.provider === 'funasr' && m.name === configuredModel)
     );
 
     // Only set default model if user hasn't manually selected one

@@ -133,7 +133,7 @@ pub async fn start_retranscription<R: Runtime>(
     } else {
         None
     };
-    let use_parakeet = provider.as_deref() == Some("parakeet");
+    let batch_engine = super::common::BatchEngine::from_provider(provider.as_deref());
     let result = run_retranscription(
         app.clone(),
         meeting_id.clone(),
@@ -146,7 +146,7 @@ pub async fn start_retranscription<R: Runtime>(
     .await;
 
     // Unload the engine after the batch job (success, failure, or cancellation)
-    super::common::unload_engine_after_batch(use_parakeet).await;
+    super::common::unload_engine_after_batch(batch_engine).await;
 
     // Guard will automatically clear flag on drop
     // No need for manual: RETRANSCRIPTION_IN_PROGRESS.store(false, Ordering::SeqCst);
@@ -235,7 +235,8 @@ async fn run_retranscription<R: Runtime>(
     .await?;
 
     // Determine which provider to use (default to whisper)
-    let use_parakeet = provider.as_deref() == Some("parakeet");
+    let batch_engine = super::common::BatchEngine::from_provider(provider.as_deref());
+    let use_parakeet = batch_engine == super::common::BatchEngine::Parakeet;
 
     info!(
         "Starting retranscription for meeting {} with language {:?}, model {:?}, provider {:?}",
@@ -401,20 +402,26 @@ async fn run_retranscription<R: Runtime>(
     );
 
     // Initialize the appropriate engine once (not per-segment)
-    let whisper_engine = if !use_parakeet {
+    let whisper_engine = if batch_engine == super::common::BatchEngine::Whisper {
         Some(get_or_init_whisper(&app, model.as_deref()).await?)
     } else {
         None
     };
-    let parakeet_engine = if use_parakeet {
+    let parakeet_engine = if batch_engine == super::common::BatchEngine::Parakeet {
         Some(get_or_init_parakeet(&app, model.as_deref()).await?)
+    } else {
+        None
+    };
+    let funasr_provider = if batch_engine == super::common::BatchEngine::FunAsr {
+        let engine = super::common::get_or_init_funasr(&app, model.as_deref(), language.as_deref()).await?;
+        Some(crate::audio::transcription::FunAsrProvider::new(engine))
     } else {
         None
     };
 
     // Keep input context for Parakeet, but use its token times for output rows.
-    // Whisper has no word timing on this path, so when assigning speakers it
-    // gets shorter, turn-aware input. Otherwise keep the long, safer inputs.
+    // Whisper and FUN-ASR have no word timing on this path. When assigning
+    // speakers they get shorter, turn-aware input. Otherwise keep longer input.
     let max_samples = if assign_speakers && !use_parakeet {
         SPEAKER_WHISPER_MAX_SEGMENT_SAMPLES
     } else {
@@ -479,7 +486,21 @@ async fn run_retranscription<R: Runtime>(
             continue;
         }
 
-        let (rows, confidence) = if use_parakeet {
+        let (rows, confidence) = if let Some(provider) = funasr_provider.as_ref() {
+            use crate::audio::transcription::TranscriptionProvider;
+            let result = provider
+                .transcribe(segment.samples.clone(), language.clone())
+                .await
+                .map_err(|e| anyhow!("FUN-ASR transcription failed on segment {}: {}", i, e))?;
+            // FUN-ASR has no word times. Keep the VAD and speaker-turn spans
+            // selected above, without changing Parakeet's token-timed rows.
+            let rows = if result.text.trim().is_empty() {
+                Vec::new()
+            } else {
+                vec![(result.text, segment.start_timestamp_ms, segment.end_timestamp_ms)]
+            };
+            (rows, 0.9f32)
+        } else if use_parakeet {
             let result = parakeet_engine
                 .as_ref()
                 .unwrap()

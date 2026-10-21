@@ -51,40 +51,49 @@ impl TranscriptionEngine {
 // MODEL VALIDATION AND INITIALIZATION
 // ============================================================================
 
-/// Validate that transcription models (Whisper or Parakeet) are ready before starting recording
-pub async fn validate_transcription_model_ready<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
-    // Check transcript configuration to determine which engine to validate
-    let config = match crate::api::api::api_get_transcript_config(
+/// Load the saved transcript configuration without substituting an engine.
+///
+/// A settings read failure must reach the user: silently switching to Parakeet
+/// makes the app use a model the user did not choose and hides the real error.
+async fn get_transcript_config_or_error<R: Runtime>(
+    app: &AppHandle<R>,
+) -> Result<crate::api::api::TranscriptConfig, String> {
+    let result = crate::api::api::api_get_transcript_config(
         app.clone(),
         app.clone().state(),
         None,
     )
-    .await
-    {
-        Ok(Some(config)) => {
-            info!(
-                "📝 Found transcript config - provider: {}, model: {}",
-                config.provider, config.model
-            );
-            config
-        }
-        Ok(None) => {
-            info!("📝 No transcript config found, defaulting to parakeet");
-            crate::api::api::TranscriptConfig {
-                provider: "parakeet".to_string(),
-                model: crate::config::DEFAULT_PARAKEET_MODEL.to_string(),
-                api_key: None,
-            }
-        }
+    .await;
+    let config = require_transcript_config(result)?;
+    info!(
+        "📝 Transcript config - provider: {}, model: {}",
+        config.provider, config.model
+    );
+    Ok(config)
+}
+
+fn require_transcript_config(
+    result: Result<Option<crate::api::api::TranscriptConfig>, String>,
+) -> Result<crate::api::api::TranscriptConfig, String> {
+    match result {
+        Ok(Some(config)) => Ok(config),
+        Ok(None) => Err(
+            "No transcription model is configured. Select a model in Settings.".to_string(),
+        ),
         Err(e) => {
-            warn!("⚠️ Failed to get transcript config: {}, defaulting to parakeet", e);
-            crate::api::api::TranscriptConfig {
-                provider: "parakeet".to_string(),
-                model: crate::config::DEFAULT_PARAKEET_MODEL.to_string(),
-                api_key: None,
-            }
+            warn!("⚠️ Failed to get transcript config: {}", e);
+            Err(format!(
+                "Could not load transcription settings: {}. Select a transcription model in Settings and try again.",
+                e
+            ))
         }
-    };
+    }
+}
+
+/// Validate that the selected transcription model is ready before starting recording
+pub async fn validate_transcription_model_ready<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
+    // Use the configured provider; do not fall back to a different engine.
+    let config = get_transcript_config_or_error(app).await?;
 
     // Validate based on provider
     match config.provider.as_str() {
@@ -135,10 +144,28 @@ pub async fn validate_transcription_model_ready<R: Runtime>(app: &AppHandle<R>) 
                 }
             }
         }
+        "funasr" => {
+            // Every chunk would fail with an unsupported language, so refuse
+            // to start rather than record without a transcript.
+            crate::funasr_engine::normalize_language(
+                crate::get_language_preference_internal().as_deref(),
+            )?;
+            info!("🔍 Validating FUN-ASR model...");
+            match crate::funasr_engine::commands::validate_model_ready_with_config(app).await {
+                Ok(model_name) => {
+                    info!("✅ FUN-ASR model validation successful: {} is ready", model_name);
+                    Ok(())
+                }
+                Err(e) => {
+                    warn!("❌ FUN-ASR model validation failed: {}", e);
+                    Err(e)
+                }
+            }
+        }
         other => {
             warn!("❌ Unsupported transcription provider for local recording: {}", other);
             Err(format!(
-                "Provider '{}' is not supported for local transcription. Please select 'localWhisper' or 'parakeet'.",
+                "Provider '{}' is not supported for local transcription. Please select 'localWhisper', 'parakeet' or 'funasr'.",
                 other
             ))
         }
@@ -149,38 +176,8 @@ pub async fn validate_transcription_model_ready<R: Runtime>(app: &AppHandle<R>) 
 pub async fn get_or_init_transcription_engine<R: Runtime>(
     app: &AppHandle<R>,
 ) -> Result<TranscriptionEngine, String> {
-    // Get provider configuration from API
-    let config = match crate::api::api::api_get_transcript_config(
-        app.clone(),
-        app.clone().state(),
-        None,
-    )
-    .await
-    {
-        Ok(Some(config)) => {
-            info!(
-                "📝 Transcript config - provider: {}, model: {}",
-                config.provider, config.model
-            );
-            config
-        }
-        Ok(None) => {
-            info!("📝 No transcript config found, defaulting to parakeet");
-            crate::api::api::TranscriptConfig {
-                provider: "parakeet".to_string(),
-                model: crate::config::DEFAULT_PARAKEET_MODEL.to_string(),
-                api_key: None,
-            }
-        }
-        Err(e) => {
-            warn!("⚠️ Failed to get transcript config: {}, defaulting to parakeet", e);
-            crate::api::api::TranscriptConfig {
-                provider: "parakeet".to_string(),
-                model: crate::config::DEFAULT_PARAKEET_MODEL.to_string(),
-                api_key: None,
-            }
-        }
-    };
+    // Use the configured provider; do not fall back to a different engine.
+    let config = get_transcript_config_or_error(app).await?;
 
     // Initialize the appropriate engine based on provider
     match config.provider.as_str() {
@@ -212,10 +209,31 @@ pub async fn get_or_init_transcription_engine<R: Runtime>(
                 }
             }
         }
-        "localWhisper" | _ => {
+        "funasr" => {
+            info!("Initializing FUN-ASR transcription engine");
+            let engine = {
+                let guard = crate::funasr_engine::commands::FUNASR_ENGINE.lock().unwrap();
+                guard.as_ref().cloned()
+            };
+            match engine {
+                Some(engine) if engine.is_model_loaded().await => Ok(TranscriptionEngine::Provider(
+                    Arc::new(super::funasr_provider::FunAsrProvider::new(engine)),
+                )),
+                Some(_) => Err("FUN-ASR engine initialized but no model loaded. This should not happen after validation.".to_string()),
+                None => Err("FUN-ASR engine not initialized. This should not happen after validation.".to_string()),
+            }
+        }
+        "localWhisper" => {
             info!("🎤 Initializing Whisper transcription engine");
             let whisper_engine = get_or_init_whisper(app).await?;
             Ok(TranscriptionEngine::Whisper(whisper_engine))
+        }
+        other => {
+            warn!("❌ Unsupported transcription provider for local recording: {}", other);
+            Err(format!(
+                "Provider '{}' is not supported for local transcription. Please select 'localWhisper', 'parakeet' or 'funasr'.",
+                other
+            ))
         }
     }
 }
@@ -440,4 +458,40 @@ pub async fn get_or_init_whisper<R: Runtime>(
     }
 
     Ok(engine)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::require_transcript_config;
+    use crate::api::api::TranscriptConfig;
+
+    fn config(provider: &str) -> TranscriptConfig {
+        TranscriptConfig {
+            provider: provider.to_string(),
+            model: format!("{}-model", provider),
+            api_key: None,
+        }
+    }
+
+    #[test]
+    fn config_errors_are_surfaced_instead_of_defaulting_to_parakeet() {
+        let error = require_transcript_config(Err("database is locked".to_string()))
+            .expect_err("config errors must not be hidden");
+        assert!(error.contains("database is locked"));
+        assert!(!error.to_lowercase().contains("parakeet"));
+    }
+
+    #[test]
+    fn missing_config_asks_the_user_to_select_a_model() {
+        let error =
+            require_transcript_config(Ok(None)).expect_err("missing config is not a model choice");
+        assert!(error.contains("No transcription model is configured"));
+    }
+
+    #[test]
+    fn the_saved_provider_is_preserved() {
+        let config = require_transcript_config(Ok(Some(config("funasr")))).unwrap();
+        assert_eq!(config.provider, "funasr");
+        assert_eq!(config.model, "funasr-model");
+    }
 }

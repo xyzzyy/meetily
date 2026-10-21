@@ -16,10 +16,16 @@ export const DEFAULT_WHISPER_MODEL = 'large-v3-turbo';
 export const DEFAULT_PARAKEET_MODEL = 'parakeet-tdt-0.6b-v3-int8';
 
 /**
+ * Default FUN-ASR Nano model (shared encoder plus Q4_K_M decoder)
+ */
+export const DEFAULT_FUNASR_MODEL = 'funasr-nano-2512-q4km';
+
+/**
  * Model defaults by provider type
  */
 export const MODEL_DEFAULTS = {
   whisper: DEFAULT_WHISPER_MODEL,
   localWhisper: DEFAULT_WHISPER_MODEL,
   parakeet: DEFAULT_PARAKEET_MODEL,
+  funasr: DEFAULT_FUNASR_MODEL,
 } as const;

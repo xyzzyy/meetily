@@ -69,19 +69,26 @@ export function useRecordingStart(
   }, []);
 
   const getTranscriptionProvider = useCallback(async (): Promise<string> => {
-    try {
-      const config = await invoke<TranscriptConfig | null>('api_get_transcript_config');
-      return config?.provider || 'parakeet';
-    } catch (error) {
-      console.error('Failed to load transcription provider:', error);
-      return 'parakeet';
+    const config = await invoke<TranscriptConfig | null>('api_get_transcript_config');
+    if (!config?.provider) {
+      throw new Error('No transcription model is configured. Select one in Settings.');
     }
+    return config.provider;
   }, []);
 
   // Check the selected local transcription provider, not a hardcoded engine.
   const checkTranscriptionModelReady = useCallback(async (): Promise<boolean> => {
+    let provider: string;
     try {
-      const provider = await getTranscriptionProvider();
+      provider = await getTranscriptionProvider();
+    } catch (error) {
+      // Don't guess a provider (and check the wrong model) here. The Rust
+      // recorder re-reads the same config and surfaces the real error.
+      console.error('Failed to load transcription provider:', error);
+      return true;
+    }
+
+    try {
       const commands = getProviderCommands(provider);
 
       if (commands) {
