@@ -10,8 +10,9 @@ The workflow has two checks:
   diarization benchmark tests, then builds the production frontend on Ubuntu.
 - **macOS release build and tests** builds the summary, speaker, and FUN-ASR
   helpers, then the app, on an Apple Silicon Mac with GitHub's `macos-latest`
-  runner. It also runs the diarization interval tests and the Rust unit tests.
-  Xcode and the Apple SDKs are already installed on the runner.
+  runner. It also runs the diarization interval tests and the Rust unit and
+  documentation tests. Xcode and the Apple SDKs are already installed on the
+  runner.
 
 The macOS job sets `SDKROOT` to the SDK from the active Xcode installation.
 This keeps the Swift compiler and the speaker helper's C++ headers on the
@@ -44,8 +45,10 @@ models, or audio devices.
 The Rust native tests run on macOS after the app build. They use temporary
 files and fixtures; none require audio hardware or system permissions. The
 suite has no ignored tests, so every Rust unit test runs in the macOS job. The
-workflow does not test Windows or Linux native builds, app packaging, signing,
-or notarization. Use the existing manual build workflows for those steps.
+summary template documentation example also runs as a Rust documentation test.
+The workflow does not test Windows or Linux native builds, app packaging,
+signing, or notarization. Use the existing manual build workflows for those
+steps.
 
 The checks use a read-only GitHub token and no repository secrets. They do not
 publish releases or install the app. Frontend output is kept for three days
@@ -87,5 +90,6 @@ run with:
 
 ```sh
 cargo test --locked --release -p meetily --lib
+cargo test --locked --release -p meetily --doc
 cargo test --locked --release -p llama-helper --features metal
 ```

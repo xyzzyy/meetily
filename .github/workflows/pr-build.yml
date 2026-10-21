@@ -137,5 +137,7 @@ jobs:
         run: cargo build --locked --release -p meetily
       - name: Run Rust unit tests
         run: cargo test --locked --release -p meetily --lib
+      - name: Run Rust documentation tests
+        run: cargo test --locked --release -p meetily --doc
       - name: Run llama helper tests
         run: cargo test --locked --release -p llama-helper --features metal
