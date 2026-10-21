@@ -6,12 +6,12 @@
 The workflow has two checks:
 
 - **Frontend build and tests** installs the locked dependencies, runs the
-  existing test suite one file per process, and builds the production frontend
-  on Ubuntu.
-- **macOS release build and test compilation** builds the summary helper, the
-  speaker helper when present, and the app on an Apple Silicon Mac with
-  GitHub's `macos-latest` runner. It also compiles the Rust unit tests. Xcode
-  and the Apple SDKs are already installed on the runner.
+  build guard tests and the existing frontend suite one file per process, and
+  builds the production frontend on Ubuntu.
+- **macOS release build and tests** builds the summary helper, the speaker
+  helper when present, and the app on an Apple Silicon Mac with GitHub's
+  `macos-latest` runner. It also runs the Rust unit tests. Xcode and the Apple
+  SDKs are already installed on the runner.
 
 The macOS job sets `SDKROOT` to the SDK from the active Xcode installation.
 This keeps the Swift compiler and the speaker helper's C++ headers on the
@@ -32,10 +32,10 @@ native responses. They do not record audio, run model inference, remove real
 model files, or start the desktop app. The summary parser accepts a summary
 object or its JSON encoding and rejects malformed JSON.
 
-Rust tests are compiled but are not run by this workflow. Some existing tests
-need audio devices or system permissions. The workflow does not test Windows
-or Linux native builds, app packaging, signing, or notarization. Use the
-existing manual build workflows for those build steps.
+The native tests run on macOS after the app build. They use temporary files
+and fixtures; none require audio hardware or system permissions. The workflow
+does not test Windows or Linux native builds, app packaging, signing, or
+notarization. Use the existing manual build workflows for those build steps.
 
 The checks use a read-only GitHub token and no repository secrets. They do not
 publish releases or install the app. Frontend output is kept for three days
@@ -53,7 +53,17 @@ pnpm build
 
 The test step in `.github/workflows/pr-build.yml` shows how the suite is run:
 each file gets its own process and uses either Bun or Node's test runner,
-depending on its imports.
+depending on its imports. The build guard tests run from the repository root:
 
-To compile the native app and tests, use the macOS job steps in the workflow.
-The frontend output and the helper binaries must be built first.
+```sh
+node --test .github/verify-portable-ggml.test.cjs
+```
+
+To run the native tests locally, use the macOS job steps in the workflow. The
+frontend output and the helper binaries must be built first. The tests then
+run with:
+
+```sh
+cargo test --locked --release -p meetily --lib
+cargo test --locked --release -p llama-helper --features metal
+```

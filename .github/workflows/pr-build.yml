@@ -41,6 +41,8 @@ jobs:
       - name: Install frontend dependencies
         working-directory: frontend
         run: pnpm install --frozen-lockfile
+      - name: Run build guard tests
+        run: node --test .github/verify-portable-ggml.test.cjs
       - name: Run frontend tests
         working-directory: frontend
         run: |
@@ -74,7 +76,7 @@ jobs:
           retention-days: 3
 
   macos:
-    name: macOS release build and test compilation
+    name: macOS release build and tests
     needs: frontend
     runs-on: macos-latest
     timeout-minutes: 60
@@ -122,5 +124,7 @@ jobs:
         run: node frontend/scripts/build-diarization-sidecar.js
       - name: Build the app in release mode
         run: cargo build --locked --release -p meetily
-      - name: Compile Rust unit tests
-        run: cargo test --locked --release -p meetily --lib --no-run
+      - name: Run Rust unit tests
+        run: cargo test --locked --release -p meetily --lib
+      - name: Run llama helper tests
+        run: cargo test --locked --release -p llama-helper --features metal
