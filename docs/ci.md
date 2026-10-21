@@ -10,8 +10,9 @@ The workflow has two checks:
   diarization benchmark tests, then builds the production frontend on Ubuntu.
 - **macOS release build and tests** builds the summary helper, the speaker
   helper when present, and the app on an Apple Silicon Mac with GitHub's
-  `macos-latest` runner. It also runs the Rust unit tests. Xcode and the Apple
-  SDKs are already installed on the runner.
+  `macos-latest` runner. It also runs the diarization interval tests and the
+  Rust unit tests. Xcode and the Apple SDKs are already installed on the
+  runner.
 
 The macOS job sets `SDKROOT` to the SDK from the active Xcode installation.
 This keeps the Swift compiler and the speaker helper's C++ headers on the
@@ -35,6 +36,11 @@ object or its JSON encoding and rejects malformed JSON.
 The diarization benchmark tests use Python's unittest runner. They cover the
 scorer's speaker mapping and overlap calculations and do not call the
 ElevenLabs API or read audio files.
+
+The diarization interval tests compile the pure interval processing source
+with `swiftc` and run it as a small executable. They cover overlap splitting,
+speaker candidates, and interval normalization without FluidAudio, downloaded
+models, or audio devices.
 
 The native tests run on macOS after the app build. They use temporary files
 and fixtures; none require audio hardware or system permissions. The workflow
@@ -62,6 +68,17 @@ depending on its imports. The build guard tests run from the repository root:
 ```sh
 node --test .github/verify-portable-ggml.test.cjs
 python3 -m unittest discover -s diarization-sidecar/Benchmarks -p 'test_*.py' -v
+```
+
+To run the diarization interval tests locally, compile the source and test
+harness directly:
+
+```sh
+swiftc \
+  diarization-sidecar/Sources/meetily-diarization/IntervalProcessing.swift \
+  diarization-sidecar/Tests/IntervalProcessing/main.swift \
+  -o /tmp/meetily-interval-tests
+/tmp/meetily-interval-tests
 ```
 
 To run the native tests locally, use the macOS job steps in the workflow. The

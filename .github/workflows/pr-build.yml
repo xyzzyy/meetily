@@ -124,6 +124,13 @@ jobs:
       - name: Build the local speaker helper
         if: ${{ hashFiles('frontend/scripts/build-diarization-sidecar.js') != '' }}
         run: node frontend/scripts/build-diarization-sidecar.js
+      - name: Run diarization interval tests
+        run: |
+          swiftc \
+            diarization-sidecar/Sources/meetily-diarization/IntervalProcessing.swift \
+            diarization-sidecar/Tests/IntervalProcessing/main.swift \
+            -o "$RUNNER_TEMP/meetily-interval-tests"
+          "$RUNNER_TEMP/meetily-interval-tests"
       - name: Build the app in release mode
         run: cargo build --locked --release -p meetily
       - name: Run Rust unit tests
