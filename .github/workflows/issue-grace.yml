@@ -1,0 +1,398 @@
+name: issue-grace
+
+# One-time grace window for issues closed by issue-enforce.yml.
+#
+# GitHub does not let issue authors reopen their own issues, so a closed issue
+# would otherwise be a dead end. After fixing the title/body of a closed issue
+# labeled `invalid-template`, the author can comment `/reopen`:
+#
+#   - if the issue now passes validation, it is reopened and the
+#     `invalid-template` label is removed;
+#   - if it still fails, it is reopened with `template-grace` (the active
+#     window, expired nightly) and `template-grace-used` (the one-time chance
+#     has been consumed). It stays open until the next nightly sweep, giving
+#     the author time to edit it.
+#
+# Only the issue author can use the command, and only once per issue. The
+# `template-grace-used` label is permanent state: subsequent `/reopen` attempts
+# are refused with a pointer to the maintainers. A maintainer can still reopen
+# the issue manually; maintainer-triggered events are exempt from enforcement.
+#
+# At 04:00 UTC every night, open issues still carrying `template-grace` are
+# re-validated. Fixed issues are passed; the rest are closed again and the
+# active label is removed. `template-grace-used` stays so the one-time limit
+# survives later closures. If anyone closes the issue during the window (for
+# example a maintainer), the active label is removed on close so a later manual
+# reopen is not expired by the next sweep.
+
+on:
+  issue_comment:
+    types: [created]
+  issues:
+    types: [closed]
+  schedule:
+    - cron: "0 4 * * *"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Report what would expire without changing anything"
+        type: boolean
+        default: false
+
+jobs:
+  reopen:
+    if: >-
+      github.event_name == 'issue_comment' &&
+      github.event.issue.state == 'closed' &&
+      github.event.issue.pull_request == null &&
+      github.event.comment.user.login == github.event.issue.user.login
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    concurrency:
+      group: issue-grace-command-${{ github.event.issue.number }}
+      cancel-in-progress: false
+    permissions:
+      issues: write
+      contents: read
+    steps:
+      - name: Check out the shared validator
+        uses: actions/checkout@v4
+        with:
+          sparse-checkout: .github/scripts
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+
+      - name: Handle /reopen
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const path = require("path");
+            const { validate, newIssueUrl } = require(
+              path.join(process.env.GITHUB_WORKSPACE, ".github/scripts/issue-template.js")
+            );
+
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const comment = context.payload.comment;
+            const num = context.payload.issue.number;
+
+            if ((comment.body || "").trim().toLowerCase() !== "/reopen") return;
+
+            // Read the live issue: the event payload may predate a concurrent
+            // maintainer action.
+            const live = (await github.rest.issues.get({
+              owner: owner, repo: repo, issue_number: num
+            })).data;
+
+            if (live.state !== "closed") {
+              core.notice("Issue is already open; ignoring /reopen.");
+              return;
+            }
+            if (
+              live.closed_at && comment.created_at &&
+              new Date(comment.created_at) < new Date(live.closed_at)
+            ) {
+              core.notice("Comment predates the latest close; ignoring /reopen.");
+              return;
+            }
+            if (comment.user.login.toLowerCase() !== ((live.user && live.user.login) || "").toLowerCase()) {
+              core.notice("Only the issue author can use /reopen; ignoring.");
+              return;
+            }
+
+            let current = (live.labels || []).map(function (l) {
+              return (l && (l.name || l)) || "";
+            });
+
+            if (!current.includes("invalid-template")) {
+              core.notice("Issue was not closed for its template; ignoring /reopen.");
+              return;
+            }
+
+            async function hasComment(marker) {
+              const comments = await github.paginate(github.rest.issues.listComments, {
+                owner: owner, repo: repo, issue_number: num, per_page: 100
+              });
+              return comments.some(function (c) {
+                return (c.body || "").includes(marker);
+              });
+            }
+
+            async function commentOnce(marker, body) {
+              if (await hasComment(marker)) return;
+              await github.rest.issues.createComment({
+                owner: owner, repo: repo, issue_number: num, body: marker + "\n" + body
+              });
+            }
+
+            async function addLabel(name) {
+              if (current.includes(name)) return;
+              await github.rest.issues.addLabels({
+                owner: owner, repo: repo, issue_number: num, labels: [name]
+              });
+              current.push(name);
+            }
+
+            async function removeLabelSafely(name) {
+              if (!current.includes(name)) return;
+              try {
+                await github.rest.issues.removeLabel({
+                  owner: owner, repo: repo, issue_number: num, name: name
+                });
+              } catch (e) {
+                // Label already gone; nothing to do.
+              }
+              current.splice(current.indexOf(name), 1);
+            }
+
+            async function reopen() {
+              await github.rest.issues.update({
+                owner: owner, repo: repo, issue_number: num, state: "open"
+              });
+            }
+
+            // One chance per issue. Used authors are pointed at the maintainers
+            // once, not on every later comment.
+            if (current.includes("template-grace-used")) {
+              core.notice("The one automatic reopen was already used; refusing.");
+              await commentOnce(
+                "<!-- meetily:grace-used -->",
+                "This issue has already used its one automatic reopen. A maintainer " +
+                "will need to reopen it from here, or you can open a new issue through " +
+                "the [issue forms](https://github.com/" + owner + "/" + repo + "/issues/new/choose)."
+              );
+              return;
+            }
+
+            const result = validate(live);
+
+            if (result.ok) {
+              core.notice("Issue now passes; reopening without a grace window.");
+              // Add the label before reopening: if anything below fails, the
+              // issue is still closed and the command can be retried.
+              await addLabel(result.template.label);
+              await reopen();
+              await removeLabelSafely("invalid-template");
+              await removeLabelSafely("template-grace");
+              await commentOnce(
+                "<!-- meetily:template-passed -->",
+                "Reopened — thanks for updating this issue. It now includes the " +
+                "information required by the [" + result.template.name + "](" +
+                newIssueUrl(owner, repo, result.template) + ") template."
+              );
+              return;
+            }
+
+            core.notice("Issue still fails validation; opening the one-time grace window.");
+
+            // Make sure both state labels exist on forks too.
+            for (const label of [
+              {
+                name: "template-grace",
+                color: "fbca04",
+                description: "One-time grace window after an author /reopen; expired nightly"
+              },
+              {
+                name: "template-grace-used",
+                color: "d4c5f9",
+                description: "The one automatic reopen for this issue has been used"
+              }
+            ]) {
+              try {
+                await github.rest.issues.createLabel({
+                  owner: owner, repo: repo, name: label.name,
+                  color: label.color, description: label.description
+                });
+              } catch (e) {
+                if (e.status !== 422) throw e; // 422: label already exists
+              }
+            }
+
+            // Labels first so the nightly sweep always sees the window.
+            await addLabel("template-grace");
+            await addLabel("template-grace-used");
+            await reopen();
+
+            const missing = [];
+            if (!result.template) {
+              missing.push(
+                "no recognized title prefix (`[BUG]`, `[FEATURE]`, `[DOCS]`, or `[QUESTION]`)"
+              );
+            } else {
+              if (result.missing.length) {
+                missing.push(
+                  "missing content under " +
+                  result.missing.map(function (h) { return "`### " + h + "`"; }).join(", ")
+                );
+              }
+              if (result.unchecked.length) {
+                missing.push(
+                  "unchecked required box(es): " +
+                  result.unchecked.map(function (item) { return "`" + item + "`"; }).join(", ")
+                );
+              }
+            }
+
+            await commentOnce(
+              "<!-- meetily:grace-reopened -->",
+              "I reopened this issue for one review cycle. It still has " +
+              missing.join("; ") + ".\n\n" +
+              "Please edit the issue to fix that before the next nightly check " +
+              "(04:00 UTC), or it will be closed again. This is the one automatic " +
+              "reopen for this issue — if it closes again, a maintainer will need " +
+              "to reopen it."
+            );
+
+  expire:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    concurrency:
+      group: issue-grace-expiry
+      cancel-in-progress: false
+    permissions:
+      issues: write
+      contents: read
+    steps:
+      - name: Check out the shared validator
+        uses: actions/checkout@v4
+        with:
+          sparse-checkout: .github/scripts
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+
+      - name: Expire grace windows
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const path = require("path");
+            const { validate, newIssueUrl } = require(
+              path.join(process.env.GITHUB_WORKSPACE, ".github/scripts/issue-template.js")
+            );
+
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const dryRun =
+              context.eventName === "workflow_dispatch" &&
+              String((context.payload.inputs || {}).dry_run) === "true";
+
+            const issues = await github.paginate(github.rest.issues.listForRepo, {
+              owner: owner, repo: repo, state: "open",
+              labels: "template-grace", per_page: 100
+            });
+
+            core.info("Found " + issues.length + " open issue(s) in a grace window.");
+            if (dryRun) core.info("Dry run: no labels, comments, or state will change.");
+
+            async function hasComment(num, marker) {
+              const comments = await github.paginate(github.rest.issues.listComments, {
+                owner: owner, repo: repo, issue_number: num, per_page: 100
+              });
+              return comments.some(function (c) {
+                return (c.body || "").includes(marker);
+              });
+            }
+
+            async function commentOnce(num, marker, body) {
+              if (await hasComment(num, marker)) return;
+              await github.rest.issues.createComment({
+                owner: owner, repo: repo, issue_number: num, body: marker + "\n" + body
+              });
+            }
+
+            async function removeLabelSafely(num, name) {
+              try {
+                await github.rest.issues.removeLabel({
+                  owner: owner, repo: repo, issue_number: num, name: name
+                });
+              } catch (e) {
+                if (e.status !== 404) throw e;
+              }
+            }
+
+            for (const issue of issues) {
+              if (issue.pull_request) continue;
+              const num = issue.number;
+
+              try {
+                // Keep the same exemption as issue-enforce.yml: a
+                // maintainer-authored issue is never auto-closed.
+                if (["OWNER", "MEMBER", "COLLABORATOR"].includes(issue.author_association)) {
+                  core.info("#" + num + " is maintainer-authored; clearing the grace label without closing.");
+                  if (!dryRun) await removeLabelSafely(num, "template-grace");
+                  continue;
+                }
+
+                const result = validate(issue);
+
+                // Defensive: an edit may have fixed the issue after the last
+                // enforcement run failed. Pass it instead of closing it.
+                if (result.ok) {
+                  core.info("#" + num + " now passes; clearing the grace window.");
+                  if (dryRun) continue;
+                  await github.rest.issues.addLabels({
+                    owner: owner, repo: repo, issue_number: num,
+                    labels: [result.template.label]
+                  });
+                  await removeLabelSafely(num, "invalid-template");
+                  await removeLabelSafely(num, "template-grace");
+                  await commentOnce(
+                    num,
+                    "<!-- meetily:template-passed -->",
+                    "Thanks — this issue now includes the information required by the " +
+                    "[" + result.template.name + "](" +
+                    newIssueUrl(owner, repo, result.template) + ") template."
+                  );
+                  continue;
+                }
+
+                core.info("#" + num + " is still incomplete; expiring its grace window.");
+                if (dryRun) continue;
+
+                await commentOnce(
+                  num,
+                  "<!-- meetily:grace-expired -->",
+                  "The one-time grace window for this issue has ended and the required " +
+                  "template information is still missing, so it has been closed again.\n\n" +
+                  "A maintainer will need to reopen it from here. You can also open a " +
+                  "new issue through the [issue forms](https://github.com/" + owner + "/" +
+                  repo + "/issues/new/choose)."
+                );
+                await github.rest.issues.update({
+                  owner: owner, repo: repo, issue_number: num,
+                  state: "closed", state_reason: "not_planned"
+                });
+                await removeLabelSafely(num, "template-grace");
+              } catch (e) {
+                core.warning("Could not expire #" + num + ": " + e.message);
+              }
+            }
+
+  cleanup:
+    if: github.event_name == 'issues' && github.event.action == 'closed'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      issues: write
+    steps:
+      - name: Clear the active grace label on close
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const issue = context.payload.issue;
+            const labels = (issue.labels || []).map(function (l) {
+              return (l && (l.name || l)) || "";
+            });
+            if (!labels.includes("template-grace")) return;
+
+            // If a maintainer (or the author) closed the issue during the grace
+            // window, the window is over. `template-grace-used` stays; the
+            // one-time chance has still been consumed.
+            try {
+              await github.rest.issues.removeLabel({
+                owner: context.repo.owner, repo: context.repo.repo,
+                issue_number: issue.number, name: "template-grace"
+              });
+            } catch (e) {
+              if (e.status !== 404) throw e;
+            }

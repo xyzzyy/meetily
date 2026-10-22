@@ -2,7 +2,7 @@
 
 This document provides a quick overview of all available CI/CD workflows in this repository.
 
-**Note:** Most build/release workflows run manually (`workflow_dispatch`). Three run automatically: `pr-build.yml` (pull requests and pushes to `main`), `opencode-review.yml` (pull-request events), and `issue-enforce.yml` (issue events).
+**Note:** Most build/release workflows run manually (`workflow_dispatch`). Four run automatically: `pr-build.yml` (pull requests and pushes to `main`), `opencode-review.yml` (pull-request events), `issue-enforce.yml` (issue events), and `issue-grace.yml` (`/reopen` comments and a nightly expiry sweep).
 
 ## Workflow Files
 
@@ -191,7 +191,8 @@ This document provides a quick overview of all available CI/CD workflows in this
 - Auto-applies the matching label (bug/enhancement/documentation/question)
 - Warns, labels `invalid-template`, and auto-closes non-conforming issues (warn + auto-close)
 - Grandfathers existing issues: nothing is backfilled, and an open issue is only re-evaluated after it is edited or reopened
-- Never reopens closed issues; closed-issue authors are directed to resubmit through the form
+- Does not reopen closed issues itself; the author's one-time `/reopen` command is handled by `issue-grace.yml`
+- Never closes an issue that is inside its `template-grace` window; the nightly sweep owns expiry
 - Maintainer-authored issues and maintainer-triggered edits/reopens are exempt
 
 **Triggers:**
@@ -199,6 +200,28 @@ This document provides a quick overview of all available CI/CD workflows in this
 
 **Use When:**
 - Runs by itself; no manual dispatch needed
+
+---
+
+### 10. **issue-grace.yml** - One-Time Reopen and Nightly Expiry
+**Purpose:** Give authors one automatic way back into a template-closed issue, then expire that window nightly.
+
+**Key Features:**
+- Handles `/reopen` comments from the issue author on closed issues labeled `invalid-template`
+- Re-validates immediately: fixed issues reopen as normal; still-incomplete issues reopen with `template-grace` (the active window) and `template-grace-used` (the one-time chance has been consumed)
+- Only the author can use the command, and only once per issue; later attempts get a one-time pointer to the maintainers
+- Nightly sweep at 04:00 UTC re-validates open `template-grace` issues: fixed ones pass, incomplete ones are closed again and the active label is removed
+- Removes `template-grace` if the issue is closed during the window, so a later maintainer reopen is not affected by a stale label
+- Maintainers can always reopen manually; maintainer-triggered events are exempt from `issue-enforce.yml`
+
+**Triggers:**
+- Automatically on issue comments (`/reopen`)
+- Automatically on issue close (stale-window cleanup)
+- Nightly at 04:00 UTC
+- Manual dispatch (`workflow_dispatch`) for the expiry sweep, with an optional dry run
+
+**Use When:**
+- Runs by itself; the manual dispatch is useful to preview or force an expiry sweep
 
 ---
 

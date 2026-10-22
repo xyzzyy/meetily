@@ -11,15 +11,19 @@ name: issue-enforce
 # non-maintainer it:
 #   - recognizes the template from the [BUG]/[FEATURE]/[DOCS]/[QUESTION] title
 #     prefix and auto-applies the matching label,
-#   - requires that the template's mandatory section headings exist in the body.
+#   - requires that the template's mandatory section headings exist in the body,
+#     have content, and that the required checkboxes are checked.
 #
 # Non-conforming issues get an explanatory comment, the `invalid-template` label,
-# and are closed immediately (warn + auto-close).
+# and are closed immediately (warn + auto-close). The comment explains the
+# one-time `/reopen` command handled by issue-grace.yml.
 #
 # Existing issues are grandfathered: nothing is backfilled, and an open issue is
-# only re-evaluated after it is edited or reopened. The workflow never reopens
-# a closed issue itself; closed issues stay closed and their authors are asked
-# to resubmit through the form.
+# only re-evaluated after it is edited or reopened. This workflow never reopens
+# a closed issue itself. An issue carrying `template-grace` is inside its
+# one-time grace window: it is re-checked normally, but never closed here. The
+# nightly job in issue-grace.yml expires the window if the issue is still
+# incomplete.
 #
 # Maintainer-authored issues (owner/member/collaborator) and events triggered by
 # maintainers (owner/member/collaborator/triage) are exempt, so a maintainer's
@@ -40,11 +44,24 @@ jobs:
     timeout-minutes: 5
     permissions:
       issues: write
+      contents: read
     steps:
+      - name: Check out the shared validator
+        uses: actions/checkout@v4
+        with:
+          sparse-checkout: .github/scripts
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+
       - name: Enforce issue templates
         uses: actions/github-script@v7
         with:
           script: |
+            const path = require("path");
+            const { TEMPLATES, validate, newIssueUrl } = require(
+              path.join(process.env.GITHUB_WORKSPACE, ".github/scripts/issue-template.js")
+            );
+
             const issue = context.payload.issue;
             const owner = context.repo.owner;
             const repo = context.repo.repo;
@@ -94,115 +111,17 @@ jobs:
               }
             }
 
-            const TEMPLATES = {
-              "[bug]": {
-                name: "Bug Report", file: "bug_report.yml", label: "bug",
-                required: ["Bug Description", "Current Behavior", "Expected Behavior", "Steps to Reproduce", "Environment"],
-                checklist: ["I have described the issue clearly", "I have searched for similar issues"]
-              },
-              "[feature]": {
-                name: "Feature Request", file: "feature_request.yml", label: "enhancement",
-                required: ["Feature Description", "Upstream Work & Prior Art"],
-                checklist: ["I have described the issue clearly", "I have searched for similar feature requests"]
-              },
-              "[docs]": {
-                name: "Documentation", file: "documentation.yml", label: "documentation",
-                required: ["Documentation Location", "Issue Type", "What's Wrong"],
-                checklist: ["I have described the issue clearly", "I have searched for similar documentation issues"]
-              },
-              "[question]": {
-                name: "Question", file: "question.yml", label: "question",
-                required: ["What are you trying to do?", "What have you already tried?"],
-                checklist: ["I have described the issue clearly"]
-              }
-            };
-
-            const title = (live.title || "").toLowerCase();
-            const body = live.body || "";
             const current = (live.labels || []).map(function (l) {
               return (l && (l.name || l)) || "";
             });
             // Set before any label changes so repeated non-conforming edits do
             // not spam the same guidance comment.
             const hadInvalidTemplateLabel = current.includes("invalid-template");
+            const inGrace = current.includes("template-grace");
+            const graceUsed = current.includes("template-grace-used");
 
-            let tpl = null;
-            for (const prefix of Object.keys(TEMPLATES)) {
-              if (title.startsWith(prefix)) {
-                tpl = TEMPLATES[prefix];
-                break;
-              }
-            }
-
-            function escapeRegExp(s) {
-              return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-            }
-
-            // Split the body into its `###` sections, ignoring headings that
-            // appear inside fenced code blocks (logs often contain them).
-            function parseSections(markdown) {
-              const sections = new Map();
-              let current = null;
-              let fenceChar = null;
-              for (const line of markdown.split(/\r?\n/)) {
-                const fence = line.match(/^\s*(```+|~~~+)/);
-                if (fence) {
-                  if (!fenceChar) {
-                    fenceChar = fence[1][0];
-                  } else if (fence[1][0] === fenceChar) {
-                    fenceChar = null;
-                  }
-                  if (current) sections.get(current).push(line);
-                  continue;
-                }
-                if (!fenceChar) {
-                  const heading = line.match(/^#{1,6}[ \t]+(.+?)[ \t]*$/);
-                  if (heading) {
-                    current = heading[1].trim();
-                    if (!sections.has(current)) sections.set(current, []);
-                    continue;
-                  }
-                }
-                if (current) sections.get(current).push(line);
-              }
-              return sections;
-            }
-
-            function findSection(sections, heading) {
-              const match = Array.from(sections.keys()).find(function (key) {
-                return key.toLowerCase() === heading.toLowerCase();
-              });
-              return match === undefined ? null : sections.get(match).join("\n").trim();
-            }
-
-            function isBlankSection(content) {
-              return content === null || content === "" || /^_no response_$/i.test(content);
-            }
-
-            function missingSections(t, sections) {
-              const missing = [];
-              for (const heading of t.required) {
-                if (isBlankSection(findSection(sections, heading))) missing.push(heading);
-              }
-              return missing;
-            }
-
-            function uncheckedCheckboxes(t, sections) {
-              const checklist = findSection(sections, "Checklist");
-              if (checklist === null) return t.checklist.slice();
-              const unchecked = [];
-              for (const item of t.checklist) {
-                const pattern = new RegExp(
-                  "^[ \\t]*[-*+][ \\t]*\\[[xX]\\][ \\t]*" + escapeRegExp(item) + "[ \\t]*$", "m"
-                );
-                if (!pattern.test(checklist)) unchecked.push(item);
-              }
-              return unchecked;
-            }
-
-            function newIssueUrl(t) {
-              return "https://github.com/" + owner + "/" + repo + "/issues/new?template=" + t.file;
-            }
+            const result = validate(live);
+            const tpl = result.template;
 
             async function addLabel(name) {
               if (current.includes(name)) return;
@@ -234,6 +153,15 @@ jobs:
               current.splice(current.indexOf(name), 1);
             }
 
+            async function hasCommentMarker(marker) {
+              const comments = await github.paginate(github.rest.issues.listComments, {
+                owner: owner, repo: repo, issue_number: num, per_page: 100
+              });
+              return comments.some(function (comment) {
+                return (comment.body || "").includes(marker);
+              });
+            }
+
             async function commentOnce(msg) {
               if (hadInvalidTemplateLabel) {
                 core.notice("Issue was already flagged earlier; skipping duplicate comment.");
@@ -249,68 +177,97 @@ jobs:
               });
             }
 
+            function reopenHint() {
+              if (graceUsed) {
+                return "This issue has already used its one automatic reopen, so a " +
+                  "maintainer will need to reopen it. You can also open a new issue " +
+                  "through the form.";
+              }
+              return "Editing this issue does not reopen it. After adding the missing " +
+                "information, comment `/reopen` to use the one automatic reopen; the " +
+                "issue is re-checked by the next nightly run. If it is still incomplete " +
+                "after that, a maintainer will need to reopen it. You can also open a " +
+                "new issue through the form.";
+            }
+
+            // A grace-window issue is never closed here; issue-grace.yml owns
+            // expiry. It is still checked so a fixed issue passes immediately.
+            if (result.ok) {
+              core.notice("Issue follows the " + tpl.name + " template.");
+              await addLabel(tpl.label);
+              await removeLabelSafely("invalid-template");
+              if (inGrace) {
+                await removeLabelSafely("template-grace");
+                if (!(await hasCommentMarker("<!-- meetily:template-passed -->"))) {
+                  await github.rest.issues.createComment({
+                    owner: owner, repo: repo, issue_number: num,
+                    body: "<!-- meetily:template-passed -->\n" +
+                      "Thanks — this issue now includes the information required by the " +
+                      "[" + tpl.name + "](" + newIssueUrl(owner, repo, tpl) + ") template."
+                  });
+                }
+              }
+              return;
+            }
+
             if (!tpl) {
-              core.notice("No template title prefix recognized; labeling and closing.");
+              core.notice("No template title prefix recognized.");
+              if (inGrace) {
+                core.notice("Issue is inside its grace window; leaving it open for nightly expiry.");
+                return;
+              }
               await addLabel("invalid-template");
               const chooser = Object.keys(TEMPLATES).map(function (prefix) {
                 const t = TEMPLATES[prefix];
-                return "- `" + prefix.toUpperCase() + "` — [" + t.name + "](" + newIssueUrl(t) + ")";
+                return "- `" + prefix.toUpperCase() + "` — [" + t.name + "](" + newIssueUrl(owner, repo, t) + ")";
               }).join("\n");
               const msg =
                 "Thanks for opening an issue! I could not match it to one of our " +
                 "issue templates (the title should start with `[BUG]`, `[FEATURE]`, " +
                 "`[DOCS]`, or `[QUESTION]` and the body should contain that " +
                 "template's sections).\n\n" +
-                "This issue has been closed. Editing it does not reopen it — " +
-                "please open a new issue through one of the forms below, or ask a " +
-                "maintainer to reopen this one if appropriate:\n\n" + chooser + "\n\n" +
+                "This issue has been closed. " + reopenHint() + "\n\n" +
+                chooser + "\n\n" +
                 "Maintainer-authored issues are exempt from this check.";
               await commentOnce(msg);
               await closeAsNotPlanned();
               return;
             }
 
-            const sections = parseSections(body);
-            const missing = missingSections(tpl, sections);
-            const unchecked = uncheckedCheckboxes(tpl, sections);
-            if (missing.length === 0 && unchecked.length === 0) {
-              core.notice("Issue follows the " + tpl.name + " template.");
-              await addLabel(tpl.label);
-              await removeLabelSafely("invalid-template");
+            core.notice(
+              "Template violations" +
+              (result.missing.length ? " - missing sections: " + result.missing.join(", ") : "") +
+              (result.unchecked.length ? " - unchecked boxes: " + result.unchecked.join(", ") : "")
+            );
+
+            if (inGrace) {
+              core.notice("Issue is inside its grace window; leaving it open for nightly expiry.");
               return;
             }
 
-            core.notice(
-              "Template violations" +
-              (missing.length ? " - missing sections: " + missing.join(", ") : "") +
-              (unchecked.length ? " - unchecked boxes: " + unchecked.join(", ") : "")
-            );
             await addLabel("invalid-template");
             const problems = [];
-            if (missing.length) {
+            if (result.missing.length) {
               problems.push(
                 "I could not find content under the required section(s) " +
-                missing.map(function (h) {
+                result.missing.map(function (h) {
                   return "`### " + h + "`";
                 }).join(", ") + "."
               );
             }
-            if (unchecked.length) {
+            if (result.unchecked.length) {
               problems.push(
                 "The following required checkbox(es) are not checked: " +
-                unchecked.map(function (item) {
+                result.unchecked.map(function (item) {
                   return "`" + item + "`";
                 }).join(", ") + "."
               );
             }
             const msg =
               "Thanks for opening an issue! This one does not follow the " +
-              "[" + tpl.name + "](" + newIssueUrl(tpl) + ") template.\n\n" +
+              "[" + tpl.name + "](" + newIssueUrl(owner, repo, tpl) + ") template.\n\n" +
               problems.join("\n\n") + "\n\n" +
-              "This issue has been closed. Editing it does not reopen it — " +
-              "please open a new issue through the [" + tpl.name + "](" + newIssueUrl(tpl) + ") " +
-              "form and include the missing information, or ask a maintainer to reopen " +
-              "this issue if appropriate.\n\n" +
+              "This issue has been closed. " + reopenHint() + "\n\n" +
               "Maintainer-authored issues are exempt from this check.";
             await commentOnce(msg);
             await closeAsNotPlanned();
