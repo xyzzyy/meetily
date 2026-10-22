@@ -35,6 +35,7 @@ concurrency:
 
 jobs:
   enforce:
+    if: github.event.issue.state == 'open'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -48,33 +49,49 @@ jobs:
             const owner = context.repo.owner;
             const repo = context.repo.repo;
             const num = issue.number;
+            const action = context.payload.action;
+
+            // Closed issues are never processed (and never reopened): edits to
+            // them do nothing; only a reopen event can bring one back.
+            if (issue.state !== "open") {
+              core.notice("Issue is closed; skipping enforcement.");
+              return;
+            }
 
             if (["OWNER", "MEMBER", "COLLABORATOR"].includes(issue.author_association)) {
               core.notice("Authored by a maintainer; skipping enforcement.");
               return;
             }
 
-            // A maintainer's edit or manual reopen is a deliberate override,
-            // not a reporter bypassing the templates. Skip events triggered by
-            // maintainers (triage can reopen/label/close).
-            const actor = context.actor;
-            if (actor) {
-              try {
-                const perm = await github.rest.repos.getCollaboratorPermissionLevel({
-                  owner: owner, repo: repo, username: actor
-                });
-                if (["admin", "maintain", "write", "triage"].includes(perm.data.permission)) {
-                  core.notice("Triggered by a maintainer (" + actor + "); skipping enforcement.");
-                  return;
-                }
-              } catch (e) {
-                // Not a collaborator or lookup unavailable: keep enforcing.
-              }
-            }
-
-            if (issue.state !== "open") {
+            // Read the live issue so the check runs against the current title,
+            // body and state, not the snapshot from when this event was queued.
+            const live = (await github.rest.issues.get({
+              owner: owner, repo: repo, issue_number: num
+            })).data;
+            if (live.state !== "open") {
               core.notice("Issue is closed; skipping enforcement.");
               return;
+            }
+
+            // A maintainer's edit or manual reopen is a deliberate override,
+            // not a reporter bypassing the templates. Skip events triggered by
+            // maintainers (triage can reopen/label/close). On `opened` the
+            // sender is the author, already covered above.
+            if (action !== "opened") {
+              const actor = context.actor;
+              if (actor) {
+                try {
+                  const perm = await github.rest.repos.getCollaboratorPermissionLevel({
+                    owner: owner, repo: repo, username: actor
+                  });
+                  if (["admin", "maintain", "write", "triage"].includes(perm.data.permission)) {
+                    core.notice("Triggered by a maintainer (" + actor + "); skipping enforcement.");
+                    return;
+                  }
+                } catch (e) {
+                  // Not a collaborator or lookup unavailable: keep enforcing.
+                }
+              }
             }
 
             const TEMPLATES = {
@@ -96,9 +113,9 @@ jobs:
               }
             };
 
-            const title = (issue.title || "").toLowerCase();
-            const body = issue.body || "";
-            const current = (issue.labels || []).map(function (l) {
+            const title = (live.title || "").toLowerCase();
+            const body = live.body || "";
+            const current = (live.labels || []).map(function (l) {
               return (l && (l.name || l)) || "";
             });
             // Set before any label changes so repeated non-conforming edits do
@@ -174,7 +191,8 @@ jobs:
                 "`[DOCS]`, or `[QUESTION]` and the body should contain that " +
                 "template's sections).\n\n" +
                 "This issue has been closed. Editing it does not reopen it — " +
-                "please open a new issue through one of the forms:\n\n" + chooser + "\n\n" +
+                "please open a new issue through one of the forms below, or ask a " +
+                "maintainer to reopen this one if appropriate:\n\n" + chooser + "\n\n" +
                 "Maintainer-authored issues are exempt from this check.";
               await commentOnce(msg);
               await closeAsNotPlanned();
@@ -199,7 +217,8 @@ jobs:
               }).join(", ") + " in the body.\n\n" +
               "This issue has been closed. Editing it does not reopen it — " +
               "please open a new issue through the [" + tpl.name + "](" + newIssueUrl(tpl) + ") " +
-              "form and include the missing sections.\n\n" +
+              "form and include the missing sections, or ask a maintainer to reopen " +
+              "this issue if appropriate.\n\n" +
               "Maintainer-authored issues are exempt from this check.";
             await commentOnce(msg);
             await closeAsNotPlanned();
