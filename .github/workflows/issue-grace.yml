@@ -44,7 +44,7 @@ jobs:
     if: >-
       github.event_name == 'issue_comment' &&
       github.event.issue.state == 'closed' &&
-      github.event.issue.pull_request == null &&
+      !github.event.issue.pull_request &&
       github.event.comment.user.login == github.event.issue.user.login
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -77,6 +77,10 @@ jobs:
             const num = context.payload.issue.number;
 
             if ((comment.body || "").trim().toLowerCase() !== "/reopen") return;
+            if (context.payload.issue.pull_request) {
+              core.notice("Comment is on a pull request; ignoring /reopen.");
+              return;
+            }
 
             // Read the live issue: the event payload may predate a concurrent
             // maintainer action.
@@ -372,6 +376,9 @@ jobs:
     if: github.event_name == 'issues' && github.event.action == 'closed'
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    concurrency:
+      group: issue-grace-command-${{ github.event.issue.number }}
+      cancel-in-progress: false
     permissions:
       issues: write
     steps:
@@ -380,10 +387,26 @@ jobs:
         with:
           script: |
             const issue = context.payload.issue;
-            const labels = (issue.labels || []).map(function (l) {
+            const payloadLabels = (issue.labels || []).map(function (l) {
               return (l && (l.name || l)) || "";
             });
-            if (!labels.includes("template-grace")) return;
+            if (!payloadLabels.includes("template-grace")) return;
+
+            // A /reopen command may have reopened the issue after this close
+            // event was queued. Only clear the label if it is still closed.
+            const live = (await github.rest.issues.get({
+              owner: context.repo.owner, repo: context.repo.repo,
+              issue_number: issue.number
+            })).data;
+            if (live.state !== "closed") {
+              core.notice("Issue was reopened; keeping the grace label.");
+              return;
+            }
+
+            const liveLabels = (live.labels || []).map(function (l) {
+              return (l && (l.name || l)) || "";
+            });
+            if (!liveLabels.includes("template-grace")) return;
 
             // If a maintainer (or the author) closed the issue during the grace
             // window, the window is over. `template-grace-used` stays; the
