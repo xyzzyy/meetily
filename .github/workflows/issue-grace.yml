@@ -215,7 +215,14 @@ jobs:
             // Labels first so the nightly sweep always sees the window.
             await addLabel("template-grace");
             await addLabel("template-grace-used");
-            await reopen();
+            try {
+              await reopen();
+            } catch (e) {
+              // Do not burn the one-time chance if the reopen itself failed.
+              await removeLabelSafely("template-grace");
+              await removeLabelSafely("template-grace-used");
+              throw e;
+            }
 
             const missing = [];
             if (!result.template) {
