@@ -189,7 +189,7 @@ This document provides a quick overview of all available CI/CD workflows in this
 - Second enforcement layer on top of the YAML issue forms in `.github/ISSUE_TEMPLATE/`
 - Recognizes the `[BUG]`/`[FEATURE]`/`[DOCS]`/`[QUESTION]` title prefixes
 - Auto-applies the matching label (bug/enhancement/documentation/question)
-- Warns, labels `invalid`, and auto-closes non-conforming issues (warn + auto-close)
+- Warns, labels `invalid-template`, and auto-closes non-conforming issues (warn + auto-close)
 - Grandfathers existing issues: nothing is backfilled, and an open issue is only re-evaluated after it is edited or reopened
 - Never reopens closed issues; closed-issue authors are directed to resubmit through the form
 - Maintainer-authored issues and maintainer-triggered edits/reopens are exempt

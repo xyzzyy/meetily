@@ -13,8 +13,8 @@ name: issue-enforce
 #     prefix and auto-applies the matching label,
 #   - requires that the template's mandatory section headings exist in the body.
 #
-# Non-conforming issues get an explanatory comment, the `invalid` label, and are
-# closed immediately (warn + auto-close).
+# Non-conforming issues get an explanatory comment, the `invalid-template` label,
+# and are closed immediately (warn + auto-close).
 #
 # Existing issues are grandfathered: nothing is backfilled, and an open issue is
 # only re-evaluated after it is edited or reopened. The workflow never reopens
@@ -97,19 +97,23 @@ jobs:
             const TEMPLATES = {
               "[bug]": {
                 name: "Bug Report", file: "bug_report.yml", label: "bug",
-                required: ["Bug Description", "Current Behavior", "Expected Behavior", "Steps to Reproduce", "Environment"]
+                required: ["Bug Description", "Current Behavior", "Expected Behavior", "Steps to Reproduce", "Environment"],
+                checklist: ["I have described the issue clearly", "I have searched for similar issues"]
               },
               "[feature]": {
                 name: "Feature Request", file: "feature_request.yml", label: "enhancement",
-                required: ["Feature Description", "Upstream Work & Prior Art"]
+                required: ["Feature Description", "Upstream Work & Prior Art"],
+                checklist: ["I have described the issue clearly", "I have searched for similar feature requests"]
               },
               "[docs]": {
                 name: "Documentation", file: "documentation.yml", label: "documentation",
-                required: ["Documentation Location", "Issue Type", "What's Wrong"]
+                required: ["Documentation Location", "Issue Type", "What's Wrong"],
+                checklist: ["I have described the issue clearly", "I have searched for similar documentation issues"]
               },
               "[question]": {
                 name: "Question", file: "question.yml", label: "question",
-                required: ["What are you trying to do?", "What have you already tried?"]
+                required: ["What are you trying to do?", "What have you already tried?"],
+                checklist: ["I have described the issue clearly"]
               }
             };
 
@@ -120,7 +124,7 @@ jobs:
             });
             // Set before any label changes so repeated non-conforming edits do
             // not spam the same guidance comment.
-            const hadInvalidLabel = current.includes("invalid");
+            const hadInvalidTemplateLabel = current.includes("invalid-template");
 
             let tpl = null;
             for (const prefix of Object.keys(TEMPLATES)) {
@@ -131,16 +135,69 @@ jobs:
             }
 
             function escapeRegExp(s) {
-              return s.replace(/[.*+?^'"'{}()|[\]\\]/g, "\\$&");
+              return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
             }
 
-            function missingSections(t) {
+            // Split the body into its `###` sections, ignoring headings that
+            // appear inside fenced code blocks (logs often contain them).
+            function parseSections(markdown) {
+              const sections = new Map();
+              let current = null;
+              let fenceChar = null;
+              for (const line of markdown.split(/\r?\n/)) {
+                const fence = line.match(/^\s*(```+|~~~+)/);
+                if (fence) {
+                  if (!fenceChar) {
+                    fenceChar = fence[1][0];
+                  } else if (fence[1][0] === fenceChar) {
+                    fenceChar = null;
+                  }
+                  if (current) sections.get(current).push(line);
+                  continue;
+                }
+                if (!fenceChar) {
+                  const heading = line.match(/^#{1,6}[ \t]+(.+?)[ \t]*$/);
+                  if (heading) {
+                    current = heading[1].trim();
+                    if (!sections.has(current)) sections.set(current, []);
+                    continue;
+                  }
+                }
+                if (current) sections.get(current).push(line);
+              }
+              return sections;
+            }
+
+            function findSection(sections, heading) {
+              const match = Array.from(sections.keys()).find(function (key) {
+                return key.toLowerCase() === heading.toLowerCase();
+              });
+              return match === undefined ? null : sections.get(match).join("\n").trim();
+            }
+
+            function isBlankSection(content) {
+              return content === null || content === "" || /^_no response_$/i.test(content);
+            }
+
+            function missingSections(t, sections) {
               const missing = [];
               for (const heading of t.required) {
-                const pattern = new RegExp("^#{1,6}[ \\t]+" + escapeRegExp(heading) + "[ \\t]*$", "im");
-                if (!pattern.test(body)) missing.push(heading);
+                if (isBlankSection(findSection(sections, heading))) missing.push(heading);
               }
               return missing;
+            }
+
+            function uncheckedCheckboxes(t, sections) {
+              const checklist = findSection(sections, "Checklist");
+              if (checklist === null) return t.checklist.slice();
+              const unchecked = [];
+              for (const item of t.checklist) {
+                const pattern = new RegExp(
+                  "^[ \\t]*[-*+][ \\t]*\\[[xX]\\][ \\t]*" + escapeRegExp(item) + "[ \\t]*$", "m"
+                );
+                if (!pattern.test(checklist)) unchecked.push(item);
+              }
+              return unchecked;
             }
 
             function newIssueUrl(t) {
@@ -149,7 +206,21 @@ jobs:
 
             async function addLabel(name) {
               if (current.includes(name)) return;
-              await github.rest.issues.addLabels({ owner: owner, repo: repo, issue_number: num, labels: [name] });
+              try {
+                await github.rest.issues.addLabels({ owner: owner, repo: repo, issue_number: num, labels: [name] });
+              } catch (e) {
+                if (name !== "invalid-template" || (e.status !== 404 && e.status !== 422)) throw e;
+                // Self-contained fallback for forks that lack the label.
+                try {
+                  await github.rest.issues.createLabel({
+                    owner: owner, repo: repo, name: name,
+                    color: "d73a4a", description: "Issue does not follow its template"
+                  });
+                } catch (createError) {
+                  if (createError.status !== 422) throw createError;
+                }
+                await github.rest.issues.addLabels({ owner: owner, repo: repo, issue_number: num, labels: [name] });
+              }
               current.push(name);
             }
 
@@ -164,7 +235,7 @@ jobs:
             }
 
             async function commentOnce(msg) {
-              if (hadInvalidLabel) {
+              if (hadInvalidTemplateLabel) {
                 core.notice("Issue was already flagged earlier; skipping duplicate comment.");
                 return;
               }
@@ -180,7 +251,7 @@ jobs:
 
             if (!tpl) {
               core.notice("No template title prefix recognized; labeling and closing.");
-              await addLabel("invalid");
+              await addLabel("invalid-template");
               const chooser = Object.keys(TEMPLATES).map(function (prefix) {
                 const t = TEMPLATES[prefix];
                 return "- `" + prefix.toUpperCase() + "` — [" + t.name + "](" + newIssueUrl(t) + ")";
@@ -199,25 +270,46 @@ jobs:
               return;
             }
 
-            const missing = missingSections(tpl);
-            if (missing.length === 0) {
+            const sections = parseSections(body);
+            const missing = missingSections(tpl, sections);
+            const unchecked = uncheckedCheckboxes(tpl, sections);
+            if (missing.length === 0 && unchecked.length === 0) {
               core.notice("Issue follows the " + tpl.name + " template.");
               await addLabel(tpl.label);
-              await removeLabelSafely("invalid");
+              await removeLabelSafely("invalid-template");
               return;
             }
 
-            core.notice("Missing required sections: " + missing.join(", "));
-            await addLabel("invalid");
+            core.notice(
+              "Template violations" +
+              (missing.length ? " - missing sections: " + missing.join(", ") : "") +
+              (unchecked.length ? " - unchecked boxes: " + unchecked.join(", ") : "")
+            );
+            await addLabel("invalid-template");
+            const problems = [];
+            if (missing.length) {
+              problems.push(
+                "I could not find content under the required section(s) " +
+                missing.map(function (h) {
+                  return "`### " + h + "`";
+                }).join(", ") + "."
+              );
+            }
+            if (unchecked.length) {
+              problems.push(
+                "The following required checkbox(es) are not checked: " +
+                unchecked.map(function (item) {
+                  return "`" + item + "`";
+                }).join(", ") + "."
+              );
+            }
             const msg =
-              "Thanks for opening an issue! This one was created outside the " +
-              "[" + tpl.name + "](" + newIssueUrl(tpl) + ") form: I could not find " +
-              "the required section(s) " + missing.map(function (h) {
-                return "`### " + h + "`";
-              }).join(", ") + " in the body.\n\n" +
+              "Thanks for opening an issue! This one does not follow the " +
+              "[" + tpl.name + "](" + newIssueUrl(tpl) + ") template.\n\n" +
+              problems.join("\n\n") + "\n\n" +
               "This issue has been closed. Editing it does not reopen it — " +
               "please open a new issue through the [" + tpl.name + "](" + newIssueUrl(tpl) + ") " +
-              "form and include the missing sections, or ask a maintainer to reopen " +
+              "form and include the missing information, or ask a maintainer to reopen " +
               "this issue if appropriate.\n\n" +
               "Maintainer-authored issues are exempt from this check.";
             await commentOnce(msg);
