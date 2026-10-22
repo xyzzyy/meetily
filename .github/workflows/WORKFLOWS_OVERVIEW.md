@@ -190,10 +190,12 @@ This document provides a quick overview of all available CI/CD workflows in this
 - Recognizes the `[BUG]`/`[FEATURE]`/`[DOCS]`/`[QUESTION]` title prefixes
 - Auto-applies the matching label (bug/enhancement/documentation/question)
 - Warns, labels `invalid`, and auto-closes non-conforming issues (warn + auto-close)
+- Grandfathers existing issues: nothing is backfilled, and an issue is only evaluated once it is edited
+- Editing a closed issue reopens it for one re-evaluation (stays open if compliant, closes again if not)
 - Maintainer-authored issues are exempt
 
 **Triggers:**
-- Automatically on issue events (`opened`, `reopened`)
+- Automatically on issue events (`opened`, `reopened`, `edited`)
 
 **Use When:**
 - Runs by itself; no manual dispatch needed

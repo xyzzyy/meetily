@@ -51,9 +51,9 @@ body:
     type: textarea
     attributes:
       label: Environment
-      description: Fill in what applies and delete lines that don't.
+      description: Replace the examples with your actual values and delete lines that don't apply.
       render: text
-      value: |
+      placeholder: |
         - OS: [e.g. macOS 15.1 / Windows 11 / Ubuntu 24.04]
         - Hardware: [e.g. MacBook Pro (M3) / NVIDIA RTX 4090]
         - App Version: [e.g. v0.1.1]

@@ -7,21 +7,26 @@ name: issue-enforce
 # "open a blank issue" escape hatch.
 #
 # This workflow is layer 2 for issues created outside the web UI (API, CLI,
-# bots, imports). On every newly opened or reopened issue authored by a
+# bots, imports). On every opened, reopened, or edited issue authored by a
 # non-maintainer it:
 #   - recognizes the template from the [BUG]/[FEATURE]/[DOCS]/[QUESTION] title
 #     prefix and auto-applies the matching label,
 #   - requires that the template's mandatory section headings exist in the body.
 #
 # Non-conforming issues get an explanatory comment, the `invalid` label, and are
-# closed immediately (warn + auto-close). The author is allowed to reopen their
-# own issue, which re-runs this check: once the template is followed the issue
-# stays open and gets its proper label. Maintainer-authored issues
-# (owner/member/collaborator) are exempt.
+# closed immediately (warn + auto-close).
+#
+# Existing issues are grandfathered: nothing is backfilled, and an issue is only
+# evaluated once it is edited. Editing a closed issue reopens it for one
+# re-evaluation - if it now follows a template it stays open with its proper
+# label, otherwise it is closed again. Authors cannot reopen bot-closed issues
+# themselves, so editing is the supported recovery path.
+#
+# Maintainer-authored issues (owner/member/collaborator) are exempt.
 
 on:
   issues:
-    types: [opened, reopened]
+    types: [opened, reopened, edited]
 
 concurrency:
   group: issue-enforce-${{ github.event.issue.number }}
@@ -42,13 +47,16 @@ jobs:
             const owner = context.repo.owner;
             const repo = context.repo.repo;
             const num = issue.number;
+            const action = context.payload.action;
 
-            if (issue.state !== "open") {
-              core.notice("Issue is already closed; skipping.");
-              return;
-            }
             if (["OWNER", "MEMBER", "COLLABORATOR"].includes(issue.author_association)) {
               core.notice("Authored by a maintainer; skipping enforcement.");
+              return;
+            }
+
+            const wasClosed = issue.state !== "open";
+            if (wasClosed && action !== "edited") {
+              core.notice("Issue is closed and was not edited; skipping.");
               return;
             }
 
@@ -76,6 +84,9 @@ jobs:
             const current = (issue.labels || []).map(function (l) {
               return (l && (l.name || l)) || "";
             });
+            // Set before any label changes so repeated non-conforming edits do
+            // not spam the same guidance comment.
+            const hadInvalidLabel = current.includes("invalid");
 
             let tpl = null;
             for (const prefix of Object.keys(TEMPLATES)) {
@@ -118,6 +129,14 @@ jobs:
               current.splice(current.indexOf(name), 1);
             }
 
+            async function commentOnce(msg) {
+              if (hadInvalidLabel) {
+                core.notice("Issue was already flagged earlier; skipping duplicate comment.");
+                return;
+              }
+              await github.rest.issues.createComment({ owner: owner, repo: repo, issue_number: num, body: msg });
+            }
+
             async function closeAsNotPlanned() {
               await github.rest.issues.update({
                 owner: owner, repo: repo, issue_number: num,
@@ -125,10 +144,14 @@ jobs:
               });
             }
 
-            const reopenHint =
-              "Reopen it after editing (authors can always reopen their own issues) " +
-              "and this check runs again automatically: once the template is " +
-              "followed, the issue stays open and receives its proper label.";
+            // A closed issue has already received its guidance; an edit is the
+            // author's attempt to fix it, so reopen it and re-run the check.
+            if (wasClosed) {
+              core.notice("Edited closed issue: reopening for re-evaluation.");
+              await github.rest.issues.update({
+                owner: owner, repo: repo, issue_number: num, state: "open"
+              });
+            }
 
             if (!tpl) {
               core.notice("No template title prefix recognized; labeling and closing.");
@@ -142,10 +165,13 @@ jobs:
                 "issue templates (the title should start with `[BUG]`, `[FEATURE]`, " +
                 "`[DOCS]`, or `[QUESTION]` and the body should contain that " +
                 "template's sections).\n\n" +
-                "Please re-submit through one of the forms instead:\n\n" + chooser + "\n\n" +
-                reopenHint + "\n\n" +
+                "This issue has been closed. To continue:\n\n" +
+                "1. **Edit this issue**: use the matching title prefix and add that " +
+                "template's sections — saving an edit reopens the issue and re-runs " +
+                "this check automatically, or\n" +
+                "2. **Open a new issue** through one of the forms:\n\n" + chooser + "\n\n" +
                 "Maintainer-authored issues are exempt from this check.";
-              await github.rest.issues.createComment({ owner: owner, repo: repo, issue_number: num, body: msg });
+              await commentOnce(msg);
               await closeAsNotPlanned();
               return;
             }
@@ -166,9 +192,10 @@ jobs:
               "the required section(s) " + missing.map(function (h) {
                 return "`### " + h + "`";
               }).join(", ") + " in the body.\n\n" +
-              "Please edit this issue so it follows the " + tpl.name + " template, or " +
-              "resubmit it through the form above.\n\n" +
-              reopenHint + "\n\n" +
+              "This issue has been closed. To continue:\n\n" +
+              "1. **Edit this issue** to add the missing sections — saving an edit " +
+              "reopens it and re-runs this check automatically, or\n" +
+              "2. **Open a new issue** through the [" + tpl.name + "](" + newIssueUrl(tpl) + ") form.\n\n" +
               "Maintainer-authored issues are exempt from this check.";
-            await github.rest.issues.createComment({ owner: owner, repo: repo, issue_number: num, body: msg });
+            await commentOnce(msg);
             await closeAsNotPlanned();
