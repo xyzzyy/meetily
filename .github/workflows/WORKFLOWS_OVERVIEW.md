@@ -194,7 +194,8 @@ This document provides a quick overview of all available CI/CD workflows in this
 - Grandfathers existing issues: nothing is backfilled, and an open issue is only re-evaluated after it is edited or reopened
 - Does not reopen closed issues itself; the author's one-time `/reopen` command is handled by `issue-grace.yml`
 - Never closes an issue that is inside its `template-grace` window; the nightly sweep owns expiry
-- Maintainer-authored issues and maintainer-triggered edits/reopens are exempt
+- Applies the same checks to all authors and actors, including maintainers
+- A manual reopen runs the normal check; use `/reopen` to grant another grace window
 
 **Triggers:**
 - Automatically on issue events (`opened`, `reopened`, `edited`)
@@ -204,16 +205,20 @@ This document provides a quick overview of all available CI/CD workflows in this
 
 ---
 
-### 10. **issue-grace.yml** - One-Time Reopen and Nightly Expiry
-**Purpose:** Give authors one automatic way back into a template-closed issue, then expire that window nightly.
+### 10. **issue-grace.yml** - Reopen and Nightly Expiry
+**Purpose:** Give authors one automatic reopen and let maintainers grant more review cycles through the same checks.
 
 **Key Features:**
-- Handles `/reopen` comments from the issue author on closed issues labeled `invalid-template`
+- Handles `/reopen` comments from the issue author or a maintainer on closed issues labeled `invalid-template`
 - Re-validates immediately: fixed issues reopen as normal; still-incomplete issues reopen with `template-grace` (the active window) and `template-grace-used` (the one-time chance has been consumed)
-- Only the author can use the command, and only once per issue; later attempts get a one-time pointer to the maintainers
+- Authors get one automatic reopen per issue; later attempts get a one-time pointer to the maintainers
+- Maintainers with triage, write, maintain, or admin access can use `/reopen` without a limit, on their own issues or another author's
+- Each maintainer command runs the same validation and nightly expiry; it never resets `template-grace-used`
+- Checks the comment author's current repository permissions; a failed lookup never grants maintainer access
 - Nightly sweep at 04:00 UTC re-validates open `template-grace` issues: fixed ones pass, incomplete ones are closed again and the active label is removed
 - Removes `template-grace` if the issue is closed during the window, so a later maintainer reopen is not affected by a stale label
-- Maintainers can always reopen manually; maintainer-triggered events are exempt from `issue-enforce.yml`
+- All issues have the same nightly check, including issues created or reopened by a maintainer
+- Tests run in `pr-build.yml`; run them locally with `node --test .github/scripts/issue-workflows.test.cjs`
 
 **Triggers:**
 - Automatically on issue comments (`/reopen`)

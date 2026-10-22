@@ -1,6 +1,6 @@
 name: issue-grace
 
-# One-time grace window for issues closed by issue-enforce.yml.
+# Grace windows for issues closed by issue-enforce.yml.
 #
 # GitHub does not let issue authors reopen their own issues, so a closed issue
 # would otherwise be a dead end. After fixing the title/body of a closed issue
@@ -13,17 +13,18 @@ name: issue-grace
 #     has been consumed). It stays open until the next nightly sweep, giving
 #     the author time to edit it.
 #
-# Only the issue author can use the command, and only once per issue. The
-# `template-grace-used` label is permanent state: subsequent `/reopen` attempts
-# are refused with a pointer to the maintainers. A maintainer can still reopen
-# the issue manually; maintainer-triggered events are exempt from enforcement.
+# Authors get one automatic reopen per issue. Maintainers (triage or higher)
+# can use `/reopen` without a limit, on their own issues or another author's.
+# Each command runs the same check and grants the same grace window if needed.
+# `template-grace-used` is permanent state: a maintainer command never resets
+# the author's one-time limit. There are no maintainer exemptions from checks.
 #
 # At 04:00 UTC every night, open issues still carrying `template-grace` are
 # re-validated. Fixed issues are passed; the rest are closed again and the
 # active label is removed. `template-grace-used` stays so the one-time limit
 # survives later closures. If anyone closes the issue during the window (for
-# example a maintainer), the active label is removed on close so a later manual
-# reopen is not expired by the next sweep.
+# example a maintainer), the active label is removed on close. A manual reopen
+# runs the normal template check; use `/reopen` to grant another grace window.
 
 on:
   issue_comment:
@@ -44,8 +45,7 @@ jobs:
     if: >-
       github.event_name == 'issue_comment' &&
       github.event.issue.state == 'closed' &&
-      !github.event.issue.pull_request &&
-      github.event.comment.user.login == github.event.issue.user.login
+      !github.event.issue.pull_request
     runs-on: ubuntu-latest
     timeout-minutes: 5
     concurrency:
@@ -99,17 +99,37 @@ jobs:
               core.notice("Comment predates the latest close; ignoring /reopen.");
               return;
             }
-            if (comment.user.login.toLowerCase() !== ((live.user && live.user.login) || "").toLowerCase()) {
-              core.notice("Only the issue author can use /reopen; ignoring.");
-              return;
-            }
-
             let current = (live.labels || []).map(function (l) {
               return (l && (l.name || l)) || "";
             });
 
             if (!current.includes("invalid-template")) {
               core.notice("Issue was not closed for its template; ignoring /reopen.");
+              return;
+            }
+
+            // Check the comment author, not the actor who may rerun this job.
+            // Association with the repository does not prove issue permissions.
+            const commenter = comment.user.login;
+            const isAuthor = commenter.toLowerCase() === ((live.user && live.user.login) || "").toLowerCase();
+            let isMaintainer = false;
+            try {
+              const permission = (await github.rest.repos.getCollaboratorPermissionLevel({
+                owner: owner, repo: repo, username: commenter
+              })).data;
+              // GitHub maps maintain to write and triage to read. The role
+              // name and permission flags also cover triage and custom roles.
+              const roles = ["admin", "maintain", "write", "triage"];
+              isMaintainer = roles.includes(permission.permission) ||
+                roles.includes(permission.role_name) ||
+                !!(permission.user && permission.user.permissions && permission.user.permissions.triage);
+            } catch (e) {
+              // A failed lookup never grants extra access. Authors still have
+              // their normal one-time chance; everyone else needs permission.
+              core.notice("Could not confirm maintainer access for " + commenter + ".");
+            }
+            if (!isAuthor && !isMaintainer) {
+              core.notice("Only the author or a maintainer can use /reopen; ignoring.");
               return;
             }
 
@@ -155,14 +175,15 @@ jobs:
               });
             }
 
-            // One chance per issue. Used authors are pointed at the maintainers
-            // once, not on every later comment.
-            if (current.includes("template-grace-used")) {
+            // Only maintainers can grant more windows after the first one.
+            const hadGrace = current.includes("template-grace");
+            const graceUsed = current.includes("template-grace-used");
+            if (graceUsed && !isMaintainer) {
               core.notice("The one automatic reopen was already used; refusing.");
               await commentOnce(
                 "<!-- meetily:grace-used -->",
                 "This issue has already used its one automatic reopen. A maintainer " +
-                "will need to reopen it from here, or you can open a new issue through " +
+                "can comment `/reopen` to grant another review cycle. You can also open a new issue through " +
                 "the [issue forms](https://github.com/" + owner + "/" + repo + "/issues/new/choose)."
               );
               return;
@@ -187,14 +208,14 @@ jobs:
               return;
             }
 
-            core.notice("Issue still fails validation; opening the one-time grace window.");
+            core.notice("Issue still fails validation; opening a grace window.");
 
             // Make sure both state labels exist on forks too.
             for (const label of [
               {
                 name: "template-grace",
                 color: "fbca04",
-                description: "One-time grace window after an author /reopen; expired nightly"
+                description: "Active /reopen grace window; checked at 04:00 UTC"
               },
               {
                 name: "template-grace-used",
@@ -213,14 +234,15 @@ jobs:
             }
 
             // Labels first so the nightly sweep always sees the window.
-            await addLabel("template-grace");
-            await addLabel("template-grace-used");
             try {
+              await addLabel("template-grace");
+              await addLabel("template-grace-used");
               await reopen();
             } catch (e) {
-              // Do not burn the one-time chance if the reopen itself failed.
-              await removeLabelSafely("template-grace");
-              await removeLabelSafely("template-grace-used");
+              // Undo only this command's labels. A failed maintainer retry
+              // must not reset an author's previously used chance.
+              if (!hadGrace) await removeLabelSafely("template-grace");
+              if (!graceUsed) await removeLabelSafely("template-grace-used");
               throw e;
             }
 
@@ -245,13 +267,13 @@ jobs:
             }
 
             await commentOnce(
-              "<!-- meetily:grace-reopened -->",
+              "<!-- meetily:grace-reopened:" + comment.id + " -->",
               "I reopened this issue for one review cycle. It still has " +
               missing.join("; ") + ".\n\n" +
               "Please edit the issue to fix that before the next nightly check " +
-              "(04:00 UTC), or it will be closed again. This is the one automatic " +
-              "reopen for this issue — if it closes again, a maintainer will need " +
-              "to reopen it."
+              "(04:00 UTC), or it will be closed again. A maintainer can comment " +
+              "`/reopen` to grant another review cycle. Authors get one automatic " +
+              "reopen; maintainers can grant more cycles with the same checks."
             );
 
   expire:
@@ -299,9 +321,14 @@ jobs:
               const comments = await github.paginate(github.rest.issues.listComments, {
                 owner: owner, repo: repo, issue_number: num, per_page: 100
               });
-              return comments.some(function (c) {
-                return (c.body || "").includes(marker);
-              });
+              // A later /reopen starts a new cycle. Give that cycle its own
+              // result comment, but do not repeat comments on a failed retry.
+              for (let i = comments.length - 1; i >= 0; i--) {
+                const body = comments[i].body || "";
+                if (body.includes(marker)) return true;
+                if (body.includes("<!-- meetily:grace-reopened")) return false;
+              }
+              return false;
             }
 
             async function commentOnce(num, marker, body) {
@@ -326,14 +353,6 @@ jobs:
               const num = issue.number;
 
               try {
-                // Keep the same exemption as issue-enforce.yml: a
-                // maintainer-authored issue is never auto-closed.
-                if (["OWNER", "MEMBER", "COLLABORATOR"].includes(issue.author_association)) {
-                  core.info("#" + num + " is maintainer-authored; clearing the grace label without closing.");
-                  if (!dryRun) await removeLabelSafely(num, "template-grace");
-                  continue;
-                }
-
                 const result = validate(issue);
 
                 // Defensive: an edit may have fixed the issue after the last
@@ -363,9 +382,9 @@ jobs:
                 await commentOnce(
                   num,
                   "<!-- meetily:grace-expired -->",
-                  "The one-time grace window for this issue has ended and the required " +
+                  "The grace window for this issue has ended and the required " +
                   "template information is still missing, so it has been closed again.\n\n" +
-                  "A maintainer will need to reopen it from here. You can also open a " +
+                  "A maintainer can comment `/reopen` to grant another review cycle. You can also open a " +
                   "new issue through the [issue forms](https://github.com/" + owner + "/" +
                   repo + "/issues/new/choose)."
                 );

@@ -7,8 +7,7 @@ name: issue-enforce
 # "open a blank issue" escape hatch.
 #
 # This workflow is layer 2 for issues created outside the web UI (API, CLI,
-# bots, imports). On every opened, reopened, or edited issue authored by a
-# non-maintainer it:
+# bots, imports). On every opened, reopened, or edited issue it:
 #   - recognizes the template from the [BUG]/[FEATURE]/[DOCS]/[QUESTION] title
 #     prefix and auto-applies the matching label,
 #   - requires that the template's mandatory section headings exist in the body,
@@ -16,18 +15,17 @@ name: issue-enforce
 #
 # Non-conforming issues get an explanatory comment, the `invalid-template` label,
 # and are closed immediately (warn + auto-close). The comment explains the
-# one-time `/reopen` command handled by issue-grace.yml.
+# `/reopen` command handled by issue-grace.yml.
 #
 # Existing issues are grandfathered: nothing is backfilled, and an open issue is
 # only re-evaluated after it is edited or reopened. This workflow never reopens
 # a closed issue itself. An issue carrying `template-grace` is inside its
-# one-time grace window: it is re-checked normally, but never closed here. The
+# grace window: it is re-checked normally, but never closed here. The
 # nightly job in issue-grace.yml expires the window if the issue is still
 # incomplete.
 #
-# Maintainer-authored issues (owner/member/collaborator) and events triggered by
-# maintainers (owner/member/collaborator/triage) are exempt, so a maintainer's
-# edit or manual reopen is never overridden by this workflow.
+# The same checks apply to all authors and actors, including maintainers.
+# Maintainers can grant more grace windows through `/reopen`.
 
 on:
   issues:
@@ -66,17 +64,11 @@ jobs:
             const owner = context.repo.owner;
             const repo = context.repo.repo;
             const num = issue.number;
-            const action = context.payload.action;
 
             // Closed issues are never processed (and never reopened): edits to
             // them do nothing; only a reopen event can bring one back.
             if (issue.state !== "open") {
               core.notice("Issue is closed; skipping enforcement.");
-              return;
-            }
-
-            if (["OWNER", "MEMBER", "COLLABORATOR"].includes(issue.author_association)) {
-              core.notice("Authored by a maintainer; skipping enforcement.");
               return;
             }
 
@@ -88,27 +80,6 @@ jobs:
             if (live.state !== "open") {
               core.notice("Issue is closed; skipping enforcement.");
               return;
-            }
-
-            // A maintainer's edit or manual reopen is a deliberate override,
-            // not a reporter bypassing the templates. Skip events triggered by
-            // maintainers (triage can reopen/label/close). On `opened` the
-            // sender is the author, already covered above.
-            if (action !== "opened") {
-              const actor = context.actor;
-              if (actor) {
-                try {
-                  const perm = await github.rest.repos.getCollaboratorPermissionLevel({
-                    owner: owner, repo: repo, username: actor
-                  });
-                  if (["admin", "maintain", "write", "triage"].includes(perm.data.permission)) {
-                    core.notice("Triggered by a maintainer (" + actor + "); skipping enforcement.");
-                    return;
-                  }
-                } catch (e) {
-                  // Not a collaborator or lookup unavailable: keep enforcing.
-                }
-              }
             }
 
             const current = (live.labels || []).map(function (l) {
@@ -179,14 +150,16 @@ jobs:
 
             function reopenHint() {
               if (graceUsed) {
-                return "This issue has already used its one automatic reopen, so a " +
-                  "maintainer will need to reopen it. You can also open a new issue " +
+                return "This issue has already used its one automatic reopen. A " +
+                  "maintainer can comment `/reopen` to grant another review cycle. " +
+                  "You can also open a new issue " +
                   "through the form.";
               }
               return "Editing this issue does not reopen it. After adding the missing " +
                 "information, comment `/reopen` to use the one automatic reopen; the " +
                 "issue is re-checked by the next nightly run. If it is still incomplete " +
-                "after that, a maintainer will need to reopen it. You can also open a " +
+                "after that, a maintainer can comment `/reopen` to grant another " +
+                "review cycle. You can also open a " +
                 "new issue through the form.";
             }
 
@@ -227,8 +200,7 @@ jobs:
                 "`[DOCS]`, or `[QUESTION]` and the body should contain that " +
                 "template's sections).\n\n" +
                 "This issue has been closed. " + reopenHint() + "\n\n" +
-                chooser + "\n\n" +
-                "Maintainer-authored issues are exempt from this check.";
+                chooser;
               await commentOnce(msg);
               await closeAsNotPlanned();
               return;
@@ -267,7 +239,6 @@ jobs:
               "Thanks for opening an issue! This one does not follow the " +
               "[" + tpl.name + "](" + newIssueUrl(owner, repo, tpl) + ") template.\n\n" +
               problems.join("\n\n") + "\n\n" +
-              "This issue has been closed. " + reopenHint() + "\n\n" +
-              "Maintainer-authored issues are exempt from this check.";
+              "This issue has been closed. " + reopenHint();
             await commentOnce(msg);
             await closeAsNotPlanned();
