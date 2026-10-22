@@ -187,6 +187,7 @@ This document provides a quick overview of all available CI/CD workflows in this
 
 **Key Features:**
 - Second enforcement layer on top of the YAML issue forms in `.github/ISSUE_TEMPLATE/`
+- Shared section/checkbox validation lives in `.github/scripts/issue-template.js` (used by both issue workflows)
 - Recognizes the `[BUG]`/`[FEATURE]`/`[DOCS]`/`[QUESTION]` title prefixes
 - Auto-applies the matching label (bug/enhancement/documentation/question)
 - Warns, labels `invalid-template`, and auto-closes non-conforming issues (warn + auto-close)
