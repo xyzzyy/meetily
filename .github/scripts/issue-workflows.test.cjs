@@ -845,6 +845,8 @@ const htmlBlocks = [
   ['  <PRE class="example">', "  </pRe>"],
   ["<script>", "</script>"],
   ["<style>", "</style>"],
+  ["<textarea>\n", "</textarea>"],
+  ['  <TEXTAREA rows="2">\n', "  </TeXtArEa>"],
   ["<!--", "-->"],
   ["<?example", "?>"],
   ["<!DOCTYPE example [", ">"],
@@ -869,6 +871,23 @@ test("an issue containing only an HTML template example closes with an explanati
   assert.equal(f.issue.state, "closed");
   assert.match(f.comments[0].body, /### Bug Description/);
   assert.match(f.comments[0].body, /required boxes/);
+});
+
+test("a textarea template example with blank lines closes with an explanation", async () => {
+  const f = fixture({ issue: { body: "<textarea>\n\n" + completeBody + "\n</textarea>" } });
+  await enforce(f);
+  assert.equal(f.issue.state, "closed");
+  assert.match(f.comments[0].body, /### Bug Description/);
+  assert.match(f.comments[0].body, /required boxes/);
+});
+
+test("an unclosed textarea keeps later headings and boxes as raw text", () => {
+  const { validate } = require("./issue-template.js");
+  const body = "An example follows.\n<textarea>\n\n" + completeBody;
+  const result = validate({ title: "[BUG] Example", body });
+  assert.equal(result.ok, false);
+  assert.equal(result.missing.length, 5);
+  assert.equal(result.unchecked.length, 2);
 });
 
 test("HTML samples cannot replace unchecked checklist boxes", () => {

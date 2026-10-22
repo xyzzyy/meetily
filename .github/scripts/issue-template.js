@@ -58,11 +58,11 @@ function detectTemplate(title) {
   return null;
 }
 
-// Raw HTML follows the seven block rules in https://github.github.com/gfm/#html-blocks.
+// HTML block rules: https://spec.commonmark.org/0.31.2/#html-blocks.
 // A null end marker means the block ends at the next blank line.
 function htmlBlockStart(line, inParagraph) {
-  if (/^ {0,3}<(?:script|pre|style)(?:\s|>|$)/i.test(line)) {
-    return { end: /<\/(?:script|pre|style)>/i, hidden: /^ {0,3}<(?:script|style)(?:\s|>|$)/i.test(line) };
+  if (/^ {0,3}<(?:script|pre|style|textarea)(?:\s|>|$)/i.test(line)) {
+    return { end: /<\/(?:script|pre|style|textarea)>/i, hidden: /^ {0,3}<(?:script|style)(?:\s|>|$)/i.test(line) };
   }
   for (const [start, end] of [
     [/^ {0,3}<!--/, /-->/],
