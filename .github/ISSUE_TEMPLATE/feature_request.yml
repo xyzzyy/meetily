@@ -1,0 +1,53 @@
+name: ✨ Feature Request
+description: Suggest an idea or enhancement for Meetily
+title: '[FEATURE] '
+labels: ['enhancement']
+assignees: []
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for suggesting a feature! Before submitting, please [search existing feature requests](../../issues?q=is%3Aissue%20label%3Aenhancement) and upvote existing ones instead of opening duplicates.
+
+  - id: feature-description
+    type: textarea
+    attributes:
+      label: Feature Description
+      description: >
+        A clear and concise description of the feature you'd like to see, including why it matters.
+        If you already know how it should work, add a short "How it should work" paragraph here.
+    validations:
+      required: true
+
+  - id: upstream-work
+    type: textarea
+    attributes:
+      label: Upstream Work & Prior Art
+      description: >
+        Related upstream issues/PRs (e.g. on Zackriya-Solutions/meeting-minutes) and prior art in other
+        tools. Letting an AI agent do this search is fine.
+        If you found nothing, write "None found" — this field is required so please never leave it empty.
+      placeholder: |
+        - Upstream: <link to a related upstream issue/PR, or "None found">
+        - Prior art: <other products/projects and what they do, or "None found">
+    validations:
+      required: true
+
+  - id: additional-context
+    type: textarea
+    attributes:
+      label: Additional Context & Notes
+      description: Any other context, screenshots, or mockups about the feature request.
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: checklist
+    attributes:
+      label: Checklist
+      options:
+        - label: I have described the issue clearly
+          required: true
+        - label: I have searched for similar feature requests
+          required: true
+        - label: I have included any relevant screenshots/mockups

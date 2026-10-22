@@ -1,0 +1,81 @@
+name: 🐞 Bug Report
+description: Report something that doesn't work as expected
+title: '[BUG] '
+labels: ['bug']
+assignees: []
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report a bug! Before submitting, please [search existing issues](../../issues?q=is%3Aissue%20label%3Abug) to avoid duplicates.
+
+  - id: description
+    type: textarea
+    attributes:
+      label: Bug Description
+      description: A clear and concise description of the bug.
+    validations:
+      required: true
+
+  - id: current-behavior
+    type: textarea
+    attributes:
+      label: Current Behavior
+      description: What is currently happening. Include the full error output or log snippet inline, in code blocks.
+      placeholder: |
+        Paste error output between the fences below.
+    validations:
+      required: true
+
+  - id: expected-behavior
+    type: textarea
+    attributes:
+      label: Expected Behavior
+      description: What you expected to happen instead.
+    validations:
+      required: true
+
+  - id: steps
+    type: textarea
+    attributes:
+      label: Steps to Reproduce
+      description: Minimal, numbered steps that reliably reproduce the bug on your machine.
+      placeholder: |
+        1. Go to '...'
+        2. Click on '...'
+        3. See error
+    validations:
+      required: true
+
+  - id: environment
+    type: textarea
+    attributes:
+      label: Environment
+      description: Fill in what applies and delete lines that don't.
+      render: text
+      value: |
+        - OS: [e.g. macOS 15.1 / Windows 11 / Ubuntu 24.04]
+        - Hardware: [e.g. MacBook Pro (M3) / NVIDIA RTX 4090]
+        - App Version: [e.g. v0.1.1]
+        - Rust: [e.g. 1.99.1, only if building from source]
+    validations:
+      required: true
+
+  - id: additional-context
+    type: textarea
+    attributes:
+      label: Additional Context
+      description: Any other context — screenshots, videos, related issues, or links.
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: checklist
+    attributes:
+      label: Checklist
+      options:
+        - label: I have described the issue clearly
+          required: true
+        - label: I have searched for similar issues
+          required: true
+        - label: I have included error messages (if applicable)

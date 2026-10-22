@@ -1,0 +1,67 @@
+name: 📚 Documentation
+description: Report a documentation issue or suggest an improvement
+title: '[DOCS] '
+labels: ['documentation']
+assignees: []
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Help us keep the documentation useful. Point us to the exact place that needs attention.
+
+  - id: location
+    type: input
+    attributes:
+      label: Documentation Location
+      description: File path or URL of the affected docs (e.g. README.md#installation, docs/GPU_ACCELERATION.md).
+      placeholder: 'e.g. README.md#installation'
+    validations:
+      required: true
+
+  - id: issue-type
+    type: dropdown
+    attributes:
+      label: Issue Type
+      description: What kind of documentation problem is this?
+      options:
+        - Missing documentation
+        - Incorrect information
+        - Unclear / confusing
+        - Outdated content
+        - Improvement suggestion
+    validations:
+      required: true
+
+  - id: whats-wrong
+    type: textarea
+    attributes:
+      label: What's Wrong
+      description: Clearly describe the documentation problem (quote the affected text if unsure how to summarize).
+    validations:
+      required: true
+
+  - id: suggested-fix
+    type: textarea
+    attributes:
+      label: Suggested Fix
+      description: The wording or content you'd like to see instead.
+    validations:
+      required: false
+
+  - id: additional-context
+    type: textarea
+    attributes:
+      label: Additional Context
+      description: Any other context about this documentation issue.
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: checklist
+    attributes:
+      label: Checklist
+      options:
+        - label: I have described the issue clearly
+          required: true
+        - label: I have searched for similar documentation issues
+          required: true

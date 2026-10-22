@@ -2,7 +2,7 @@
 
 This document provides a quick overview of all available CI/CD workflows in this repository.
 
-**Note:** All workflows in this repository use **manual triggers only** (`workflow_dispatch`). There are no automatic triggers from push or pull request events.
+**Note:** All build/release workflows run manually (`workflow_dispatch`). Two run automatically: `issue-enforce.yml` (on issue events) and `opencode-review.yml` (on pull-request events).
 
 ## Workflow Files
 
@@ -179,6 +179,24 @@ This document provides a quick overview of all available CI/CD workflows in this
 **Use When:**
 - Quick configuration check
 - Before running full builds
+
+---
+
+### 9. **issue-enforce.yml** - Issue Template Enforcement
+**Purpose:** Enforce the issue templates for issues created outside the web UI
+
+**Key Features:**
+- Second enforcement layer on top of the YAML issue forms in `.github/ISSUE_TEMPLATE/`
+- Recognizes the `[BUG]`/`[FEATURE]`/`[DOCS]`/`[QUESTION]` title prefixes
+- Auto-applies the matching label (bug/enhancement/documentation/question)
+- Warns, labels `invalid`, and auto-closes non-conforming issues (warn + auto-close)
+- Maintainer-authored issues are exempt
+
+**Triggers:**
+- Automatically on issue events (`opened`, `reopened`)
+
+**Use When:**
+- Runs by itself; no manual dispatch needed
 
 ---
 

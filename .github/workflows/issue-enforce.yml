@@ -1,0 +1,174 @@
+name: issue-enforce
+
+# Enforce the issue templates in .github/ISSUE_TEMPLATE/.
+#
+# Layer 1 of enforcement is the YAML issue forms themselves: the web UI refuses
+# submission until every required field is filled, and config.yml removes the
+# "open a blank issue" escape hatch.
+#
+# This workflow is layer 2 for issues created outside the web UI (API, CLI,
+# bots, imports). On every newly opened or reopened issue authored by a
+# non-maintainer it:
+#   - recognizes the template from the [BUG]/[FEATURE]/[DOCS]/[QUESTION] title
+#     prefix and auto-applies the matching label,
+#   - requires that the template's mandatory section headings exist in the body.
+#
+# Non-conforming issues get an explanatory comment, the `invalid` label, and are
+# closed immediately (warn + auto-close). The author is allowed to reopen their
+# own issue, which re-runs this check: once the template is followed the issue
+# stays open and gets its proper label. Maintainer-authored issues
+# (owner/member/collaborator) are exempt.
+
+on:
+  issues:
+    types: [opened, reopened]
+
+concurrency:
+  group: issue-enforce-${{ github.event.issue.number }}
+  cancel-in-progress: false
+
+jobs:
+  enforce:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      issues: write
+    steps:
+      - name: Enforce issue templates
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const issue = context.payload.issue;
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const num = issue.number;
+
+            if (issue.state !== "open") {
+              core.notice("Issue is already closed; skipping.");
+              return;
+            }
+            if (["OWNER", "MEMBER", "COLLABORATOR"].includes(issue.author_association)) {
+              core.notice("Authored by a maintainer; skipping enforcement.");
+              return;
+            }
+
+            const TEMPLATES = {
+              "[bug]": {
+                name: "Bug Report", file: "bug_report.yml", label: "bug",
+                required: ["Bug Description", "Current Behavior", "Expected Behavior", "Steps to Reproduce", "Environment"]
+              },
+              "[feature]": {
+                name: "Feature Request", file: "feature_request.yml", label: "enhancement",
+                required: ["Feature Description", "Upstream Work & Prior Art"]
+              },
+              "[docs]": {
+                name: "Documentation", file: "documentation.yml", label: "documentation",
+                required: ["Documentation Location", "Issue Type", "What's Wrong"]
+              },
+              "[question]": {
+                name: "Question", file: "question.yml", label: "question",
+                required: ["What are you trying to do?", "What have you already tried?"]
+              }
+            };
+
+            const title = (issue.title || "").toLowerCase();
+            const body = issue.body || "";
+            const current = (issue.labels || []).map(function (l) {
+              return (l && (l.name || l)) || "";
+            });
+
+            let tpl = null;
+            for (const prefix of Object.keys(TEMPLATES)) {
+              if (title.startsWith(prefix)) {
+                tpl = TEMPLATES[prefix];
+                break;
+              }
+            }
+
+            function escapeRegExp(s) {
+              return s.replace(/[.*+?^'"'{}()|[\]\\]/g, "\\$&");
+            }
+
+            function missingSections(t) {
+              const missing = [];
+              for (const heading of t.required) {
+                const pattern = new RegExp("^#{1,6}[ \\t]+" + escapeRegExp(heading) + "[ \\t]*$", "im");
+                if (!pattern.test(body)) missing.push(heading);
+              }
+              return missing;
+            }
+
+            function newIssueUrl(t) {
+              return "https://github.com/" + owner + "/" + repo + "/issues/new?template=" + t.file;
+            }
+
+            async function addLabel(name) {
+              if (current.includes(name)) return;
+              await github.rest.issues.addLabels({ owner: owner, repo: repo, issue_number: num, labels: [name] });
+              current.push(name);
+            }
+
+            async function removeLabelSafely(name) {
+              if (!current.includes(name)) return;
+              try {
+                await github.rest.issues.removeLabel({ owner: owner, repo: repo, issue_number: num, name: name });
+              } catch (e) {
+                // Label already gone; nothing to do.
+              }
+              current.splice(current.indexOf(name), 1);
+            }
+
+            async function closeAsNotPlanned() {
+              await github.rest.issues.update({
+                owner: owner, repo: repo, issue_number: num,
+                state: "closed", state_reason: "not_planned"
+              });
+            }
+
+            const reopenHint =
+              "Reopen it after editing (authors can always reopen their own issues) " +
+              "and this check runs again automatically: once the template is " +
+              "followed, the issue stays open and receives its proper label.";
+
+            if (!tpl) {
+              core.notice("No template title prefix recognized; labeling and closing.");
+              await addLabel("invalid");
+              const chooser = Object.keys(TEMPLATES).map(function (prefix) {
+                const t = TEMPLATES[prefix];
+                return "- `" + prefix.toUpperCase() + "` — [" + t.name + "](" + newIssueUrl(t) + ")";
+              }).join("\n");
+              const msg =
+                "Thanks for opening an issue! I could not match it to one of our " +
+                "issue templates (the title should start with `[BUG]`, `[FEATURE]`, " +
+                "`[DOCS]`, or `[QUESTION]` and the body should contain that " +
+                "template's sections).\n\n" +
+                "Please re-submit through one of the forms instead:\n\n" + chooser + "\n\n" +
+                reopenHint + "\n\n" +
+                "Maintainer-authored issues are exempt from this check.";
+              await github.rest.issues.createComment({ owner: owner, repo: repo, issue_number: num, body: msg });
+              await closeAsNotPlanned();
+              return;
+            }
+
+            const missing = missingSections(tpl);
+            if (missing.length === 0) {
+              core.notice("Issue follows the " + tpl.name + " template.");
+              await addLabel(tpl.label);
+              await removeLabelSafely("invalid");
+              return;
+            }
+
+            core.notice("Missing required sections: " + missing.join(", "));
+            await addLabel("invalid");
+            const msg =
+              "Thanks for opening an issue! This one was created outside the " +
+              "[" + tpl.name + "](" + newIssueUrl(tpl) + ") form: I could not find " +
+              "the required section(s) " + missing.map(function (h) {
+                return "`### " + h + "`";
+              }).join(", ") + " in the body.\n\n" +
+              "Please edit this issue so it follows the " + tpl.name + " template, or " +
+              "resubmit it through the form above.\n\n" +
+              reopenHint + "\n\n" +
+              "Maintainer-authored issues are exempt from this check.";
+            await github.rest.issues.createComment({ owner: owner, repo: repo, issue_number: num, body: msg });
+            await closeAsNotPlanned();
