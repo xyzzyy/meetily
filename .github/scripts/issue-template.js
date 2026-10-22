@@ -1,9 +1,8 @@
 "use strict";
 
 // Shared validation for the issue templates in .github/ISSUE_TEMPLATE/.
-// Used by issue-enforce.yml (warn + close) and issue-grace.yml (author reopen +
-// nightly expiry). Keep this file dependency-free so both workflows can load it
-// after actions/checkout.
+// Used by event checks and the nightly check through issue-workflows.js.
+// Keep this file dependency-free so the workflows can load it after checkout.
 
 const TEMPLATES = {
   "[bug]": {

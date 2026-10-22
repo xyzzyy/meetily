@@ -2,7 +2,7 @@
 
 This document provides a quick overview of all available CI/CD workflows in this repository.
 
-**Note:** Most build/release workflows run manually (`workflow_dispatch`). Four run automatically: `pr-build.yml` (pull requests and pushes to `main`), `opencode-review.yml` (pull-request events), `issue-enforce.yml` (issue events), and `issue-grace.yml` (`/reopen` comments and a nightly expiry sweep).
+**Note:** Most build/release workflows run manually (`workflow_dispatch`). Four run automatically: `pr-build.yml` (pull requests and pushes to `main`), `opencode-review.yml` (pull-request events), `issue-enforce.yml` (issue events), and `issue-grace.yml` (`/reopen` comments and a nightly check of all open issues).
 
 ## Workflow Files
 
@@ -182,52 +182,58 @@ This document provides a quick overview of all available CI/CD workflows in this
 
 ---
 
-### 9. **issue-enforce.yml** - Issue Template Enforcement
-**Purpose:** Enforce the issue templates for issues created outside the web UI
+### 9. **issue-enforce.yml** - Issue Template Checks
+
+**Purpose:** Check open issues against the same required fields as the issue forms.
 
 **Key Features:**
-- Second enforcement layer on top of the YAML issue forms in `.github/ISSUE_TEMPLATE/`
-- Shared section/checkbox validation lives in `.github/scripts/issue-template.js` (used by both issue workflows)
-- Recognizes the `[BUG]`/`[FEATURE]`/`[DOCS]`/`[QUESTION]` title prefixes
-- Auto-applies the matching label (bug/enhancement/documentation/question)
-- Warns, labels `invalid-template`, and auto-closes non-conforming issues (warn + auto-close)
-- Grandfathers existing issues: nothing is backfilled, and an open issue is only re-evaluated after it is edited or reopened
-- Does not reopen closed issues itself; the author's one-time `/reopen` command is handled by `issue-grace.yml`
-- Never closes an issue that is inside its `template-grace` window; the nightly sweep owns expiry
-- Applies the same checks to all authors and actors, including maintainers
-- A manual reopen runs the normal check; use `/reopen` to grant another grace window
+- Applies the same template rules to every author and actor, including maintainers
+- Recognizes the `[BUG]`, `[FEATURE]`, `[DOCS]`, and `[QUESTION]` title prefixes
+- Requires information in each required section and checks each required box
+- Comments with the current failures, adds `invalid-template`, and closes incomplete issues
+- Allows unlimited edits while `template-grace` is present, even after an edit completes the template
+- Keeps grace until the nightly check; removing the label starts a normal template check
+- Explains label changes when an issue follows its template
+- Does no work on closed issues
+- Uses `.github/scripts/issue-workflows.js` with the nightly workflow, so both use the same checks and closure explanations
 
 **Triggers:**
-- Automatically on issue events (`opened`, `reopened`, `edited`)
+- Automatically on open issue events (`opened`, `reopened`, `edited`)
+- Automatically when someone removes `template-grace` from an open issue
 
 **Use When:**
-- Runs by itself; no manual dispatch needed
+- Runs automatically; no manual dispatch is needed
 
 ---
 
-### 10. **issue-grace.yml** - Reopen and Nightly Expiry
-**Purpose:** Give authors one automatic reopen and let maintainers grant more review cycles through the same checks.
+### 10. **issue-grace.yml** - Reopen and Nightly Checks
+
+**Purpose:** Give any user one reopen per issue and let maintainers grant more grace periods.
 
 **Key Features:**
-- Handles `/reopen` comments from the issue author or a maintainer on closed issues labeled `invalid-template`
-- Re-validates immediately: fixed issues reopen as normal; still-incomplete issues reopen with `template-grace` (the active window) and `template-grace-used` (the one-time chance has been consumed)
-- Authors get one automatic reopen per issue; later attempts get a one-time pointer to the maintainers
-- Maintainers with triage, write, maintain, or admin access can use `/reopen` without a limit, on their own issues or another author's
-- Each maintainer command runs the same validation and nightly expiry; it never resets `template-grace-used`
-- Checks the comment author's current repository permissions; a failed lookup never grants maintainer access
-- Nightly sweep at 04:00 UTC re-validates open `template-grace` issues: fixed ones pass, incomplete ones are closed again and the active label is removed
-- Removes `template-grace` if the issue is closed during the window, so a later maintainer reopen is not affected by a stale label
-- All issues have the same nightly check, including issues created or reopened by a maintainer
+- Anyone can comment `/reopen` on a closed issue with `invalid-template`
+- The first successful command adds `template-grace` and `invalid-template-again`, then reopens the issue
+- `template-grace` permits unlimited edits until the next nightly check at 04:00 UTC
+- `invalid-template-again` means that later `/reopen` commands need a maintainer; there is no reopen counter
+- Maintainers with triage, write, maintain, or admin access can use `/reopen` without a limit
+- Checks the command author's current permissions when a later reopen needs a maintainer
+- Checks no title or body while an issue is closed; only an explicit `/reopen` request can process a closed issue
+- A failed command rolls back new request labels and keeps an existing maintainer-only label; the bot reports any rollback failure
+- Each command response explains the action or refusal
+- The nightly check covers **all open issues**, including older issues without a grace label
+- Complete issues stay open; the bot removes `template-grace` and `invalid-template`, but keeps `invalid-template-again`
+- Incomplete issues receive a comment with the current failures and close; the bot removes grace before closure
+- Closed issues have no scheduled checks or automatic label cleanup
+- A manual closure leaves the labels alone; closed issues remain outside the nightly check
 - Tests run in `pr-build.yml`; run them locally with `node --test .github/scripts/issue-workflows.test.cjs`
 
 **Triggers:**
 - Automatically on issue comments (`/reopen`)
-- Automatically on issue close (stale-window cleanup)
 - Nightly at 04:00 UTC
-- Manual dispatch (`workflow_dispatch`) for the expiry sweep, with an optional dry run
+- Manual dispatch (`workflow_dispatch`) for the nightly checks, with an optional dry run
 
 **Use When:**
-- Runs by itself; the manual dispatch is useful to preview or force an expiry sweep
+- Runs automatically; use manual dispatch to preview or start the nightly checks
 
 ---
 

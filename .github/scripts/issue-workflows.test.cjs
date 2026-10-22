@@ -43,9 +43,11 @@ function loadJob(file, job) {
 
 const enforce = loadJob("issue-enforce.yml", "enforce");
 const reopen = loadJob("issue-grace.yml", "reopen");
-const expire = loadJob("issue-grace.yml", "expire");
-const cleanup = loadJob("issue-grace.yml", "cleanup");
+const sweep = loadJob("issue-grace.yml", "sweep");
 
+const INVALID = "invalid-template";
+const GRACE = "template-grace";
+const AGAIN = "invalid-template-again";
 const completeBody = [
   "### Bug Description", "The app stops.",
   "### Current Behavior", "The app does not open.",
@@ -68,50 +70,72 @@ function fixture(options = {}) {
     labels: [],
     ...options.issue,
   };
+  const issues = new Map([[issue.number, issue], ...(options.extraIssues || []).map((extra) =>
+    [extra.number, { ...structuredClone(issue), ...extra }]
+  )]);
   const calls = [];
-  const comments = (options.comments || []).map((body, id) => ({ id, body }));
-  const payloadIssue = structuredClone(issue);
+  const comments = (options.comments || []).map((body, id) => ({ id, body, user: { type: "Bot" } }));
+  const threads = new Map([[issue.number, comments]]);
   const context = {
     repo: { owner: "owner", repo: "repo" },
     actor: "author",
+    runId: 5000,
     eventName: options.eventName || "issues",
     payload: {
       action: options.action || "opened",
-      issue: payloadIssue,
+      issue: structuredClone(issue),
       comment: { id: 100, body: "/reopen", user: { login: options.commenter || "author" } },
       inputs: { dry_run: "false" },
     },
   };
   Object.assign(issue, options.live);
-  const labels = () => issue.labels.map((label) => label.name || label);
+  const labels = (number = issue.number) => issues.get(number).labels.map((label) => label.name || label);
   const failure = (message) => Object.assign(new Error(message), { status: 500 });
+  const fails = (name, number) => options[name] === true || options[name] === number;
+  const thread = (number) => {
+    if (!threads.has(number)) threads.set(number, []);
+    return threads.get(number);
+  };
+  const page = (items, args) => items.slice((args.page - 1) * args.per_page, args.page * args.per_page);
   const github = {
     rest: {
       issues: {
         get: async (args) => {
           calls.push({ method: "get", ...args });
-          return { data: structuredClone(issue) };
+          const live = issues.get(args.issue_number);
+          if (options.beforeGet) options.beforeGet(live);
+          return { data: structuredClone(live) };
         },
-        listForRepo: async () => ({ data: issue.state === "open" && labels().includes("template-grace") ? [structuredClone(issue)] : [] }),
-        listComments: async () => ({ data: structuredClone(comments) }),
-        createComment: async ({ body }) => {
-          calls.push({ method: "createComment", body });
-          comments.push({ id: 200 + comments.length, body });
+        listForRepo: async (args) => {
+          calls.push({ method: "listForRepo", ...args });
+          const matches = Array.from(issues.values()).filter((item) =>
+            item.state === args.state && (!args.labels || labels(item.number).includes(args.labels))
+          );
+          return { data: structuredClone(page(matches, args)) };
         },
-        addLabels: async ({ labels: added }) => {
-          calls.push({ method: "addLabels", labels: added });
+        listComments: async (args) => ({ data: structuredClone(page(thread(args.issue_number), args)) }),
+        createComment: async ({ body, issue_number }) => {
+          calls.push({ method: "createComment", body, issue_number });
+          if (fails("failComment", issue_number)) throw failure("Comment failed");
+          const entries = thread(issue_number);
+          entries.push({ id: 200 + entries.length, body, user: { type: "Bot" } });
+        },
+        addLabels: async ({ labels: added, issue_number }) => {
+          calls.push({ method: "addLabels", labels: added, issue_number, state: issues.get(issue_number).state });
           if (options.failLabel && added.includes(options.failLabel)) throw failure("Label failed");
-          for (const label of added) if (!labels().includes(label)) issue.labels.push({ name: label });
+          for (const label of added) if (!labels(issue_number).includes(label)) issues.get(issue_number).labels.push({ name: label });
         },
-        removeLabel: async ({ name }) => {
-          calls.push({ method: "removeLabel", name });
-          issue.labels = issue.labels.filter((label) => (label.name || label) !== name);
+        removeLabel: async ({ name, issue_number }) => {
+          calls.push({ method: "removeLabel", name, issue_number, state: issues.get(issue_number).state });
+          if (options.failRemove === name) throw failure("Label removal failed");
+          const live = issues.get(issue_number);
+          live.labels = live.labels.filter((label) => (label.name || label) !== name);
         },
         createLabel: async (args) => { calls.push({ method: "createLabel", ...args }); },
         update: async (args) => {
-          calls.push({ method: "update", labels: labels(), ...args });
-          if (options.failUpdate) throw failure("Update failed");
-          if (args.state) issue.state = args.state;
+          calls.push({ method: "update", labels: labels(args.issue_number), ...args });
+          if (fails("failUpdate", args.issue_number)) throw failure("Update failed");
+          if (args.state) issues.get(args.issue_number).state = args.state;
         },
       },
       repos: {
@@ -122,21 +146,34 @@ function fixture(options = {}) {
         },
       },
     },
-    paginate: async (method, args) => (await method(args)).data,
+    paginate: async (method, args) => {
+      const result = [];
+      for (let currentPage = 1; ; currentPage++) {
+        const { data } = await method({ ...args, page: currentPage });
+        result.push(...data);
+        if (data.length < args.per_page) return result;
+      }
+    },
   };
   const core = {
     notice: () => {},
     info: () => {},
     warning: (message) => { calls.push({ method: "warning", message }); },
   };
-  return { context, github, core, issue, calls, comments, labels };
+  const event = (eventName, action = "opened") => {
+    context.eventName = eventName;
+    context.payload.action = action;
+    context.payload.issue = structuredClone(issue);
+    context.runId++;
+  };
+  return { context, github, core, issue, issues, calls, comments, labels, event };
 }
 
 function closedFixture(options = {}) {
   return fixture({
     ...options,
     eventName: "issue_comment",
-    issue: { state: "closed", labels: ["invalid-template"], ...options.issue },
+    issue: { state: "closed", labels: [INVALID], ...options.issue },
   });
 }
 
@@ -144,7 +181,7 @@ function graceFixture(options = {}) {
   return fixture({
     ...options,
     eventName: "schedule",
-    issue: { labels: ["invalid-template", "template-grace", "template-grace-used"], ...options.issue },
+    issue: { labels: [INVALID, GRACE, AGAIN], ...options.issue },
   });
 }
 
@@ -155,20 +192,39 @@ for (const association of ["NONE", "OWNER", "MEMBER", "COLLABORATOR"]) {
       f.context.actor = "maintainer";
       await enforce(f);
       assert.equal(f.issue.state, "closed");
-      assert.ok(f.labels().includes("invalid-template"));
+      assert.ok(f.labels().includes(INVALID));
       assert.equal(f.comments.length, 1);
-      assert.match(f.comments[0].body, /\/reopen/);
-      assert.doesNotMatch(f.comments[0].body, /exempt/);
+      assert.match(f.comments[0].body, /### Environment/);
+      assert.match(f.comments[0].body, /required boxes/);
+      assert.match(f.comments[0].body, /Anyone can comment `\/reopen`/);
       assert.equal(f.calls.filter((call) => call.method === "permission").length, 0);
     });
   }
 }
 
-test("a complete maintainer issue passes", async () => {
+test("a complete issue gets its matching label and an explanation", async () => {
   const f = fixture({ issue: { author_association: "OWNER", body: completeBody } });
   await enforce(f);
   assert.equal(f.issue.state, "open");
-  assert.ok(f.labels().includes("bug"));
+  assert.deepEqual(f.labels(), ["bug"]);
+  assert.match(f.comments[0].body, /add the `bug` label/);
+});
+
+test("a complete issue with correct labels needs no changes or comment", async () => {
+  const f = fixture({ issue: { body: completeBody, labels: ["bug"] } });
+  await enforce(f);
+  assert.equal(f.issue.state, "open");
+  assert.equal(f.comments.length, 0);
+  assert.deepEqual(f.calls.map((call) => call.method), ["get"]);
+});
+
+test("a missing title prefix closes with links to all four forms", async () => {
+  const f = fixture({ issue: { title: "The app stops" } });
+  await enforce(f);
+  assert.equal(f.issue.state, "closed");
+  for (const form of ["bug_report.yml", "feature_request.yml", "documentation.yml", "question.yml"]) {
+    assert.ok(f.comments[0].body.includes("issues/new?template=" + form));
+  }
 });
 
 test("enforcement uses the current body and state", async () => {
@@ -179,65 +235,122 @@ test("enforcement uses the current body and state", async () => {
   const closed = fixture({ live: { state: "closed" } });
   await enforce(closed);
   assert.equal(closed.comments.length, 0);
+  assert.deepEqual(closed.calls.map((call) => call.method), ["get"]);
 });
 
-test("an edit to a closed issue does not start enforcement", async () => {
-  const f = fixture({ issue: { state: "closed" }, action: "edited" });
+for (const action of ["edited", "unlabeled", "closed"]) {
+  test(`a closed issue receives no automatic work on ${action}`, async () => {
+    const f = fixture({ issue: { state: "closed", labels: [INVALID, GRACE, AGAIN] }, action });
+    await enforce(f);
+    assert.deepEqual(f.calls, []);
+    assert.deepEqual(f.labels(), [INVALID, GRACE, AGAIN]);
+  });
+}
+
+test("there is no workflow subscription for closed issue cleanup", () => {
+  const source = fs.readFileSync(path.join(root, ".github/workflows/issue-grace.yml"), "utf8");
+  assert.doesNotMatch(source, /^  issues:/m);
+  assert.doesNotMatch(source, /^  cleanup:/m);
+});
+
+test("removing grace checks and closes an incomplete issue", async () => {
+  const f = fixture({ action: "unlabeled", issue: { labels: [INVALID, AGAIN] } });
+  f.context.payload.label = { name: GRACE };
+  await enforce(f);
+  assert.equal(f.issue.state, "closed");
+  assert.match(f.comments[0].body, /Ask a maintainer/);
+});
+
+test("removing an unrelated label does not start a template check", async () => {
+  const f = fixture({ action: "unlabeled" });
+  f.context.payload.label = { name: "question" };
   await enforce(f);
   assert.deepEqual(f.calls, []);
 });
 
-test("a manual maintainer reopen has no exemption or extra grace", async () => {
-  const f = fixture({ action: "reopened", issue: { labels: ["invalid-template", "template-grace-used"] } });
+test("a manual maintainer reopen without grace has the normal checks", async () => {
+  const f = fixture({ action: "reopened", issue: { labels: [INVALID, AGAIN] } });
   f.context.actor = "maintainer";
   await enforce(f);
   assert.equal(f.issue.state, "closed");
-  assert.ok(!f.labels().includes("template-grace"));
+  assert.ok(!f.labels().includes(GRACE));
+  assert.match(f.comments[0].body, /maintainer/);
 });
 
-test("an incomplete grace issue stays open without repeated guidance", async () => {
+test("grace allows repeated partial edits, including edits after a complete correction", async () => {
   const f = graceFixture({ issue: { author_association: "OWNER" } });
-  await enforce(f);
-  assert.equal(f.issue.state, "open");
+  for (const body of ["partial fix", completeBody, "another partial fix"]) {
+    f.issue.body = body;
+    f.event("issues", "edited");
+    await enforce(f);
+    assert.equal(f.issue.state, "open");
+    assert.deepEqual(f.labels(), [INVALID, GRACE, AGAIN]);
+  }
   assert.equal(f.comments.length, 0);
 });
 
-test("a fixed grace issue clears active labels and keeps the used chance", async () => {
-  const f = graceFixture({ issue: { body: completeBody, author_association: "OWNER" } });
+test("a complete edit outside grace clears invalid status and explains why", async () => {
+  const f = fixture({ action: "edited", issue: { body: completeBody, labels: [INVALID, AGAIN] } });
   await enforce(f);
-  assert.deepEqual(f.labels().sort(), ["bug", "template-grace-used"]);
+  assert.deepEqual(f.labels().sort(), ["bug", AGAIN].sort());
+  assert.match(f.comments[0].body, /remove these labels: `invalid-template`/);
 });
 
-test("the author gets one incomplete reopen with labels set before the state change", async () => {
-  const f = closedFixture();
-  await reopen(f);
-  assert.equal(f.issue.state, "open");
-  const update = f.calls.find((call) => call.method === "update");
-  assert.ok(update.labels.includes("template-grace"));
-  assert.ok(update.labels.includes("template-grace-used"));
-  assert.match(f.comments[0].body, /04:00 UTC/);
-  // Even if an issue event is delivered, enforcement respects the same window.
-  f.context.payload.issue.state = "open";
-  await enforce(f);
-  assert.equal(f.issue.state, "open");
-});
+for (const commenter of ["author", "another-user"]) {
+  test(`${commenter} can use the first reopen without a permission check`, async () => {
+    const f = closedFixture({ commenter, failPermission: true });
+    await reopen(f);
+    assert.equal(f.issue.state, "open");
+    const update = f.calls.find((call) => call.method === "update");
+    assert.ok(update.labels.includes(GRACE));
+    assert.ok(update.labels.includes(AGAIN));
+    assert.equal(f.calls.filter((call) => call.method === "permission").length, 0);
+    assert.match(f.comments[0].body, /04:00 UTC/);
+    assert.match(f.comments[0].body, /as many edits as needed/);
+  });
+}
 
-test("a fixed first reopen does not use the author's grace chance", async () => {
+test("the first reopen always grants grace and records the allowance, even after a complete correction", async () => {
   const f = closedFixture({ issue: { body: completeBody } });
   await reopen(f);
   assert.equal(f.issue.state, "open");
-  assert.deepEqual(f.labels(), ["bug"]);
+  assert.deepEqual(f.labels().sort(), [INVALID, GRACE, AGAIN].sort());
+  assert.ok(!f.labels().includes("bug"));
 });
 
-test("an author cannot grant a second reopen, even after a fix", async () => {
-  for (const body of ["incomplete", completeBody]) {
-    const f = closedFixture({ issue: { body, labels: ["invalid-template", "template-grace-used"] } });
-    await reopen(f);
-    await reopen(f);
-    assert.equal(f.issue.state, "closed");
-    assert.equal(f.comments.length, 1);
-    assert.match(f.comments[0].body, /maintainer can comment `\/reopen`/i);
-  }
+test("an existing repository label does not prevent a reopen", async () => {
+  const f = closedFixture();
+  f.github.rest.issues.createLabel = async () => {
+    throw Object.assign(new Error("Label already exists"), { status: 422 });
+  };
+  await reopen(f);
+  assert.equal(f.issue.state, "open");
+  assert.deepEqual(f.labels().sort(), [INVALID, GRACE, AGAIN].sort());
+});
+
+test("/reopen does not inspect a closed issue's title or body", async () => {
+  const f = closedFixture();
+  const live = { ...f.issue };
+  for (const field of ["title", "body"]) Object.defineProperty(live, field, {
+    get: () => { throw new Error("Closed issue content was inspected"); },
+  });
+  f.github.rest.issues.get = async () => ({ data: live });
+  await reopen(f);
+  assert.equal(f.issue.state, "open");
+});
+
+test("a different user cannot get a second allowance for the same issue", async () => {
+  const f = closedFixture({ commenter: "another-user", issue: { labels: [INVALID, AGAIN] } });
+  await reopen(f);
+  assert.equal(f.issue.state, "closed");
+  assert.match(f.comments[0].body, /Ask a maintainer/);
+  await reopen(f);
+  assert.equal(f.comments.length, 1, "A rerun must not repeat the same refusal");
+  f.context.payload.comment.id++;
+  f.context.payload.comment.user.login = "third-user";
+  await reopen(f);
+  assert.equal(f.issue.state, "closed");
+  assert.equal(f.comments.length, 2, "Each new request needs an explanation");
 });
 
 for (const permission of [
@@ -248,156 +361,244 @@ for (const permission of [
   { permission: "read", role_name: "custom-triage", user: { permissions: { triage: true } } },
 ]) {
   for (const commenter of ["author", "maintainer"]) {
-    test(`${permission.role_name} can grant more cycles as ${commenter}`, async () => {
-      const f = closedFixture({ commenter, permission, issue: { labels: ["invalid-template", "template-grace-used"] } });
+    test(`${permission.role_name} can grant more grace as ${commenter}`, async () => {
+      const f = closedFixture({ commenter, permission, issue: { labels: [INVALID, AGAIN] } });
       await reopen(f);
       assert.equal(f.issue.state, "open");
-      assert.ok(f.labels().includes("template-grace"));
-      assert.ok(f.labels().includes("template-grace-used"));
+      assert.ok(f.labels().includes(GRACE));
+      assert.ok(f.labels().includes(AGAIN));
       assert.match(f.comments[0].body, /04:00 UTC/);
     });
   }
 }
 
-test("a maintainer can reopen a fixed issue after the author used the chance", async () => {
-  const f = closedFixture({ commenter: "maintainer", permission: { permission: "write" }, issue: { body: completeBody, labels: ["invalid-template", "template-grace-used"] } });
-  await reopen(f);
-  assert.equal(f.issue.state, "open");
-  assert.deepEqual(f.labels().sort(), ["bug", "template-grace-used"]);
-});
-
-test("read access and author association cannot grant another person's reopen", async () => {
-  const f = closedFixture({ commenter: "reader" });
-  f.context.payload.comment.author_association = "MEMBER";
-  await reopen(f);
-  assert.equal(f.issue.state, "closed");
-  assert.equal(f.comments.length, 0);
-});
-
-test("the permission lookup uses the comment author, not a maintainer who reruns the job", async () => {
-  const f = closedFixture({ commenter: "reader" });
+test("the permission lookup uses the commenter, not a maintainer who reruns the job", async () => {
+  const f = closedFixture({ commenter: "reader", issue: { labels: [INVALID, AGAIN] } });
   f.context.actor = "maintainer";
+  f.context.payload.comment.author_association = "MEMBER";
   await reopen(f);
   assert.equal(f.issue.state, "closed");
   assert.equal(f.calls.find((call) => call.method === "permission").username, "reader");
 });
 
-test("permission lookup failure never grants extra access", async () => {
-  const author = closedFixture({ failPermission: true });
-  await reopen(author);
-  assert.equal(author.issue.state, "open");
-  const usedAuthor = closedFixture({ failPermission: true, issue: { labels: ["invalid-template", "template-grace-used"] } });
-  await reopen(usedAuthor);
-  assert.equal(usedAuthor.issue.state, "closed");
-  const other = closedFixture({ failPermission: true, commenter: "maintainer" });
-  await reopen(other);
-  assert.equal(other.issue.state, "closed");
+test("a failed permission check keeps the issue closed with an explanation", async () => {
+  const f = closedFixture({ failPermission: true, issue: { labels: [INVALID, AGAIN] } });
+  await reopen(f);
+  assert.equal(f.issue.state, "closed");
+  assert.deepEqual(f.labels(), [INVALID, AGAIN]);
+  assert.match(f.comments[0].body, /could not check your maintainer permissions/);
 });
 
-test("a failed first reopen does not use the author's chance", async () => {
+test("a failed first reopen restores labels and explains the failure", async () => {
   const f = closedFixture({ failUpdate: true });
   await assert.rejects(reopen(f), /Update failed/);
-  assert.deepEqual(f.labels(), ["invalid-template"]);
+  assert.deepEqual(f.labels(), [INVALID]);
+  assert.match(f.comments.at(-1).body, /reopen request failed/);
 });
 
-test("a failed maintainer reopen keeps the author's previously used chance", async () => {
-  const f = closedFixture({ failUpdate: true, commenter: "maintainer", permission: { permission: "write" }, issue: { labels: ["invalid-template", "template-grace-used"] } });
+test("a failed maintainer reopen preserves the maintainer-only label", async () => {
+  const f = closedFixture({ failUpdate: true, commenter: "maintainer", permission: { permission: "write" }, issue: { labels: [INVALID, AGAIN] } });
   await assert.rejects(reopen(f), /Update failed/);
-  assert.deepEqual(f.labels().sort(), ["invalid-template", "template-grace-used"]);
+  assert.deepEqual(f.labels().sort(), [INVALID, AGAIN].sort());
 });
 
-test("a failed label addition removes the new active window", async () => {
-  const f = closedFixture({ failLabel: "template-grace-used" });
+test("a failed label addition does not use the first allowance", async () => {
+  const f = closedFixture({ failLabel: AGAIN });
   await assert.rejects(reopen(f), /Label failed/);
   assert.equal(f.issue.state, "closed");
-  assert.deepEqual(f.labels(), ["invalid-template"]);
+  assert.deepEqual(f.labels(), [INVALID]);
 });
 
-test("/reopen ignores open issues, pull requests, ordinary comments, and other closure labels", async () => {
+test("a rollback failure is explained and does not stop the other label rollback", async () => {
+  const f = closedFixture({ failUpdate: true, failRemove: GRACE });
+  await assert.rejects(reopen(f), /Update failed/);
+  assert.deepEqual(f.labels(), [INVALID, GRACE]);
+  assert.match(f.comments.at(-1).body, /could not remove these request labels: `template-grace`/);
+  assert.match(f.comments.at(-1).body, /Ask a maintainer/);
+});
+
+test("open issues, pull requests, and ordinary comments cause no reopen action", async () => {
   const open = closedFixture({ issue: { state: "open" } });
   const pr = closedFixture({ issue: { pull_request: {} } });
   const ordinary = closedFixture();
   ordinary.context.payload.comment.body = "Please reopen this";
-  const duplicate = closedFixture({ commenter: "maintainer", permission: { permission: "admin" }, issue: { labels: ["duplicate"] } });
-  for (const f of [open, pr, ordinary, duplicate]) {
+  for (const f of [open, pr, ordinary]) {
     await reopen(f);
-    assert.equal(f.calls.filter((call) => call.method === "update").length, 0);
-    assert.equal(f.comments.length, 0);
+    assert.deepEqual(f.calls, []);
   }
 });
 
-test("a stale maintainer /reopen cannot reverse a later close", async () => {
-  const f = closedFixture({ commenter: "maintainer", permission: { permission: "admin" }, live: { closed_at: "2026-10-22T04:01:00Z" } });
+test("a non-template closure gets a refusal explanation", async () => {
+  const f = closedFixture({ issue: { labels: ["duplicate"] } });
+  await reopen(f);
+  assert.equal(f.issue.state, "closed");
+  assert.match(f.comments[0].body, /applies only to issues closed for missing template information/);
+});
+
+test("a stale /reopen cannot reverse a later close", async () => {
+  const f = closedFixture({ live: { closed_at: "2026-10-22T04:01:00Z" } });
   f.context.payload.comment.created_at = "2026-10-22T04:00:00Z";
   await reopen(f);
   assert.equal(f.issue.state, "closed");
-  assert.equal(f.calls.filter((call) => call.method === "permission").length, 0);
+  assert.match(f.comments[0].body, /before its latest closure/);
 });
 
 for (const association of ["NONE", "OWNER", "MEMBER", "COLLABORATOR"]) {
-  test(`the nightly check expires incomplete ${association} issues`, async () => {
+  test(`the nightly check closes incomplete ${association} issues and lists the current failures`, async () => {
     const f = graceFixture({ issue: { author_association: association } });
-    await expire(f);
+    await sweep(f);
     assert.equal(f.issue.state, "closed");
-    assert.deepEqual(f.labels().sort(), ["invalid-template", "template-grace-used"]);
-    assert.match(f.comments[0].body, /maintainer can comment `\/reopen`/i);
+    assert.deepEqual(f.labels().sort(), [INVALID, AGAIN].sort());
+    assert.match(f.comments[0].body, /### Environment/);
+    assert.match(f.comments[0].body, /required boxes/);
+    assert.match(f.comments[0].body, /maintainer/);
+    assert.ok(f.calls.filter((call) => call.method === "removeLabel").every((call) => call.state === "open"));
   });
 }
 
-test("the nightly check passes a fixed maintainer issue", async () => {
-  const f = graceFixture({ issue: { author_association: "OWNER", body: completeBody } });
-  await expire(f);
-  assert.equal(f.issue.state, "open");
-  assert.deepEqual(f.labels().sort(), ["bug", "template-grace-used"]);
+test("the nightly check includes older issues without any labels", async () => {
+  const f = fixture({ eventName: "schedule" });
+  await sweep(f);
+  assert.equal(f.issue.state, "closed");
+  assert.ok(f.labels().includes(INVALID));
+  const request = f.calls.find((call) => call.method === "listForRepo");
+  assert.equal(request.state, "open");
+  assert.equal(request.labels, undefined);
 });
 
-test("the nightly dry run changes no issue data", async () => {
+test("the nightly check clears grace and invalid status when the issue is complete", async () => {
+  const f = graceFixture({ issue: { author_association: "OWNER", body: completeBody } });
+  await sweep(f);
+  assert.equal(f.issue.state, "open");
+  assert.deepEqual(f.labels().sort(), ["bug", AGAIN].sort());
+  assert.match(f.comments[0].body, /remove these labels: `invalid-template`, `template-grace`/);
+});
+
+test("the nightly check leaves a complete issue with correct labels alone", async () => {
+  const f = fixture({ eventName: "schedule", issue: { body: completeBody, labels: ["bug"] } });
+  await sweep(f);
+  assert.equal(f.comments.length, 0);
+  assert.deepEqual(f.calls.map((call) => call.method), ["listForRepo", "get"]);
+});
+
+test("closed issues and pull requests are not read by the nightly check", async () => {
+  const f = fixture({ eventName: "schedule", issue: { state: "closed", labels: [INVALID, GRACE, AGAIN] }, extraIssues: [
+    { number: 2, state: "open", pull_request: {} },
+  ] });
+  await sweep(f);
+  assert.equal(f.calls.filter((call) => call.method === "get").length, 0);
+  assert.deepEqual(f.labels(), [INVALID, GRACE, AGAIN]);
+});
+
+test("the nightly check skips an issue closed after listing", async () => {
+  const f = graceFixture({ beforeGet: (issue) => { issue.state = "closed"; } });
+  await sweep(f);
+  assert.deepEqual(f.calls.map((call) => call.method), ["listForRepo", "get"]);
+  assert.deepEqual(f.labels(), [INVALID, GRACE, AGAIN]);
+});
+
+test("the nightly check does not inspect content after an issue closes", async () => {
   const f = graceFixture();
+  const closed = { ...f.issue, state: "closed" };
+  for (const field of ["title", "body"]) Object.defineProperty(closed, field, {
+    get: () => { throw new Error("Closed issue content was inspected"); },
+  });
+  f.github.rest.issues.get = async () => ({ data: closed });
+  await sweep(f);
+  assert.equal(f.comments.length, 0);
+  assert.deepEqual(f.labels(), [INVALID, GRACE, AGAIN]);
+});
+
+test("the nightly check uses a correction made after listing", async () => {
+  const f = graceFixture({ beforeGet: (issue) => { issue.body = completeBody; } });
+  await sweep(f);
+  assert.equal(f.issue.state, "open");
+  assert.deepEqual(f.labels().sort(), ["bug", AGAIN].sort());
+});
+
+test("the nightly check covers every page of open issues", async () => {
+  const f = fixture({ eventName: "schedule", extraIssues: Array.from({ length: 101 }, (_, i) => ({ number: i + 2 })) });
+  await sweep(f);
+  assert.equal(f.calls.filter((call) => call.method === "get").length, 102);
+  assert.equal(f.calls.filter((call) => call.method === "update").length, 102);
+  assert.ok(Array.from(f.issues.values()).every((issue) => issue.state === "closed"));
+});
+
+test("a nightly dry run changes neither complete nor incomplete issues", async () => {
+  const f = graceFixture({ extraIssues: [{ number: 2, body: completeBody }] });
   f.context.eventName = "workflow_dispatch";
   f.context.payload.inputs.dry_run = "true";
-  await expire(f);
+  await sweep(f);
+  assert.ok(f.calls.every((call) => ["listForRepo", "get"].includes(call.method)));
+  assert.deepEqual(f.labels(), [INVALID, GRACE, AGAIN]);
   assert.equal(f.issue.state, "open");
-  assert.equal(f.comments.length, 0);
-  assert.deepEqual(f.labels(), ["invalid-template", "template-grace", "template-grace-used"]);
+  assert.equal(f.issues.get(2).state, "open");
 });
 
-test("the same issue can complete repeated maintainer reopen and expiry cycles", async () => {
-  const f = closedFixture({ commenter: "maintainer", permission: { permission: "admin" }, issue: { author_association: "OWNER", labels: ["invalid-template", "template-grace-used"] } });
+test("a failure on one issue does not stop checks on the other issues", async () => {
+  const f = graceFixture({ failUpdate: 1, extraIssues: [{ number: 2 }] });
+  await assert.rejects(sweep(f), /failed for issues: 1/);
+  assert.equal(f.issue.state, "open");
+  assert.equal(f.issues.get(2).state, "closed");
+});
+
+test("the same issue can complete repeated maintainer reopen and nightly check cycles", async () => {
+  const f = closedFixture({ commenter: "maintainer", permission: { permission: "admin" }, issue: { author_association: "OWNER", labels: [INVALID, AGAIN] } });
   for (let cycle = 0; cycle < 3; cycle++) {
-    f.context.eventName = "issue_comment";
-    f.context.payload.issue.state = "closed";
+    f.event("issue_comment");
     f.context.payload.comment.id++;
     await reopen(f);
     assert.equal(f.issue.state, "open");
-    f.context.eventName = "schedule";
-    await expire(f);
+    f.event("schedule");
+    await sweep(f);
     assert.equal(f.issue.state, "closed");
-    assert.ok(!f.labels().includes("template-grace"));
-    assert.ok(f.labels().includes("template-grace-used"));
+    assert.ok(!f.labels().includes(GRACE));
+    assert.ok(f.labels().includes(AGAIN));
   }
-  assert.equal(f.comments.filter((comment) => comment.body.includes("meetily:grace-reopened:")).length, 3);
-  assert.equal(f.comments.filter((comment) => comment.body.includes("meetily:grace-expired")).length, 3);
+  assert.equal(f.comments.filter((comment) => comment.body.includes("meetily:reopen:")).length, 3);
+  assert.equal(f.comments.filter((comment) => comment.body.includes("meetily:template-check:")).length, 3);
 });
 
-test("a failed expiry retry does not repeat the same cycle's comment", async () => {
-  const f = graceFixture({ failUpdate: true });
-  await expire(f);
-  await expire(f);
+test("each closure explains the current failures even if the issue already has invalid-template", async () => {
+  const f = fixture({ issue: { labels: [INVALID, AGAIN] } });
+  await enforce(f);
   assert.equal(f.comments.length, 1);
-  assert.ok(f.labels().includes("template-grace"));
-  assert.equal(f.calls.filter((call) => call.method === "warning").length, 2);
+  f.issue.state = "open";
+  f.issue.body = completeBody.replace("macOS 15", "");
+  f.event("issues", "edited");
+  await enforce(f);
+  assert.equal(f.comments.length, 2);
+  assert.match(f.comments[1].body, /### Environment/);
+  assert.doesNotMatch(f.comments[1].body, /### Expected Behavior/);
 });
 
-test("close cleanup removes only the active grace label", async () => {
-  const f = fixture({ action: "closed", issue: { state: "closed", labels: ["invalid-template", "template-grace", "template-grace-used"] } });
-  await cleanup(f);
-  assert.deepEqual(f.labels(), ["invalid-template", "template-grace-used"]);
+test("a retry of the same failed closure does not repeat its comment", async () => {
+  const f = fixture({ failUpdate: true });
+  await assert.rejects(enforce(f), /Update failed/);
+  await assert.rejects(enforce(f), /Update failed/);
+  assert.equal(f.comments.length, 1);
 });
 
-test("a delayed close event cannot remove a newly granted grace window", async () => {
-  const f = fixture({ action: "closed", issue: { state: "closed", labels: ["invalid-template", "template-grace", "template-grace-used"] }, live: { state: "open" } });
-  await cleanup(f);
-  assert.ok(f.labels().includes("template-grace"));
+for (const operation of ["close", "reopen"]) {
+  test(`${operation} posts an explanation before any label or state change`, async () => {
+    const f = operation === "close" ? fixture() : closedFixture();
+    await (operation === "close" ? enforce : reopen)(f);
+    const explanation = f.calls.findIndex((call) => call.method === "createComment");
+    const action = f.calls.findIndex((call) => ["addLabels", "removeLabel", "update"].includes(call.method));
+    assert.ok(explanation >= 0 && explanation < action);
+  });
+  test(`${operation} takes no action if the explanation cannot be posted`, async () => {
+    const f = operation === "close" ? fixture({ failComment: true }) : closedFixture({ failComment: true });
+    await assert.rejects((operation === "close" ? enforce : reopen)(f), /Comment failed/);
+    assert.ok(f.calls.every((call) => !["addLabels", "removeLabel", "update"].includes(call.method)));
+  });
+}
+
+test("a user cannot suppress the bot's explanation with a copied comment marker", async () => {
+  const f = fixture();
+  f.comments.push({ body: "<!-- meetily:template-check:5000:1 -->", user: { type: "User" } });
+  await enforce(f);
+  assert.equal(f.comments.length, 2);
 });
 
 test("the shared validator rejects empty sections, unchecked boxes, and headings inside code", () => {

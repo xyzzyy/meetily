@@ -1,244 +1,42 @@
 name: issue-enforce
 
-# Enforce the issue templates in .github/ISSUE_TEMPLATE/.
-#
-# Layer 1 of enforcement is the YAML issue forms themselves: the web UI refuses
-# submission until every required field is filled, and config.yml removes the
-# "open a blank issue" escape hatch.
-#
-# This workflow is layer 2 for issues created outside the web UI (API, CLI,
-# bots, imports). On every opened, reopened, or edited issue it:
-#   - recognizes the template from the [BUG]/[FEATURE]/[DOCS]/[QUESTION] title
-#     prefix and auto-applies the matching label,
-#   - requires that the template's mandatory section headings exist in the body,
-#     have content, and that the required checkboxes are checked.
-#
-# Non-conforming issues get an explanatory comment, the `invalid-template` label,
-# and are closed immediately (warn + auto-close). The comment explains the
-# `/reopen` command handled by issue-grace.yml.
-#
-# Existing issues are grandfathered: nothing is backfilled, and an open issue is
-# only re-evaluated after it is edited or reopened. This workflow never reopens
-# a closed issue itself. An issue carrying `template-grace` is inside its
-# grace window: it is re-checked normally, but never closed here. The
-# nightly job in issue-grace.yml expires the window if the issue is still
-# incomplete.
-#
-# The same checks apply to all authors and actors, including maintainers.
-# Maintainers can grant more grace windows through `/reopen`.
+# Check every author against the same issue templates. Incomplete issues close
+# with an explanation unless template-grace protects edits until the nightly
+# check. Removing template-grace makes the issue subject to normal checks.
+# Closed issues have no automatic checks or cleanup.
 
 on:
   issues:
-    types: [opened, reopened, edited]
+    types: [opened, reopened, edited, unlabeled]
 
 concurrency:
-  group: issue-enforce-${{ github.event.issue.number }}
+  group: issue-template-${{ github.event.issue.number }}
   cancel-in-progress: false
 
 jobs:
   enforce:
-    if: github.event.issue.state == 'open'
+    if: >-
+      github.event.issue.state == 'open' &&
+      (github.event.action != 'unlabeled' || github.event.label.name == 'template-grace')
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
       issues: write
       contents: read
     steps:
-      - name: Check out the shared validator
+      - name: Check out issue checks
         uses: actions/checkout@v4
         with:
           sparse-checkout: .github/scripts
           sparse-checkout-cone-mode: false
           persist-credentials: false
 
-      - name: Enforce issue templates
+      - name: Check the open issue
         uses: actions/github-script@v7
         with:
           script: |
             const path = require("path");
-            const { TEMPLATES, validate, newIssueUrl } = require(
-              path.join(process.env.GITHUB_WORKSPACE, ".github/scripts/issue-template.js")
+            const { enforce } = require(
+              path.join(process.env.GITHUB_WORKSPACE, ".github/scripts/issue-workflows.js")
             );
-
-            const issue = context.payload.issue;
-            const owner = context.repo.owner;
-            const repo = context.repo.repo;
-            const num = issue.number;
-
-            // Closed issues are never processed (and never reopened): edits to
-            // them do nothing; only a reopen event can bring one back.
-            if (issue.state !== "open") {
-              core.notice("Issue is closed; skipping enforcement.");
-              return;
-            }
-
-            // Read the live issue so the check runs against the current title,
-            // body and state, not the snapshot from when this event was queued.
-            const live = (await github.rest.issues.get({
-              owner: owner, repo: repo, issue_number: num
-            })).data;
-            if (live.state !== "open") {
-              core.notice("Issue is closed; skipping enforcement.");
-              return;
-            }
-
-            const current = (live.labels || []).map(function (l) {
-              return (l && (l.name || l)) || "";
-            });
-            // Set before any label changes so repeated non-conforming edits do
-            // not spam the same guidance comment.
-            const hadInvalidTemplateLabel = current.includes("invalid-template");
-            const inGrace = current.includes("template-grace");
-            const graceUsed = current.includes("template-grace-used");
-
-            const result = validate(live);
-            const tpl = result.template;
-
-            async function addLabel(name) {
-              if (current.includes(name)) return;
-              try {
-                await github.rest.issues.addLabels({ owner: owner, repo: repo, issue_number: num, labels: [name] });
-              } catch (e) {
-                if (name !== "invalid-template" || (e.status !== 404 && e.status !== 422)) throw e;
-                // Self-contained fallback for forks that lack the label.
-                try {
-                  await github.rest.issues.createLabel({
-                    owner: owner, repo: repo, name: name,
-                    color: "d73a4a", description: "Issue does not follow its template"
-                  });
-                } catch (createError) {
-                  if (createError.status !== 422) throw createError;
-                }
-                await github.rest.issues.addLabels({ owner: owner, repo: repo, issue_number: num, labels: [name] });
-              }
-              current.push(name);
-            }
-
-            async function removeLabelSafely(name) {
-              if (!current.includes(name)) return;
-              try {
-                await github.rest.issues.removeLabel({ owner: owner, repo: repo, issue_number: num, name: name });
-              } catch (e) {
-                // Label already gone; nothing to do.
-              }
-              current.splice(current.indexOf(name), 1);
-            }
-
-            async function hasCommentMarker(marker) {
-              const comments = await github.paginate(github.rest.issues.listComments, {
-                owner: owner, repo: repo, issue_number: num, per_page: 100
-              });
-              return comments.some(function (comment) {
-                return (comment.body || "").includes(marker);
-              });
-            }
-
-            async function commentOnce(msg) {
-              if (hadInvalidTemplateLabel) {
-                core.notice("Issue was already flagged earlier; skipping duplicate comment.");
-                return;
-              }
-              await github.rest.issues.createComment({ owner: owner, repo: repo, issue_number: num, body: msg });
-            }
-
-            async function closeAsNotPlanned() {
-              await github.rest.issues.update({
-                owner: owner, repo: repo, issue_number: num,
-                state: "closed", state_reason: "not_planned"
-              });
-            }
-
-            function reopenHint() {
-              if (graceUsed) {
-                return "This issue has already used its one automatic reopen. A " +
-                  "maintainer can comment `/reopen` to grant another review cycle. " +
-                  "You can also open a new issue " +
-                  "through the form.";
-              }
-              return "Editing this issue does not reopen it. After adding the missing " +
-                "information, comment `/reopen` to use the one automatic reopen; the " +
-                "issue is re-checked by the next nightly run. If it is still incomplete " +
-                "after that, a maintainer can comment `/reopen` to grant another " +
-                "review cycle. You can also open a " +
-                "new issue through the form.";
-            }
-
-            // A grace-window issue is never closed here; issue-grace.yml owns
-            // expiry. It is still checked so a fixed issue passes immediately.
-            if (result.ok) {
-              core.notice("Issue follows the " + tpl.name + " template.");
-              await addLabel(tpl.label);
-              await removeLabelSafely("invalid-template");
-              if (inGrace) {
-                await removeLabelSafely("template-grace");
-                if (!(await hasCommentMarker("<!-- meetily:template-passed -->"))) {
-                  await github.rest.issues.createComment({
-                    owner: owner, repo: repo, issue_number: num,
-                    body: "<!-- meetily:template-passed -->\n" +
-                      "Thanks — this issue now includes the information required by the " +
-                      "[" + tpl.name + "](" + newIssueUrl(owner, repo, tpl) + ") template."
-                  });
-                }
-              }
-              return;
-            }
-
-            if (!tpl) {
-              core.notice("No template title prefix recognized.");
-              if (inGrace) {
-                core.notice("Issue is inside its grace window; leaving it open for nightly expiry.");
-                return;
-              }
-              await addLabel("invalid-template");
-              const chooser = Object.keys(TEMPLATES).map(function (prefix) {
-                const t = TEMPLATES[prefix];
-                return "- `" + prefix.toUpperCase() + "` — [" + t.name + "](" + newIssueUrl(owner, repo, t) + ")";
-              }).join("\n");
-              const msg =
-                "Thanks for opening an issue! I could not match it to one of our " +
-                "issue templates (the title should start with `[BUG]`, `[FEATURE]`, " +
-                "`[DOCS]`, or `[QUESTION]` and the body should contain that " +
-                "template's sections).\n\n" +
-                "This issue has been closed. " + reopenHint() + "\n\n" +
-                chooser;
-              await commentOnce(msg);
-              await closeAsNotPlanned();
-              return;
-            }
-
-            core.notice(
-              "Template violations" +
-              (result.missing.length ? " - missing sections: " + result.missing.join(", ") : "") +
-              (result.unchecked.length ? " - unchecked boxes: " + result.unchecked.join(", ") : "")
-            );
-
-            if (inGrace) {
-              core.notice("Issue is inside its grace window; leaving it open for nightly expiry.");
-              return;
-            }
-
-            await addLabel("invalid-template");
-            const problems = [];
-            if (result.missing.length) {
-              problems.push(
-                "I could not find content under the required section(s) " +
-                result.missing.map(function (h) {
-                  return "`### " + h + "`";
-                }).join(", ") + "."
-              );
-            }
-            if (result.unchecked.length) {
-              problems.push(
-                "The following required checkbox(es) are not checked: " +
-                result.unchecked.map(function (item) {
-                  return "`" + item + "`";
-                }).join(", ") + "."
-              );
-            }
-            const msg =
-              "Thanks for opening an issue! This one does not follow the " +
-              "[" + tpl.name + "](" + newIssueUrl(owner, repo, tpl) + ") template.\n\n" +
-              problems.join("\n\n") + "\n\n" +
-              "This issue has been closed. " + reopenHint();
-            await commentOnce(msg);
-            await closeAsNotPlanned();
+            await enforce({ context, github, core });
