@@ -16,11 +16,10 @@ name: issue-enforce
 # Non-conforming issues get an explanatory comment, the `invalid` label, and are
 # closed immediately (warn + auto-close).
 #
-# Existing issues are grandfathered: nothing is backfilled, and an issue is only
-# evaluated once it is edited. Editing a closed issue reopens it for one
-# re-evaluation - if it now follows a template it stays open with its proper
-# label, otherwise it is closed again. Authors cannot reopen bot-closed issues
-# themselves, so editing is the supported recovery path.
+# Existing issues are grandfathered: nothing is backfilled, and an open issue is
+# only re-evaluated after it is edited or reopened. The workflow never reopens
+# a closed issue itself; closed issues stay closed and their authors are asked
+# to resubmit through the form.
 #
 # Maintainer-authored issues (owner/member/collaborator) and events triggered by
 # maintainers (owner/member/collaborator/triage) are exempt, so a maintainer's
@@ -49,7 +48,6 @@ jobs:
             const owner = context.repo.owner;
             const repo = context.repo.repo;
             const num = issue.number;
-            const action = context.payload.action;
 
             if (["OWNER", "MEMBER", "COLLABORATOR"].includes(issue.author_association)) {
               core.notice("Authored by a maintainer; skipping enforcement.");
@@ -58,13 +56,8 @@ jobs:
 
             // A maintainer's edit or manual reopen is a deliberate override,
             // not a reporter bypassing the templates. Skip events triggered by
-            // maintainers (triage can reopen/label/close). This workflow's own
-            // reopen also emits a `reopened` event; it was already scanned.
+            // maintainers (triage can reopen/label/close).
             const actor = context.actor;
-            if (actor === "github-actions[bot]" && action === "reopened") {
-              core.notice("Reopen triggered by this workflow; skipping duplicate scan.");
-              return;
-            }
             if (actor) {
               try {
                 const perm = await github.rest.repos.getCollaboratorPermissionLevel({
@@ -79,9 +72,8 @@ jobs:
               }
             }
 
-            const wasClosed = issue.state !== "open";
-            if (wasClosed && action !== "edited") {
-              core.notice("Issue is closed and was not edited; skipping.");
+            if (issue.state !== "open") {
+              core.notice("Issue is closed; skipping enforcement.");
               return;
             }
 
@@ -169,15 +161,6 @@ jobs:
               });
             }
 
-            // A closed issue has already received its guidance; an edit is the
-            // author's attempt to fix it, so reopen it and re-run the check.
-            if (wasClosed) {
-              core.notice("Edited closed issue: reopening for re-evaluation.");
-              await github.rest.issues.update({
-                owner: owner, repo: repo, issue_number: num, state: "open"
-              });
-            }
-
             if (!tpl) {
               core.notice("No template title prefix recognized; labeling and closing.");
               await addLabel("invalid");
@@ -190,11 +173,8 @@ jobs:
                 "issue templates (the title should start with `[BUG]`, `[FEATURE]`, " +
                 "`[DOCS]`, or `[QUESTION]` and the body should contain that " +
                 "template's sections).\n\n" +
-                "This issue has been closed. To continue:\n\n" +
-                "1. **Edit this issue**: use the matching title prefix and add that " +
-                "template's sections — saving an edit reopens the issue and re-runs " +
-                "this check automatically, or\n" +
-                "2. **Open a new issue** through one of the forms:\n\n" + chooser + "\n\n" +
+                "This issue has been closed. Editing it does not reopen it — " +
+                "please open a new issue through one of the forms:\n\n" + chooser + "\n\n" +
                 "Maintainer-authored issues are exempt from this check.";
               await commentOnce(msg);
               await closeAsNotPlanned();
@@ -217,10 +197,9 @@ jobs:
               "the required section(s) " + missing.map(function (h) {
                 return "`### " + h + "`";
               }).join(", ") + " in the body.\n\n" +
-              "This issue has been closed. To continue:\n\n" +
-              "1. **Edit this issue** to add the missing sections — saving an edit " +
-              "reopens it and re-runs this check automatically, or\n" +
-              "2. **Open a new issue** through the [" + tpl.name + "](" + newIssueUrl(tpl) + ") form.\n\n" +
+              "This issue has been closed. Editing it does not reopen it — " +
+              "please open a new issue through the [" + tpl.name + "](" + newIssueUrl(tpl) + ") " +
+              "form and include the missing sections.\n\n" +
               "Maintainer-authored issues are exempt from this check.";
             await commentOnce(msg);
             await closeAsNotPlanned();
