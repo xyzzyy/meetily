@@ -839,3 +839,96 @@ test("short or annotated fences do not end an outer code block", () => {
     assert.equal(validate({ title: "[BUG] Example", body }).ok, false);
   }
 });
+
+const htmlBlocks = [
+  ["<pre>", "</pre>"],
+  ['  <PRE class="example">', "  </pRe>"],
+  ["<script>", "</script>"],
+  ["<style>", "</style>"],
+  ["<!--", "-->"],
+  ["<?example", "?>"],
+  ["<!DOCTYPE example [", ">"],
+  ["<![CDATA[", "]]>"],
+  ["<div>", "</div>"],
+  ["<custom-element>", "</custom-element>"],
+];
+
+test("raw HTML cannot supply required headings or task-list boxes", () => {
+  const { validate } = require("./issue-template.js");
+  for (const [start, end] of htmlBlocks) {
+    const result = validate({ title: "[BUG] Example", body: start + "\n" + completeBody + "\n" + end });
+    assert.equal(result.ok, false, start);
+    assert.equal(result.missing.length, 5, start);
+    assert.equal(result.unchecked.length, 2, start);
+  }
+});
+
+test("an issue containing only an HTML template example closes with an explanation", async () => {
+  const f = fixture({ issue: { body: "<pre>\n" + completeBody + "\n</pre>" } });
+  await enforce(f);
+  assert.equal(f.issue.state, "closed");
+  assert.match(f.comments[0].body, /### Bug Description/);
+  assert.match(f.comments[0].body, /required boxes/);
+});
+
+test("HTML samples cannot replace unchecked checklist boxes", () => {
+  const { validate } = require("./issue-template.js");
+  const [fields, boxes] = completeBody.split("### Checklist\n");
+  for (const [start, end] of htmlBlocks) {
+    const body = fields + "### Checklist\n" + start + "\n" + boxes + "\n" + end + "\n\n" + boxes.replaceAll("[x]", "[ ]");
+    const result = validate({ title: "[BUG] Example", body });
+    assert.equal(result.ok, false, start);
+    assert.equal(result.unchecked.length, 2, start);
+  }
+});
+
+test("a hidden comment does not complete a required field", () => {
+  const { validate } = require("./issue-template.js");
+  const result = validate({ title: "[BUG] Example", body: completeBody.replace("macOS 15", "<!-- TODO: add the OS -->") });
+  assert.deepEqual(result.missing, ["Environment"]);
+});
+
+test("Markdown resumes after an HTML block, including code fence text inside the block", () => {
+  const { validate } = require("./issue-template.js");
+  for (const [start, end] of htmlBlocks) {
+    const body = start + "\n```\n### Example\n" + end + "\n\n" + completeBody;
+    assert.equal(validate({ title: "[BUG] Example", body }).ok, true, start);
+  }
+});
+
+test("blank lines allow Markdown inside HTML containers", () => {
+  const { validate } = require("./issue-template.js");
+  for (const start of ["<details>\n<summary>Issue details</summary>", "<div>", "<custom-element>"]) {
+    const body = start + "\n\n" + completeBody + "\n\n</details>";
+    assert.equal(validate({ title: "[BUG] Example", body }).ok, true, start);
+  }
+});
+
+test("visible HTML field values and fenced HTML examples remain valid", () => {
+  const { validate } = require("./issue-template.js");
+  for (const value of ["<pre>macOS 15</pre>\n", "<div>macOS 15</div>\n"]) {
+    assert.equal(validate({ title: "[BUG] Example", body: completeBody.replace("macOS 15", value) }).ok, true);
+  }
+  const example = "```html\n<pre>\n<!--\n### Example\n```\nThe app stops.";
+  assert.equal(validate({ title: "[BUG] Example", body: completeBody.replace("The app stops.", example) }).ok, true);
+});
+
+test("inline comments cannot supply later required headings", () => {
+  const { validate } = require("./issue-template.js");
+  const body = completeBody.replace("### Environment\nmacOS 15", "A note <!--\n### Environment\nmacOS 15\n-->");
+  assert.deepEqual(validate({ title: "[BUG] Example", body }).missing, ["Environment"]);
+});
+
+test("an inline HTML tag does not start a block in an existing paragraph", () => {
+  const { validate } = require("./issue-template.js");
+  const body = completeBody.replace("### Environment", "A note\n<span>\n### Environment");
+  assert.equal(validate({ title: "[BUG] Example", body }).ok, true);
+});
+
+test("literal comment markers in inline code and escaped text do not hide later fields", () => {
+  const { validate } = require("./issue-template.js");
+  for (const text of ["The log contains `<!--`.", "The log contains `` `<!--` ``.", "The log contains \\<!--."]) {
+    const body = completeBody.replace("The app stops.", text);
+    assert.equal(validate({ title: "[BUG] Example", body }).ok, true, text);
+  }
+});

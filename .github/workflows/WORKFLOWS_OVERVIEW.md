@@ -191,6 +191,7 @@ This document provides a quick overview of all available CI/CD workflows in this
 - Recognizes the `[BUG]`, `[FEATURE]`, `[DOCS]`, and `[QUESTION]` title prefixes
 - Requires information in each required section and checks each required box
 - Keeps deeper Markdown headings inside their field and ignores code samples when checking required boxes
+- Ignores headings and task-list text inside raw HTML blocks; hidden HTML comments cannot complete required fields
 - Comments with the current failures, adds `invalid-template`, and closes incomplete issues
 - Allows unlimited edits while `template-grace` is present, even after an edit completes the template
 - Keeps grace until the nightly check; removing the label starts a normal template check

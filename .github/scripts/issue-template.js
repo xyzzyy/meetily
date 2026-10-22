@@ -58,6 +58,30 @@ function detectTemplate(title) {
   return null;
 }
 
+// Raw HTML follows the seven block rules in https://github.github.com/gfm/#html-blocks.
+// A null end marker means the block ends at the next blank line.
+function htmlBlockStart(line, inParagraph) {
+  if (/^ {0,3}<(?:script|pre|style)(?:\s|>|$)/i.test(line)) {
+    return { end: /<\/(?:script|pre|style)>/i, hidden: /^ {0,3}<(?:script|style)(?:\s|>|$)/i.test(line) };
+  }
+  for (const [start, end] of [
+    [/^ {0,3}<!--/, /-->/],
+    [/^ {0,3}<\?/, /\?>/],
+    [/^ {0,3}<![A-Z]/, />/],
+    [/^ {0,3}<!\[CDATA\[/, /\]\]>/],
+  ]) {
+    if (start.test(line)) return { end, hidden: true };
+  }
+  if (/^ {0,3}<\/?(?:address|article|aside|base|basefont|blockquote|body|caption|center|col|colgroup|dd|details|dialog|dir|div|dl|dt|fieldset|figcaption|figure|footer|form|frame|frameset|h[1-6]|head|header|hr|html|iframe|legend|li|link|main|menu|menuitem|nav|noframes|ol|optgroup|option|p|param|section|source|summary|table|tbody|td|tfoot|th|thead|title|tr|track|ul)(?:\s|\/?>|$)/i.test(line)) {
+    return { end: null, hidden: false };
+  }
+  // A complete tag on its own line starts a block only outside a paragraph.
+  if (!inParagraph && /^ {0,3}(?:<\/[a-z][a-z0-9-]*[ \t]*>|<[a-z][a-z0-9-]*(?:[ \t]+[a-z_:][a-z0-9_.:-]*(?:[ \t]*=[ \t]*(?:[^ \t"'=<>`]+|'[^']*'|"[^"]*"))?)*[ \t]*\/?>)[ \t]*$/i.test(line)) {
+    return { end: null, hidden: false };
+  }
+  return null;
+}
+
 // Issue forms use level-three headings. Accept the older level-one and
 // level-two sections too. Deeper headings remain field content.
 // Keep code in text fields, but exclude it when checking task-list boxes.
@@ -65,27 +89,86 @@ function parseSections(markdown, { includeCode = true } = {}) {
   const sections = new Map();
   let current = null;
   let fence = null;
-  for (const line of markdown.split(/\r?\n/)) {
-    const marker = line.match(/^ {0,3}(`{3,}|~{3,})(.*)$/);
+  let html = null;
+  let inParagraph = false;
+  let inComment = false;
+  function withoutComments(line) {
+    let visible = "";
+    let offset = 0;
+    while (offset < line.length) {
+      if (inComment) {
+        const end = line.indexOf("-->", offset);
+        if (end === -1) return visible;
+        // Keep a comment's suffix from becoming a heading or task-list marker.
+        visible += " ".repeat(Math.max(4, end + 3 - offset));
+        offset = end + 3;
+        inComment = false;
+      } else {
+        const tokens = /`+|<!--/g;
+        tokens.lastIndex = offset;
+        const token = tokens.exec(line);
+        if (!token) return visible + line.slice(offset);
+        visible += line.slice(offset, token.index);
+        offset = token.index + token[0].length;
+        let escapes = 0;
+        for (let index = token.index - 1; index >= 0 && line[index] === "\\"; index--) escapes++;
+        if (escapes % 2) {
+          visible += token[0];
+        } else if (token[0] === "<!--") {
+          inComment = true;
+        } else {
+          // Comment syntax inside an inline code span is literal text.
+          const ticks = /`+/g;
+          ticks.lastIndex = offset;
+          let close;
+          while ((close = ticks.exec(line)) && close[0].length !== token[0].length) {}
+          const end = close ? close.index + close[0].length : offset;
+          visible += line.slice(token.index, end);
+          offset = end;
+        }
+      }
+    }
+    return visible;
+  }
+  for (const rawLine of markdown.split(/\r?\n/)) {
+    if (html) {
+      if (includeCode && current && !html.hidden) sections.get(current).push(rawLine);
+      if (html.end ? html.end.test(rawLine) : !rawLine.trim()) html = null;
+      continue;
+    }
+    const marker = rawLine.match(/^ {0,3}(`{3,}|~{3,})(.*)$/);
     if (fence) {
-      if (includeCode && current) sections.get(current).push(line);
+      if (includeCode && current) sections.get(current).push(rawLine);
       if (marker && marker[1][0] === fence.char && marker[1].length >= fence.length && !marker[2].trim()) {
         fence = null;
       }
       continue;
     }
-    if (marker && (marker[1][0] === "~" || !marker[2].includes("`"))) {
+    if (!inComment && marker && (marker[1][0] === "~" || !marker[2].includes("`"))) {
       fence = { char: marker[1][0], length: marker[1].length };
-      if (includeCode && current) sections.get(current).push(line);
+      inParagraph = false;
+      if (includeCode && current) sections.get(current).push(rawLine);
       continue;
     }
+    if (!inComment) {
+      const start = htmlBlockStart(rawLine, inParagraph);
+      if (start) {
+        if (includeCode && current && !start.hidden) sections.get(current).push(rawLine);
+        if (!start.end || !start.end.test(rawLine)) html = start;
+        inParagraph = false;
+        continue;
+      }
+    }
+    const line = withoutComments(rawLine);
     const heading = line.match(/^ {0,3}#{1,3}[ \t]+(.+?)[ \t]*$/);
     if (heading) {
       current = heading[1].replace(/[ \t]+#+[ \t]*$/, "").trim();
       if (!sections.has(current)) sections.set(current, []);
+      inParagraph = false;
       continue;
     }
     if (current) sections.get(current).push(line);
+    inParagraph = !!line.trim() && !/^ {0,3}#{4,6}(?:[ \t]+|$)/.test(line);
   }
   return sections;
 }
