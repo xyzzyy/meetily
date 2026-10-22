@@ -86,13 +86,27 @@ function htmlBlockStart(line, inParagraph) {
 // level-two sections too. Deeper headings remain field content.
 // Keep code in text fields, but exclude it when checking task-list boxes.
 function parseSections(markdown, { includeCode = true } = {}) {
+  const lines = markdown.split(/\r?\n/);
   const sections = new Map();
   let current = null;
   let fence = null;
   let html = null;
   let inParagraph = false;
   let inComment = false;
-  function withoutComments(line) {
+  const thematicBreak = (line) => /^ {0,3}(?:(?:\*[ \t]*){3,}|(?:_[ \t]*){3,}|(?:-[ \t]*){3,})$/.test(line);
+  function inlineCommentCloses(line, offset, lineIndex) {
+    if (line.includes("-->", offset)) return true;
+    // Inline comments must close inside their paragraph. Block comments are
+    // handled by htmlBlockStart and can continue across Markdown blocks.
+    for (let index = lineIndex + 1; index < lines.length; index++) {
+      const next = lines[index];
+      if (!next.trim() || /^ {0,3}(?:#{1,6}(?:[ \t]+|$)|`{3,}|~{3,}|>|[-+*][ \t]+|1[.)][ \t]+)/.test(next) ||
+          thematicBreak(next) || /^ {0,3}(?:=+|-+)[ \t]*$/.test(next) || htmlBlockStart(next, true)) return false;
+      if (next.includes("-->")) return true;
+    }
+    return false;
+  }
+  function withoutComments(line, lineIndex) {
     let visible = "";
     let offset = 0;
     while (offset < line.length) {
@@ -115,7 +129,8 @@ function parseSections(markdown, { includeCode = true } = {}) {
         if (escapes % 2) {
           visible += token[0];
         } else if (token[0] === "<!--") {
-          inComment = true;
+          if (inlineCommentCloses(line, offset, lineIndex)) inComment = true;
+          else visible += token[0];
         } else {
           // Comment syntax inside an inline code span is literal text.
           const ticks = /`+/g;
@@ -130,7 +145,7 @@ function parseSections(markdown, { includeCode = true } = {}) {
     }
     return visible;
   }
-  for (const rawLine of markdown.split(/\r?\n/)) {
+  for (const [lineIndex, rawLine] of lines.entries()) {
     if (html) {
       if (includeCode && current && !html.hidden) sections.get(current).push(rawLine);
       if (html.end ? html.end.test(rawLine) : !rawLine.trim()) html = null;
@@ -142,6 +157,12 @@ function parseSections(markdown, { includeCode = true } = {}) {
       if (marker && marker[1][0] === fence.char && marker[1].length >= fence.length && !marker[2].trim()) {
         fence = null;
       }
+      continue;
+    }
+    // Indented code cannot interrupt a paragraph. Outside a paragraph its
+    // comment markers are literal, just as they are inside a fenced block.
+    if (!inComment && !inParagraph && /^(?: {4}| {0,3}\t)/.test(rawLine)) {
+      if (includeCode && current) sections.get(current).push(rawLine);
       continue;
     }
     if (!inComment && marker && (marker[1][0] === "~" || !marker[2].includes("`"))) {
@@ -159,7 +180,7 @@ function parseSections(markdown, { includeCode = true } = {}) {
         continue;
       }
     }
-    const line = withoutComments(rawLine);
+    const line = withoutComments(rawLine, lineIndex);
     const heading = line.match(/^ {0,3}#{1,3}[ \t]+(.+?)[ \t]*$/);
     if (heading) {
       current = heading[1].replace(/[ \t]+#+[ \t]*$/, "").trim();
@@ -168,7 +189,9 @@ function parseSections(markdown, { includeCode = true } = {}) {
       continue;
     }
     if (current) sections.get(current).push(line);
-    inParagraph = !!line.trim() && !/^ {0,3}#{4,6}(?:[ \t]+|$)/.test(line);
+    const setextUnderline = inParagraph && /^ {0,3}(?:=+|-+)[ \t]*$/.test(line);
+    inParagraph = !!line.trim() && !thematicBreak(line) && !setextUnderline &&
+      !/^ {0,3}#{4,6}(?:[ \t]+|$)/.test(line);
   }
   return sections;
 }

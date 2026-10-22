@@ -932,10 +932,10 @@ test("visible HTML field values and fenced HTML examples remain valid", () => {
   assert.equal(validate({ title: "[BUG] Example", body: completeBody.replace("The app stops.", example) }).ok, true);
 });
 
-test("inline comments cannot supply later required headings", () => {
+test("an inline comment cannot hide a later Markdown heading", () => {
   const { validate } = require("./issue-template.js");
   const body = completeBody.replace("### Environment\nmacOS 15", "A note <!--\n### Environment\nmacOS 15\n-->");
-  assert.deepEqual(validate({ title: "[BUG] Example", body }).missing, ["Environment"]);
+  assert.equal(validate({ title: "[BUG] Example", body }).ok, true);
 });
 
 test("an inline HTML tag does not start a block in an existing paragraph", () => {
@@ -950,4 +950,50 @@ test("literal comment markers in inline code and escaped text do not hide later 
     const body = completeBody.replace("The app stops.", text);
     assert.equal(validate({ title: "[BUG] Example", body }).ok, true, text);
   }
+});
+
+test("literal comments in indented code do not hide later fields or close a complete issue", async () => {
+  const { validate } = require("./issue-template.js");
+  for (const indent of ["    ", "\t", "  \t"]) {
+    const body = completeBody.replace("The app stops.", "The app stops.\n\n" + indent + "<!-- literal code comment\n");
+    assert.equal(validate({ title: "[BUG] Example", body }).ok, true, JSON.stringify(indent));
+    const f = fixture({ issue: { body } });
+    await enforce(f);
+    assert.equal(f.issue.state, "open");
+    assert.ok(!f.calls.some((call) => call.method === "update"));
+  }
+});
+
+test("an unfinished inline comment does not hide later fields", () => {
+  const { validate } = require("./issue-template.js");
+  for (const text of ["The app stops. <!-- literal", "The app stops.\n    <!-- literal"]) {
+    const body = completeBody.replace("The app stops.", text);
+    assert.equal(validate({ title: "[BUG] Example", body }).ok, true);
+  }
+});
+
+test("closed multiline inline comments remain hidden within their paragraph", () => {
+  const { parseSections, validate } = require("./issue-template.js");
+  const body = completeBody.replace("The app stops.", "The app stops. <!-- hidden\n    comment -->");
+  assert.equal(validate({ title: "[BUG] Example", body }).ok, true);
+  assert.doesNotMatch(parseSections(body).get("Bug Description").join("\n"), /hidden|comment/);
+});
+
+test("HTML blocks after thematic breaks or setext headings cannot supply issue fields", () => {
+  const { validate } = require("./issue-template.js");
+  for (const boundary of ["---", "***", "___", "  * * *", "\t***", "===", "-"]) {
+    // The tab-indented break remains code, and its following blank line ends it.
+    const prefix = boundary === "\t***" ? "A note.\n\n" + boundary + "\n\n" : "A note.\n" + boundary + "\n";
+    const body = prefix + "<span>\n" + completeBody;
+    const result = validate({ title: "[BUG] Example", body });
+    assert.equal(result.ok, false, boundary);
+    assert.equal(result.missing.length, 5, boundary);
+    assert.equal(result.unchecked.length, 2, boundary);
+  }
+});
+
+test("a blank line after an HTML block restores Markdown after a thematic break", () => {
+  const { validate } = require("./issue-template.js");
+  const body = "---\n<span>\n\n" + completeBody;
+  assert.equal(validate({ title: "[BUG] Example", body }).ok, true);
 });
