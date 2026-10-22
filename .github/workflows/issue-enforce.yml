@@ -22,7 +22,9 @@ name: issue-enforce
 # label, otherwise it is closed again. Authors cannot reopen bot-closed issues
 # themselves, so editing is the supported recovery path.
 #
-# Maintainer-authored issues (owner/member/collaborator) are exempt.
+# Maintainer-authored issues (owner/member/collaborator) and events triggered by
+# maintainers (owner/member/collaborator/triage) are exempt, so a maintainer's
+# edit or manual reopen is never overridden by this workflow.
 
 on:
   issues:
@@ -52,6 +54,29 @@ jobs:
             if (["OWNER", "MEMBER", "COLLABORATOR"].includes(issue.author_association)) {
               core.notice("Authored by a maintainer; skipping enforcement.");
               return;
+            }
+
+            // A maintainer's edit or manual reopen is a deliberate override,
+            // not a reporter bypassing the templates. Skip events triggered by
+            // maintainers (triage can reopen/label/close). This workflow's own
+            // reopen also emits a `reopened` event; it was already scanned.
+            const actor = context.actor;
+            if (actor === "github-actions[bot]" && action === "reopened") {
+              core.notice("Reopen triggered by this workflow; skipping duplicate scan.");
+              return;
+            }
+            if (actor) {
+              try {
+                const perm = await github.rest.repos.getCollaboratorPermissionLevel({
+                  owner: owner, repo: repo, username: actor
+                });
+                if (["admin", "maintain", "write", "triage"].includes(perm.data.permission)) {
+                  core.notice("Triggered by a maintainer (" + actor + "); skipping enforcement.");
+                  return;
+                }
+              } catch (e) {
+                // Not a collaborator or lookup unavailable: keep enforcing.
+              }
             }
 
             const wasClosed = issue.state !== "open";

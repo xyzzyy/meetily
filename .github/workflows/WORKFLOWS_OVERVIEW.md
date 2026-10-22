@@ -2,7 +2,7 @@
 
 This document provides a quick overview of all available CI/CD workflows in this repository.
 
-**Note:** All build/release workflows run manually (`workflow_dispatch`). Two run automatically: `issue-enforce.yml` (on issue events) and `opencode-review.yml` (on pull-request events).
+**Note:** Most build/release workflows run manually (`workflow_dispatch`). Three run automatically: `pr-build.yml` (pull requests and pushes to `main`), `opencode-review.yml` (pull-request events), and `issue-enforce.yml` (issue events).
 
 ## Workflow Files
 
@@ -192,7 +192,7 @@ This document provides a quick overview of all available CI/CD workflows in this
 - Warns, labels `invalid`, and auto-closes non-conforming issues (warn + auto-close)
 - Grandfathers existing issues: nothing is backfilled, and an issue is only evaluated once it is edited
 - Editing a closed issue reopens it for one re-evaluation (stays open if compliant, closes again if not)
-- Maintainer-authored issues are exempt
+- Maintainer-authored issues and maintainer-triggered edits/reopens are exempt
 
 **Triggers:**
 - Automatically on issue events (`opened`, `reopened`, `edited`)
