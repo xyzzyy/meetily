@@ -9,6 +9,11 @@ body:
       value: |
         Thanks for taking the time to report a bug! Before submitting, please [search existing issues](https://github.com/xyzzyy/meetily/issues?q=is%3Aissue%20label%3Abug) to avoid duplicates.
 
+  - type: markdown
+    attributes:
+      value: >
+        Describe the problem, why it matters, and the result you want. Keep solution choices open. Do not add acceptance criteria, completion checklists, or new requirements unless the requester supplied them. Present possible approaches as ideas. Do not turn prior art into requirements.
+
   - id: description
     type: textarea
     attributes:
