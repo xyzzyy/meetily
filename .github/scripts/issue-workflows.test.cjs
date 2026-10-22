@@ -808,6 +808,14 @@ test("nested Markdown headings remain part of their required field", () => {
   }
 });
 
+test("existing level-one and level-two section headings still pass", () => {
+  const { validate } = require("./issue-template.js");
+  for (const level of [1, 2]) {
+    const body = completeBody.replace(/^### /gm, "#".repeat(level) + " ");
+    assert.equal(validate({ title: "[BUG] Example", body }).ok, true);
+  }
+});
+
 test("code samples and indented code cannot satisfy required task-list boxes", () => {
   const { validate } = require("./issue-template.js");
   const [fields, boxes] = completeBody.split("### Checklist\n");

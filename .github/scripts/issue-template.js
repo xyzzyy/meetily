@@ -58,7 +58,8 @@ function detectTemplate(title) {
   return null;
 }
 
-// Issue forms use level-three headings. Deeper headings remain field content.
+// Issue forms use level-three headings. Accept the older level-one and
+// level-two sections too. Deeper headings remain field content.
 // Keep code in text fields, but exclude it when checking task-list boxes.
 function parseSections(markdown, { includeCode = true } = {}) {
   const sections = new Map();
@@ -78,7 +79,7 @@ function parseSections(markdown, { includeCode = true } = {}) {
       if (includeCode && current) sections.get(current).push(line);
       continue;
     }
-    const heading = line.match(/^ {0,3}###[ \t]+(.+?)[ \t]*$/);
+    const heading = line.match(/^ {0,3}#{1,3}[ \t]+(.+?)[ \t]*$/);
     if (heading) {
       current = heading[1].replace(/[ \t]+#+[ \t]*$/, "").trim();
       if (!sections.has(current)) sections.set(current, []);
