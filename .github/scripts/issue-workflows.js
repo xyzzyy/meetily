@@ -11,31 +11,49 @@ const STATE_LABELS = {
   [AGAIN]: { color: "d4c5f9", description: "Further /reopen commands require a maintainer" },
 };
 
+class IssueChanged extends Error {}
+
 function labelNames(issue) {
   return (issue.labels || []).map((label) => label.name || label);
 }
 
-function issueApi(context, github, issue) {
+function issueApi(context, github, issue, requireCurrent = false) {
   const args = { ...context.repo, issue_number: issue.number };
   const labels = new Set(labelNames(issue));
+  async function beforeWrite() {
+    if (!requireCurrent) return;
+    const live = (await github.rest.issues.get(args)).data;
+    // Check state first. Never inspect the content of an issue now closed.
+    // Our comments do not affect these fields; our label writes update labels.
+    if (live.state !== "open" || live.title !== issue.title || live.body !== issue.body ||
+        JSON.stringify(labelNames(live).sort()) !== JSON.stringify([...labels].sort())) {
+      throw new IssueChanged("#" + issue.number + " changed during this check; stopping this pass.");
+    }
+  }
   return {
     labels,
     get: async () => (await github.rest.issues.get(args)).data,
-    update: async (changes) => github.rest.issues.update({ ...args, ...changes }),
+    update: async (changes) => {
+      await beforeWrite();
+      return github.rest.issues.update({ ...args, ...changes });
+    },
     add: async (name) => {
       if (labels.has(name)) return;
       if (STATE_LABELS[name]) {
+        await beforeWrite();
         try {
           await github.rest.issues.createLabel({ ...context.repo, name, ...STATE_LABELS[name] });
         } catch (error) {
           if (error.status !== 422) throw error;
         }
       }
+      await beforeWrite();
       await github.rest.issues.addLabels({ ...args, labels: [name] });
       labels.add(name);
     },
     remove: async (name) => {
       if (!labels.has(name)) return;
+      await beforeWrite();
       try {
         await github.rest.issues.removeLabel({ ...args, name });
       } catch (error) {
@@ -47,6 +65,7 @@ function issueApi(context, github, issue) {
       const marker = "<!-- meetily:" + key + " -->";
       const comments = await github.paginate(github.rest.issues.listComments, { ...args, per_page: 100 });
       if (comments.some((comment) => comment.user && comment.user.type === "Bot" && (comment.body || "").includes(marker))) return;
+      await beforeWrite();
       await github.rest.issues.createComment({ ...args, body: marker + "\n" + body });
     },
   };
@@ -84,9 +103,10 @@ function reopenHelp(labels) {
 // Only the nightly check can end an active grace period.
 async function checkOpenIssue({ context, github, core }, issue, { nightly = false, dryRun = false } = {}) {
   if (issue.state !== "open" || issue.pull_request) return;
-  const api = issueApi(context, github, issue);
+  const api = issueApi(context, github, issue, true);
   const result = validate(issue);
   if (api.labels.has(GRACE) && !nightly) {
+    // Retained grace after a manual close and reopen is allowed intentionally.
     core.notice("#" + issue.number + " has grace until the next nightly check; edits remain allowed.");
     return;
   }
@@ -130,7 +150,12 @@ async function enforce({ context, github, core }) {
   if (issue.state !== "open" || issue.pull_request) return;
   if (context.payload.action === "unlabeled" && (context.payload.label || {}).name !== GRACE) return;
   const live = await issueApi(context, github, issue).get();
-  await checkOpenIssue({ context, github, core }, live);
+  try {
+    await checkOpenIssue({ context, github, core }, live);
+  } catch (error) {
+    if (!(error instanceof IssueChanged)) throw error;
+    core.notice(error.message);
+  }
 }
 
 async function reopen({ context, github, core }) {
@@ -185,11 +210,35 @@ async function reopen({ context, github, core }) {
     await api.add(AGAIN);
     await api.update({ state: "open" });
   } catch (error) {
+    // A failed response does not prove that GitHub rejected the update.
+    // Read the actual state before removing any request labels.
+    let current;
+    try {
+      current = await api.get();
+    } catch (stateError) {
+      core.warning("Could not confirm the reopen state: " + stateError.message);
+      await api.comment(key + ":uncertain", "The API response failed, and I could not confirm the issue's current state. " +
+        "I kept the request labels so an open issue keeps its grace. Ask a maintainer to check the issue before retrying.");
+      throw error;
+    }
+    const recovery = issueApi(context, github, current);
+    if (current.state === "open") {
+      await recovery.add(GRACE);
+      await recovery.add(AGAIN);
+      await recovery.comment(key + ":confirmed", "The API response failed, but I confirmed that this issue is open. " +
+        "I kept `" + GRACE + "` and `" + AGAIN + "`. The grace period remains active until the nightly check.");
+      return;
+    }
+    if (current.closed_at && live.closed_at && current.closed_at !== live.closed_at) {
+      await recovery.comment(key + ":closed-again", "The API response failed, and this issue has a later closure. " +
+        "I kept its request labels and left it closed.");
+      return;
+    }
     const remaining = [];
     for (const [name, existed] of [[GRACE, hadGrace], [AGAIN, hadAgain]]) {
       if (existed) continue;
       try {
-        await api.remove(name);
+        await recovery.remove(name);
       } catch (cleanupError) {
         core.warning("Could not undo the request label " + name + ": " + cleanupError.message);
         remaining.push(name);
@@ -198,7 +247,7 @@ async function reopen({ context, github, core }) {
     const explanation = remaining.length
       ? "I could not remove these request labels: " + remaining.map((name) => "`" + name + "`").join(", ") + ". Ask a maintainer to check them."
       : "I removed the labels added for this request. Please try `/reopen` again.";
-    await api.comment(key + ":failed", "The reopen request failed. " + explanation);
+    await recovery.comment(key + ":failed", "The reopen request failed. " + explanation);
     throw error;
   }
 }
@@ -217,6 +266,10 @@ async function sweep({ context, github, core }) {
       const live = await issueApi(context, github, issue).get();
       await checkOpenIssue({ context, github, core }, live, { nightly: true, dryRun });
     } catch (error) {
+      if (error instanceof IssueChanged) {
+        core.notice(error.message);
+        continue;
+      }
       core.warning("Could not check #" + issue.number + ": " + error.message);
       failures.push(issue.number);
     }

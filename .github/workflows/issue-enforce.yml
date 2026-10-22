@@ -9,10 +9,6 @@ on:
   issues:
     types: [opened, reopened, edited, unlabeled]
 
-concurrency:
-  group: issue-template-${{ github.event.issue.number }}
-  cancel-in-progress: false
-
 jobs:
   enforce:
     if: >-
@@ -20,6 +16,10 @@ jobs:
       (github.event.action != 'unlabeled' || github.event.label.name == 'template-grace')
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    concurrency:
+      group: issue-template-${{ github.event.issue.number }}
+      cancel-in-progress: false
+      queue: max
     permissions:
       issues: write
       contents: read

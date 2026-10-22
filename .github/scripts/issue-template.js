@@ -58,30 +58,31 @@ function detectTemplate(title) {
   return null;
 }
 
-// Split the body into its `###` sections, ignoring headings that appear inside
-// fenced code blocks (logs often contain them).
-function parseSections(markdown) {
+// Issue forms use level-three headings. Deeper headings remain field content.
+// Keep code in text fields, but exclude it when checking task-list boxes.
+function parseSections(markdown, { includeCode = true } = {}) {
   const sections = new Map();
   let current = null;
-  let fenceChar = null;
+  let fence = null;
   for (const line of markdown.split(/\r?\n/)) {
-    const fence = line.match(/^\s*(```+|~~~+)/);
+    const marker = line.match(/^ {0,3}(`{3,}|~{3,})(.*)$/);
     if (fence) {
-      if (!fenceChar) {
-        fenceChar = fence[1][0];
-      } else if (fence[1][0] === fenceChar) {
-        fenceChar = null;
+      if (includeCode && current) sections.get(current).push(line);
+      if (marker && marker[1][0] === fence.char && marker[1].length >= fence.length && !marker[2].trim()) {
+        fence = null;
       }
-      if (current) sections.get(current).push(line);
       continue;
     }
-    if (!fenceChar) {
-      const heading = line.match(/^#{1,6}[ \t]+(.+?)[ \t]*$/);
-      if (heading) {
-        current = heading[1].trim();
-        if (!sections.has(current)) sections.set(current, []);
-        continue;
-      }
+    if (marker && (marker[1][0] === "~" || !marker[2].includes("`"))) {
+      fence = { char: marker[1][0], length: marker[1].length };
+      if (includeCode && current) sections.get(current).push(line);
+      continue;
+    }
+    const heading = line.match(/^ {0,3}###[ \t]+(.+?)[ \t]*$/);
+    if (heading) {
+      current = heading[1].replace(/[ \t]+#+[ \t]*$/, "").trim();
+      if (!sections.has(current)) sections.set(current, []);
+      continue;
     }
     if (current) sections.get(current).push(line);
   }
@@ -92,11 +93,11 @@ function findSection(sections, heading) {
   const match = Array.from(sections.keys()).find(function (key) {
     return key.toLowerCase() === heading.toLowerCase();
   });
-  return match === undefined ? null : sections.get(match).join("\n").trim();
+  return match === undefined ? null : sections.get(match).join("\n");
 }
 
 function isBlankSection(content) {
-  return content === null || content === "" || /^_no response_$/i.test(content);
+  return content === null || content.trim() === "" || /^_no response_$/i.test(content.trim());
 }
 
 function escapeRegExp(value) {
@@ -117,7 +118,7 @@ function uncheckedCheckboxes(template, sections) {
   const unchecked = [];
   for (const item of template.checklist) {
     const pattern = new RegExp(
-      "^[ \\t]*[-*+][ \\t]*\\[[xX]\\][ \\t]*" + escapeRegExp(item) + "[ \\t]*$",
+      "^ {0,3}[-*+][ \\t]+\\[[xX]\\][ \\t]+" + escapeRegExp(item) + "[ \\t]*$",
       "m"
     );
     if (!pattern.test(checklist)) unchecked.push(item);
@@ -134,7 +135,7 @@ function validate(issue) {
   }
   const sections = parseSections(issue.body || "");
   const missing = missingSections(template, sections);
-  const unchecked = uncheckedCheckboxes(template, sections);
+  const unchecked = uncheckedCheckboxes(template, parseSections(issue.body || "", { includeCode: false }));
   return {
     ok: missing.length === 0 && unchecked.length === 0,
     template: template,

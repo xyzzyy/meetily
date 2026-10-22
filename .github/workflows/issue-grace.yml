@@ -23,12 +23,14 @@ jobs:
     if: >-
       github.event_name == 'issue_comment' &&
       github.event.issue.state == 'closed' &&
-      !github.event.issue.pull_request
+      !github.event.issue.pull_request &&
+      contains(github.event.comment.body, '/reopen')
     runs-on: ubuntu-latest
     timeout-minutes: 5
     concurrency:
       group: issue-template-${{ github.event.issue.number }}
       cancel-in-progress: false
+      queue: max
     permissions:
       issues: write
       contents: read
@@ -57,6 +59,7 @@ jobs:
     concurrency:
       group: issue-template-nightly
       cancel-in-progress: false
+      queue: max
     permissions:
       issues: write
       contents: read

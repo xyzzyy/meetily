@@ -34,11 +34,17 @@ function loadJob(file, job) {
     }
     guard = parts.join(" ");
   }
-  const allowed = new Function("github", `return (${guard});`);
-  return async (fixture) => {
-    if (!allowed({ event_name: fixture.context.eventName, event: fixture.context.payload })) return;
+  const allowed = new Function("github", "contains", `return (${guard});`);
+  const shouldRun = (fixture) => {
+    const contains = (value, search) => String(value || "").toLowerCase().includes(search.toLowerCase());
+    return allowed({ event_name: fixture.context.eventName, event: fixture.context.payload }, contains);
+  };
+  const runJob = async (fixture) => {
+    if (!shouldRun(fixture)) return;
     await run(fixture.context, fixture.github, fixture.core, require);
   };
+  runJob.shouldRun = shouldRun;
+  return runJob;
 }
 
 const enforce = loadJob("issue-enforce.yml", "enforce");
@@ -277,6 +283,19 @@ test("a manual maintainer reopen without grace has the normal checks", async () 
   assert.match(f.comments[0].body, /maintainer/);
 });
 
+test("retained grace is intentionally allowed after an author manually closes and reopens the issue", async () => {
+  const f = graceFixture();
+  f.issue.state = "closed";
+  f.event("issues", "closed");
+  await enforce(f);
+  f.issue.state = "open";
+  f.event("issues", "reopened");
+  await enforce(f);
+  assert.equal(f.issue.state, "open");
+  assert.deepEqual(f.labels(), [INVALID, GRACE, AGAIN]);
+  assert.equal(f.comments.length, 0);
+});
+
 test("grace allows repeated partial edits, including edits after a complete correction", async () => {
   const f = graceFixture({ issue: { author_association: "OWNER" } });
   for (const body of ["partial fix", completeBody, "another partial fix"]) {
@@ -402,6 +421,68 @@ test("a failed maintainer reopen preserves the maintainer-only label", async () 
   assert.deepEqual(f.labels().sort(), [INVALID, AGAIN].sort());
 });
 
+test("a lost response after a successful reopen preserves grace and the allowance label", async () => {
+  const f = closedFixture();
+  const update = f.github.rest.issues.update;
+  f.github.rest.issues.update = async (args) => {
+    await update(args);
+    throw new Error("Response lost after update");
+  };
+  await reopen(f);
+  assert.equal(f.issue.state, "open");
+  assert.deepEqual(f.labels().sort(), [INVALID, GRACE, AGAIN].sort());
+  assert.match(f.comments.at(-1).body, /confirmed that this issue is open/);
+  assert.ok(!f.calls.some((call) => call.method === "removeLabel"));
+});
+
+test("an unknown reopen state preserves request labels and explains the uncertainty", async () => {
+  const f = closedFixture();
+  const get = f.github.rest.issues.get;
+  const update = f.github.rest.issues.update;
+  let firstRead = true;
+  f.github.rest.issues.get = async (args) => {
+    if (!firstRead) throw new Error("State unavailable");
+    firstRead = false;
+    return get(args);
+  };
+  f.github.rest.issues.update = async (args) => {
+    await update(args);
+    throw new Error("Response lost after update");
+  };
+  await assert.rejects(reopen(f), /Response lost after update/);
+  assert.equal(f.issue.state, "open");
+  assert.deepEqual(f.labels().sort(), [INVALID, GRACE, AGAIN].sort());
+  assert.match(f.comments.at(-1).body, /could not confirm the issue's current state/);
+  assert.ok(!f.calls.some((call) => call.method === "removeLabel"));
+});
+
+test("a lost label response rolls back the actual labels on a still-closed issue", async () => {
+  const f = closedFixture();
+  const add = f.github.rest.issues.addLabels;
+  f.github.rest.issues.addLabels = async (args) => {
+    await add(args);
+    throw new Error("Response lost after label update");
+  };
+  await assert.rejects(reopen(f), /Response lost after label update/);
+  assert.equal(f.issue.state, "closed");
+  assert.deepEqual(f.labels(), [INVALID]);
+});
+
+test("a later manual closure after a lost reopen response keeps the request labels", async () => {
+  const f = closedFixture({ issue: { closed_at: "2026-10-22T01:00:00Z" } });
+  const update = f.github.rest.issues.update;
+  f.github.rest.issues.update = async (args) => {
+    await update(args);
+    f.issue.state = "closed";
+    f.issue.closed_at = "2026-10-22T02:00:00Z";
+    throw new Error("Response lost after update");
+  };
+  await reopen(f);
+  assert.equal(f.issue.state, "closed");
+  assert.deepEqual(f.labels().sort(), [INVALID, GRACE, AGAIN].sort());
+  assert.match(f.comments.at(-1).body, /later closure/);
+});
+
 test("a failed label addition does not use the first allowance", async () => {
   const f = closedFixture({ failLabel: AGAIN });
   await assert.rejects(reopen(f), /Label failed/);
@@ -425,6 +506,33 @@ test("open issues, pull requests, and ordinary comments cause no reopen action",
   for (const f of [open, pr, ordinary]) {
     await reopen(f);
     assert.deepEqual(f.calls, []);
+  }
+});
+
+test("the job guard filters ordinary comments before loading the command script", async () => {
+  const f = closedFixture();
+  f.context.payload.comment.body = "Thanks for the help";
+  assert.equal(reopen.shouldRun(f), false);
+  await reopen(f);
+  assert.deepEqual(f.calls, []);
+});
+
+test("command filtering preserves case and surrounding whitespace", async () => {
+  const f = closedFixture();
+  f.context.payload.comment.body = "  /REOPEN\n";
+  assert.equal(reopen.shouldRun(f), true);
+  await reopen(f);
+  assert.equal(f.issue.state, "open");
+});
+
+test("both issue jobs preserve pending work in the same queue", () => {
+  for (const [file, job] of [["issue-enforce.yml", "enforce"], ["issue-grace.yml", "reopen"]]) {
+    const source = fs.readFileSync(path.join(root, ".github/workflows", file), "utf8");
+    const block = source.match(new RegExp(`^  ${job}:\\n([\\s\\S]*?)(?=^  [\\w-]+:|$(?![\\s\\S]))`, "m"))[1];
+    assert.match(block, /      group: issue-template-\$\{\{ github.event.issue.number \}\}/);
+    assert.match(block, /      queue: max\b/);
+    assert.match(block, /      cancel-in-progress: false\b/);
+    assert.doesNotMatch(source, /^concurrency:/m, "Skipped closed-issue events must not enter the shared queue");
   }
 });
 
@@ -516,10 +624,89 @@ test("the nightly check uses a correction made after listing", async () => {
   assert.deepEqual(f.labels().sort(), ["bug", AGAIN].sort());
 });
 
+for (const [name, run] of [["event check", enforce], ["nightly check", sweep]]) {
+  test(`${name} stops if a correction arrives during the comment lookup`, async () => {
+    const f = run === sweep ? graceFixture() : fixture();
+    const list = f.github.rest.issues.listComments;
+    f.github.rest.issues.listComments = async (args) => {
+      f.issue.body = completeBody;
+      return list(args);
+    };
+    await run(f);
+    assert.equal(f.issue.state, "open");
+    assert.ok(!f.calls.some((call) => ["createComment", "addLabels", "removeLabel", "update"].includes(call.method)));
+  });
+
+  test(`${name} stops if a manual closure arrives during the comment lookup`, async () => {
+    const f = run === sweep ? graceFixture() : fixture();
+    const list = f.github.rest.issues.listComments;
+    f.github.rest.issues.listComments = async (args) => {
+      f.issue.state = "closed";
+      return list(args);
+    };
+    await run(f);
+    assert.equal(f.issue.state, "closed");
+    assert.ok(!f.calls.some((call) => ["createComment", "addLabels", "removeLabel", "update"].includes(call.method)));
+  });
+}
+
+for (const method of ["createComment", "createLabel", "addLabels", "removeLabel"]) {
+  test(`a correction after ${method} stops the remaining closure actions`, async () => {
+    const f = method === "removeLabel" ? graceFixture() : fixture();
+    const original = f.github.rest.issues[method];
+    f.github.rest.issues[method] = async (args) => {
+      const result = await original(args);
+      f.issue.body = completeBody;
+      return result;
+    };
+    await (method === "removeLabel" ? sweep : enforce)(f);
+    assert.equal(f.issue.state, "open");
+    assert.ok(!f.calls.some((call) => call.method === "update"));
+  });
+
+  test(`a manual closure after ${method} stops the remaining issue writes`, async () => {
+    const f = method === "removeLabel" ? graceFixture() : fixture();
+    const original = f.github.rest.issues[method];
+    let afterClosure;
+    f.github.rest.issues[method] = async (args) => {
+      const result = await original(args);
+      f.issue.state = "closed";
+      afterClosure = f.calls.length;
+      return result;
+    };
+    await (method === "removeLabel" ? sweep : enforce)(f);
+    assert.ok(f.calls.slice(afterClosure).every((call) => call.method === "get"));
+  });
+}
+
+test("a new grace label during a closure comment stops the old decision", async () => {
+  const f = fixture();
+  const comment = f.github.rest.issues.createComment;
+  f.github.rest.issues.createComment = async (args) => {
+    await comment(args);
+    f.issue.labels.push({ name: GRACE });
+  };
+  await enforce(f);
+  assert.equal(f.issue.state, "open");
+  assert.deepEqual(f.labels(), [GRACE]);
+});
+
+test("an incomplete edit during a pass comment stops label cleanup", async () => {
+  const f = graceFixture({ issue: { body: completeBody } });
+  const comment = f.github.rest.issues.createComment;
+  f.github.rest.issues.createComment = async (args) => {
+    await comment(args);
+    f.issue.body = "An incomplete edit";
+  };
+  await sweep(f);
+  assert.equal(f.issue.state, "open");
+  assert.deepEqual(f.labels(), [INVALID, GRACE, AGAIN]);
+});
+
 test("the nightly check covers every page of open issues", async () => {
   const f = fixture({ eventName: "schedule", extraIssues: Array.from({ length: 101 }, (_, i) => ({ number: i + 2 })) });
   await sweep(f);
-  assert.equal(f.calls.filter((call) => call.method === "get").length, 102);
+  assert.equal(new Set(f.calls.filter((call) => call.method === "get").map((call) => call.issue_number)).size, 102);
   assert.equal(f.calls.filter((call) => call.method === "update").length, 102);
   assert.ok(Array.from(f.issues.values()).every((issue) => issue.state === "closed"));
 });
@@ -611,4 +798,36 @@ test("the shared validator rejects empty sections, unchecked boxes, and headings
     completeBody.replace("### Environment\nmacOS 15", "```\n### Environment\nmacOS 15\n```"),
   ]) assert.equal(validate({ title: "[BUG] Example", body }).ok, false);
   assert.equal(validate({ title: "No prefix", body: completeBody }).ok, false);
+});
+
+test("nested Markdown headings remain part of their required field", () => {
+  const { validate } = require("./issue-template.js");
+  for (const level of [4, 5, 6]) {
+    const body = completeBody.replace("### Bug Description\nThe app stops.", "### Bug Description\n" + "#".repeat(level) + " Details\nThe app stops.");
+    assert.equal(validate({ title: "[BUG] Example", body }).ok, true);
+  }
+});
+
+test("code samples and indented code cannot satisfy required task-list boxes", () => {
+  const { validate } = require("./issue-template.js");
+  const [fields, boxes] = completeBody.split("### Checklist\n");
+  for (const code of [
+    "```text\n" + boxes + "\n```",
+    "~~~text\n" + boxes + "\n~~~",
+    "````text\n```\n" + boxes + "\n```\n````",
+    boxes.split("\n").map((line) => "    " + line).join("\n"),
+    boxes.split("\n").map((line) => "\t" + line).join("\n"),
+  ]) {
+    const result = validate({ title: "[BUG] Example", body: fields + "### Checklist\n" + code });
+    assert.equal(result.ok, false);
+    assert.equal(result.unchecked.length, 2);
+  }
+});
+
+test("short or annotated fences do not end an outer code block", () => {
+  const { validate } = require("./issue-template.js");
+  for (const inner of ["```", "````text", "~~~"]) {
+    const body = completeBody.replace("### Environment\nmacOS 15", "````text\n" + inner + "\n### Environment\nmacOS 15\n````");
+    assert.equal(validate({ title: "[BUG] Example", body }).ok, false);
+  }
 });
