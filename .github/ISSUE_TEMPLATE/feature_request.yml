@@ -13,6 +13,7 @@ body:
     attributes:
       value: >
         Describe the problem, why it matters, and the result you want. Keep solution choices open. Do not add acceptance criteria, completion checklists, or new requirements unless the requester supplied them. Present possible approaches as ideas. Do not turn prior art into requirements.
+        Keep the issue brief. Include only evidence and links that help explain or investigate this problem. Give each useful source a short note about its relevance. Omit search diaries, unrelated results, and repeated details. Distinguish observed behavior, source findings, and untested ideas. Agents must check the current code and merged work before calling a bug unresolved. Check a checklist item only when it is true.
 
   - id: feature-description
     type: textarea
@@ -29,12 +30,13 @@ body:
     attributes:
       label: Upstream Work & Prior Art
       description: >
-        Related upstream issues/PRs (e.g. on Zackriya-Solutions/meeting-minutes) and prior art in other
-        tools. Letting an AI agent do this search is fine.
-        If you found nothing, write "None found" — this field is required so please never leave it empty.
+        Link the closest related upstream issues or PRs (for example, on Zackriya-Solutions/meetily)
+        and useful examples from other tools. Give each source a short note about its relevance.
+        An AI agent can do this search. If the search found nothing, write "None found".
+        Report only research that was done.
       placeholder: |
-        - Upstream: <link to a related upstream issue/PR, or "None found">
-        - Prior art: <other products/projects and what they do, or "None found">
+        - Upstream: <closest related issue/PR, why it matters, or "None found">
+        - Prior art: <useful example, why it matters, or "None found">
     validations:
       required: true
 

@@ -13,6 +13,7 @@ body:
     attributes:
       value: >
         Describe the problem, why it matters, and the result you want. Keep solution choices open. Do not add acceptance criteria, completion checklists, or new requirements unless the requester supplied them. Present possible approaches as ideas. Do not turn prior art into requirements.
+        Keep the issue brief. Include only evidence and links that help explain or investigate this problem. Give each useful source a short note about its relevance. Omit search diaries, unrelated results, and repeated details. Distinguish observed behavior, source findings, and untested ideas. Agents must check the current code and merged work before calling a bug unresolved. Check a checklist item only when it is true.
 
   - id: description
     type: textarea
@@ -26,7 +27,9 @@ body:
     type: textarea
     attributes:
       label: Current Behavior
-      description: What is currently happening. Include the full error output or log snippet inline, in code blocks.
+      description: >
+        Describe the current behavior. Separate observed results from source findings.
+        Put relevant error output in code blocks and identify output that is only quoted from the source.
       placeholder: |
         Paste error output between the fences below.
     validations:
@@ -44,7 +47,9 @@ body:
     type: textarea
     attributes:
       label: Steps to Reproduce
-      description: Minimal, numbered steps that reliably reproduce the bug on your machine.
+      description: >
+        Give the known steps. If the bug was found by reading code and has not been reproduced, say so.
+        Keep proposed reproduction steps separate from observed results.
       placeholder: |
         1. Go to '...'
         2. Click on '...'
