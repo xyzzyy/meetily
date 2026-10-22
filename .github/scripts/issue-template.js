@@ -93,6 +93,11 @@ function parseSections(markdown, { includeCode = true } = {}) {
   let html = null;
   let inParagraph = false;
   let inComment = false;
+  function expandTabs(line) {
+    let expanded = "";
+    for (const char of line) expanded += char === "\t" ? " ".repeat(4 - expanded.length % 4) : char;
+    return expanded;
+  }
   const thematicBreak = (line) => /^ {0,3}(?:(?:\*[ \t]*){3,}|(?:_[ \t]*){3,}|(?:-[ \t]*){3,})$/.test(line);
   function inlineCommentCloses(line, offset, lineIndex) {
     if (line.includes("-->", offset)) return true;
@@ -151,7 +156,18 @@ function parseSections(markdown, { includeCode = true } = {}) {
       if (html.end ? html.end.test(rawLine) : !rawLine.trim()) html = null;
       continue;
     }
-    const marker = rawLine.match(/^ {0,3}(`{3,}|~{3,})(.*)$/);
+    const expandedLine = expandTabs(rawLine);
+    let fenceLine = expandedLine;
+    if (fence && fence.indent) {
+      // A list's fenced block ends when a nonblank line leaves that item.
+      if (fenceLine.trim() && !fenceLine.startsWith(" ".repeat(fence.indent))) {
+        fence = null;
+        inParagraph = false;
+      } else {
+        fenceLine = fenceLine.slice(fence.indent);
+      }
+    }
+    const marker = fenceLine.match(/^ {0,3}(`{3,}|~{3,})(.*)$/);
     if (fence) {
       if (includeCode && current) sections.get(current).push(rawLine);
       if (marker && marker[1][0] === fence.char && marker[1].length >= fence.length && !marker[2].trim()) {
@@ -165,8 +181,14 @@ function parseSections(markdown, { includeCode = true } = {}) {
       if (includeCode && current) sections.get(current).push(rawLine);
       continue;
     }
-    if (!inComment && marker && (marker[1][0] === "~" || !marker[2].includes("`"))) {
-      fence = { char: marker[1][0], length: marker[1].length };
+    const listMarker = expandedLine.match(/^( {0,3})([-+*]|\d{1,9}[.)])( {1,4})(`{3,}|~{3,})(.*)$/);
+    // Only an ordered list starting at 1 can interrupt a paragraph.
+    const listFence = listMarker && (!inParagraph || !/^\d/.test(listMarker[2]) || /^1[.)]$/.test(listMarker[2]))
+      ? [null, listMarker[4], listMarker[5]] : null;
+    const opening = marker || listFence;
+    if (!inComment && opening && (opening[1][0] === "~" || !opening[2].includes("`"))) {
+      fence = { char: opening[1][0], length: opening[1].length,
+        indent: marker ? 0 : listMarker[1].length + listMarker[2].length + listMarker[3].length };
       inParagraph = false;
       if (includeCode && current) sections.get(current).push(rawLine);
       continue;

@@ -840,6 +840,35 @@ test("short or annotated fences do not end an outer code block", () => {
   }
 });
 
+test("code fences on list-item lines do not hide later issue fields", async () => {
+  for (const [opening, indent] of [["- ```text", "  "], ["-\t```text", "\t"], ["1. ```text", "   "],
+    ["123. ~~~text", "     "], ["  - ````text", "    "]]) {
+    const fence = opening.includes("~") ? "~~~" : opening.includes("````") ? "````" : "```";
+    const body = completeBody.replace("The app stops.",
+      "The app stops.\n\n" + opening + "\n" + indent + "Example output\n" + indent + fence);
+    const f = fixture({ issue: { body } });
+    await enforce(f);
+    assert.equal(f.issue.state, "open", opening);
+    assert.deepEqual(f.labels(), ["bug"]);
+  }
+});
+
+test("leaving a list item ends its unclosed code fence", () => {
+  const { validate } = require("./issue-template.js");
+  const body = completeBody.replace("The app stops.", "- ```text\n  Example output");
+  assert.equal(validate({ title: "[BUG] Test", body }).ok, true);
+});
+
+test("headings and checklist boxes inside list-item fences remain code", () => {
+  const { validate } = require("./issue-template.js");
+  const body = "### Bug Description\n- ```text\n" +
+    completeBody.split("\n").map((line) => "  " + line).join("\n") + "\n  ```";
+  const result = validate({ title: "[BUG] Test", body });
+  assert.equal(result.ok, false);
+  assert.deepEqual(result.missing, ["Current Behavior", "Expected Behavior", "Steps to Reproduce", "Environment"]);
+  assert.equal(result.unchecked.length, 2);
+});
+
 const htmlBlocks = [
   ["<pre>", "</pre>"],
   ['  <PRE class="example">', "  </pRe>"],
