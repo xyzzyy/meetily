@@ -93,22 +93,35 @@ function parseSections(markdown, { includeCode = true } = {}) {
   let html = null;
   let inParagraph = false;
   let inComment = false;
+  let inQuote = false;
+  const listIndents = [];
   function expandTabs(line) {
     let expanded = "";
     for (const char of line) expanded += char === "\t" ? " ".repeat(4 - expanded.length % 4) : char;
     return expanded;
   }
   const thematicBreak = (line) => /^ {0,3}(?:(?:\*[ \t]*){3,}|(?:_[ \t]*){3,}|(?:-[ \t]*){3,})$/.test(line);
+  const startsBlock = (line) => /^ {0,3}(?:#{1,6}(?:[ \t]+|$)|`{3,}|~{3,}|>|(?:[-+*]|\d{1,9}[.)])[ \t]+)/.test(line) ||
+    thematicBreak(line) || !!htmlBlockStart(line, false);
+  let noCloseFrom = -1;
+  let noCloseTo = -1;
   function inlineCommentCloses(line, offset, lineIndex) {
     if (line.includes("-->", offset)) return true;
+    if (lineIndex >= noCloseFrom && lineIndex < noCloseTo) return false;
     // Inline comments must close inside their paragraph. Block comments are
     // handled by htmlBlockStart and can continue across Markdown blocks.
     for (let index = lineIndex + 1; index < lines.length; index++) {
       const next = lines[index];
       if (!next.trim() || /^ {0,3}(?:#{1,6}(?:[ \t]+|$)|`{3,}|~{3,}|>|[-+*][ \t]+|1[.)][ \t]+)/.test(next) ||
-          thematicBreak(next) || /^ {0,3}(?:=+|-+)[ \t]*$/.test(next) || htmlBlockStart(next, true)) return false;
+          thematicBreak(next) || /^ {0,3}(?:=+|-+)[ \t]*$/.test(next) || htmlBlockStart(next, true)) {
+        noCloseFrom = lineIndex;
+        noCloseTo = index;
+        return false;
+      }
       if (next.includes("-->")) return true;
     }
+    noCloseFrom = lineIndex;
+    noCloseTo = lines.length;
     return false;
   }
   function withoutComments(line, lineIndex) {
@@ -151,12 +164,17 @@ function parseSections(markdown, { includeCode = true } = {}) {
     return visible;
   }
   for (const [lineIndex, rawLine] of lines.entries()) {
-    if (html) {
-      if (includeCode && current && !html.hidden) sections.get(current).push(rawLine);
-      if (html.end ? html.end.test(rawLine) : !rawLine.trim()) html = null;
-      continue;
-    }
     const expandedLine = expandTabs(rawLine);
+    if (html) {
+      if (html.indent && expandedLine.trim() && !expandedLine.startsWith(" ".repeat(html.indent))) {
+        html = null;
+        inParagraph = false;
+      } else {
+        if (includeCode && current && !html.hidden) sections.get(current).push(rawLine);
+        if (html.end ? html.end.test(rawLine) : !rawLine.trim()) html = null;
+        continue;
+      }
+    }
     let fenceLine = expandedLine;
     if (fence && fence.indent) {
       // A list's fenced block ends when a nonblank line leaves that item.
@@ -167,35 +185,69 @@ function parseSections(markdown, { includeCode = true } = {}) {
         fenceLine = fenceLine.slice(fence.indent);
       }
     }
-    const marker = fenceLine.match(/^ {0,3}(`{3,}|~{3,})(.*)$/);
     if (fence) {
+      const marker = fenceLine.match(/^ {0,3}(`{3,}|~{3,})(.*)$/);
       if (includeCode && current) sections.get(current).push(rawLine);
       if (marker && marker[1][0] === fence.char && marker[1].length >= fence.length && !marker[2].trim()) {
         fence = null;
       }
       continue;
     }
+
+    // Keep paragraph and fence state within their list or quote. Plain lines
+    // can lazily continue a container paragraph; a new block cannot.
+    let contentLine = expandedLine;
+    let containerIndent = 0;
+    if (!inComment) {
+      if (/^ {0,3}>/.test(expandedLine)) {
+        if (!inQuote) inParagraph = false;
+        inQuote = true;
+        listIndents.length = 0;
+      } else if (inQuote && (!expandedLine.trim() || !inParagraph || startsBlock(expandedLine))) {
+        inQuote = false;
+        inParagraph = false;
+      }
+      if (!inQuote && expandedLine.trim()) {
+        const indentation = expandedLine.match(/^ */)[0].length;
+        if (!inParagraph || startsBlock(expandedLine)) {
+          while (listIndents.length && indentation < listIndents[listIndents.length - 1]) {
+            listIndents.pop();
+            inParagraph = false;
+          }
+        }
+        containerIndent = listIndents[listIndents.length - 1] || 0;
+        if (indentation >= containerIndent) contentLine = expandedLine.slice(containerIndent);
+        const item = contentLine.match(/^( {0,3})([-+*]|\d{1,9}[.)])( +)(.*)$/);
+        if (item && !thematicBreak(contentLine) &&
+            (!inParagraph || !/^\d/.test(item[2]) || /^1[.)]$/.test(item[2]))) {
+          // More than four spaces after a marker starts indented code.
+          const padding = item[3].length > 4 ? 1 : item[3].length;
+          const prefix = item[1].length + item[2].length + padding;
+          containerIndent += prefix;
+          listIndents.push(containerIndent);
+          contentLine = contentLine.slice(prefix);
+          inParagraph = false;
+        }
+      }
+    }
     // Indented code cannot interrupt a paragraph. Outside a paragraph its
     // comment markers are literal, just as they are inside a fenced block.
-    if (!inComment && !inParagraph && /^(?: {4}| {0,3}\t)/.test(rawLine)) {
+    if (!inComment && !inParagraph && /^ {4}/.test(contentLine)) {
       if (includeCode && current) sections.get(current).push(rawLine);
       continue;
     }
-    const listMarker = expandedLine.match(/^( {0,3})([-+*]|\d{1,9}[.)])( {1,4})(`{3,}|~{3,})(.*)$/);
-    // Only an ordered list starting at 1 can interrupt a paragraph.
-    const listFence = listMarker && (!inParagraph || !/^\d/.test(listMarker[2]) || /^1[.)]$/.test(listMarker[2]))
-      ? [null, listMarker[4], listMarker[5]] : null;
-    const opening = marker || listFence;
+    const opening = contentLine.match(/^ {0,3}(`{3,}|~{3,})(.*)$/);
     if (!inComment && opening && (opening[1][0] === "~" || !opening[2].includes("`"))) {
       fence = { char: opening[1][0], length: opening[1].length,
-        indent: marker ? 0 : listMarker[1].length + listMarker[2].length + listMarker[3].length };
+        indent: containerIndent };
       inParagraph = false;
       if (includeCode && current) sections.get(current).push(rawLine);
       continue;
     }
     if (!inComment) {
-      const start = htmlBlockStart(rawLine, inParagraph);
+      const start = htmlBlockStart(contentLine, inParagraph);
       if (start) {
+        start.indent = containerIndent;
         if (includeCode && current && !start.hidden) sections.get(current).push(rawLine);
         if (!start.end || !start.end.test(rawLine)) html = start;
         inParagraph = false;

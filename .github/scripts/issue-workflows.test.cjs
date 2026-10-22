@@ -729,6 +729,31 @@ test("a failure on one issue does not stop checks on the other issues", async ()
   assert.equal(f.issues.get(2).state, "closed");
 });
 
+for (const error of [
+  { status: 429, message: "Too many requests" },
+  { status: 403, message: "API rate limit exceeded" },
+  { status: 403, message: "Forbidden", response: { headers: { "x-ratelimit-remaining": "0" } } },
+  { status: 403, message: "Forbidden", response: { headers: { "retry-after": "60" } } },
+]) {
+  test(`the nightly check stops after a rate limit: ${JSON.stringify(error)}`, async () => {
+    const f = graceFixture({ extraIssues: [{ number: 2 }] });
+    f.github.rest.issues.update = async () => { throw Object.assign(new Error(error.message), error); };
+    await assert.rejects(sweep(f), /stopped at #1.*rate limit/);
+    assert.ok(f.calls.every((call) => call.issue_number !== 2), "Do not call the API for later issues after a rate limit");
+  });
+}
+
+test("an ordinary permission error does not stop checks on the other issues", async () => {
+  const f = graceFixture({ extraIssues: [{ number: 2 }] });
+  const update = f.github.rest.issues.update;
+  f.github.rest.issues.update = async (args) => {
+    if (args.issue_number === 1) throw Object.assign(new Error("Resource not accessible by integration"), { status: 403 });
+    return update(args);
+  };
+  await assert.rejects(sweep(f), /failed for issues: 1/);
+  assert.equal(f.issues.get(2).state, "closed");
+});
+
 test("the same issue can complete repeated maintainer reopen and nightly check cycles", async () => {
   const f = closedFixture({ commenter: "maintainer", permission: { permission: "admin" }, issue: { author_association: "OWNER", labels: [INVALID, AGAIN] } });
   for (let cycle = 0; cycle < 3; cycle++) {
@@ -766,6 +791,72 @@ test("a retry of the same failed closure does not repeat its comment", async () 
   assert.equal(f.comments.length, 1);
 });
 
+test("later nightly runs reuse the explanation after a partial closure fails", async () => {
+  const f = graceFixture({ failUpdate: true });
+  for (let attempt = 0; attempt < 3; attempt++) {
+    f.event("schedule");
+    await assert.rejects(sweep(f), /failed for issues: 1/);
+    assert.equal(f.issue.state, "open");
+  }
+  assert.equal(f.comments.length, 1);
+  assert.ok(!f.labels().includes(GRACE));
+  assert.match(f.comments[0].body, /remove `template-grace`/);
+});
+
+test("rerunning a failed check explains a changed invalid body", async () => {
+  const f = fixture({ failUpdate: true });
+  await assert.rejects(enforce(f), /Update failed/);
+  f.issue.body = completeBody.replace("macOS 15", "");
+  await assert.rejects(enforce(f), /Update failed/);
+  assert.equal(f.comments.length, 2);
+  assert.match(f.comments[1].body, /### Environment/);
+  assert.doesNotMatch(f.comments[1].body, /### Expected Behavior/);
+});
+
+test("a manual reopen gets a fresh closure explanation even for an unchanged body", async () => {
+  const options = { failUpdate: true };
+  const f = fixture(options);
+  await assert.rejects(enforce(f), /Update failed/);
+  options.failUpdate = false;
+  f.event("schedule");
+  await sweep(f);
+  assert.equal(f.issue.state, "closed");
+  assert.equal(f.comments.length, 1);
+  f.issue.state = "open";
+  options.failUpdate = true;
+  f.event("issues", "reopened");
+  await assert.rejects(enforce(f), /Update failed/);
+  await assert.rejects(enforce(f), /Update failed/);
+  assert.equal(f.comments.length, 2);
+  f.event("schedule");
+  await assert.rejects(sweep(f), /failed for issues: 1/);
+  assert.equal(f.comments.length, 2);
+});
+
+test("a successful check ends comment reuse before the same invalid body returns", async () => {
+  const f = fixture();
+  const invalidBody = f.issue.body;
+  await enforce(f);
+  f.issue.state = "open";
+  f.issue.body = completeBody;
+  f.event("issues", "edited");
+  await enforce(f);
+  f.issue.body = invalidBody;
+  f.event("issues", "edited");
+  await enforce(f);
+  assert.equal(f.comments.length, 3);
+});
+
+test("a changed repeat allowance gets an updated closure explanation", async () => {
+  const f = fixture({ failUpdate: true });
+  await assert.rejects(enforce(f), /Update failed/);
+  f.issue.labels.push({ name: AGAIN });
+  f.event("schedule");
+  await assert.rejects(sweep(f), /failed for issues: 1/);
+  assert.equal(f.comments.length, 2);
+  assert.match(f.comments[1].body, /Ask a maintainer/);
+});
+
 for (const operation of ["close", "reopen"]) {
   test(`${operation} posts an explanation before any label or state change`, async () => {
     const f = operation === "close" ? fixture() : closedFixture();
@@ -782,9 +873,11 @@ for (const operation of ["close", "reopen"]) {
 }
 
 test("a user cannot suppress the bot's explanation with a copied comment marker", async () => {
-  const f = fixture();
-  f.comments.push({ body: "<!-- meetily:template-check:5000:1 -->", user: { type: "User" } });
-  await enforce(f);
+  const f = fixture({ failUpdate: true });
+  await assert.rejects(enforce(f), /Update failed/);
+  // Leave only a user-authored copy of the exact markers this check uses.
+  f.comments[0].user.type = "User";
+  await assert.rejects(enforce(f), /Update failed/);
   assert.equal(f.comments.length, 2);
 });
 
@@ -863,6 +956,33 @@ test("headings and checklist boxes inside list-item fences remain code", () => {
   const { validate } = require("./issue-template.js");
   const body = "### Bug Description\n- ```text\n" +
     completeBody.split("\n").map((line) => "  " + line).join("\n") + "\n  ```";
+  const result = validate({ title: "[BUG] Test", body });
+  assert.equal(result.ok, false);
+  assert.deepEqual(result.missing, ["Current Behavior", "Expected Behavior", "Steps to Reproduce", "Environment"]);
+  assert.equal(result.unchecked.length, 2);
+});
+
+test("fences on list-continuation lines end with their list", async () => {
+  for (const example of [
+    "- Steps:\n  ```text\n  run app",
+    "1. Steps:\n   ```text\n   run app",
+    "- Outer:\n  - Steps:\n    ```text\n    run app",
+    "- Steps:\n     ```text\n     run app",
+    "- Steps:\n\t```text\n\trun app",
+  ]) {
+    const body = completeBody.replace("The app stops.", "The app stops.\n\n" + example);
+    for (const check of [enforce, sweep]) {
+      const f = fixture({ eventName: check === sweep ? "schedule" : "issues", issue: { body } });
+      await check(f);
+      assert.equal(f.issue.state, "open", example);
+      assert.deepEqual(f.labels(), ["bug"]);
+    }
+  }
+});
+
+test("an outdented fence after a list opens a separate top-level code block", () => {
+  const { validate } = require("./issue-template.js");
+  const body = completeBody.replace("The app stops.", "The app stops.\n\n- Steps:\n  ```text\n  run app\n```");
   const result = validate({ title: "[BUG] Test", body });
   assert.equal(result.ok, false);
   assert.deepEqual(result.missing, ["Current Behavior", "Expected Behavior", "Steps to Reproduce", "Environment"]);
@@ -1025,4 +1145,36 @@ test("a blank line after an HTML block restores Markdown after a thematic break"
   const { validate } = require("./issue-template.js");
   const body = "---\n<span>\n\n" + completeBody;
   assert.equal(validate({ title: "[BUG] Example", body }).ok, true);
+});
+
+test("HTML blocks after lists or quotes cannot supply issue fields", () => {
+  const { validate } = require("./issue-template.js");
+  for (const prefix of ["- item", "> item", "- item\ncontinued", "> item\ncontinued"]) {
+    const result = validate({ title: "[BUG] Test", body: prefix + "\n<span>\n" + completeBody });
+    assert.equal(result.ok, false, prefix);
+    assert.equal(result.missing.length, 5, prefix);
+    assert.equal(result.unchecked.length, 2, prefix);
+  }
+});
+
+test("HTML examples inside a list do not hide fields after the list ends", () => {
+  const { validate } = require("./issue-template.js");
+  for (const example of ["- <pre>\n  sample", "- <pre>\n  sample\n  </pre>"]) {
+    const body = completeBody.replace("The app stops.", "The app stops.\n\n" + example);
+    assert.equal(validate({ title: "[BUG] Test", body }).ok, true);
+  }
+});
+
+test("failed inline-comment scans do not hide closed comments in later paragraphs", () => {
+  const { parseSections, validate } = require("./issue-template.js");
+  const body = completeBody.replace("The app stops.", "a <!--\n".repeat(100) + "\nVisible <!-- hidden\ncomment --> text.");
+  assert.equal(validate({ title: "[BUG] Test", body }).ok, true);
+  assert.doesNotMatch(parseSections(body).get("Bug Description").join("\n"), /hidden|comment/);
+});
+
+test("a large paragraph of unfinished inline comments does not stall validation", () => {
+  const { execFileSync } = require("node:child_process");
+  const script = `const { validate } = require(${JSON.stringify(require.resolve("./issue-template.js"))});
+    require('node:assert/strict').equal(validate({title:'[BUG] Test',body:'a <!--\\n'.repeat(9000)}).ok, false);`;
+  execFileSync(process.execPath, ["-e", script], { timeout: 5000 });
 });

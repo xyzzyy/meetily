@@ -192,6 +192,7 @@ This document provides a quick overview of all available CI/CD workflows in this
 - Requires information in each required section and checks each required box
 - Keeps deeper Markdown headings inside their field and ignores code samples when checking required boxes
 - Ignores headings and task-list text inside raw HTML blocks; hidden HTML comments cannot complete required fields
+- Keeps code fences within their list item and handles HTML blocks after a list or quote ends
 - Comments with the current failures, adds `invalid-template`, and closes incomplete issues
 - Allows unlimited edits while `template-grace` is present, even after an edit completes the template
 - Keeps grace until the nightly check; removing the label starts a normal template check
@@ -230,6 +231,8 @@ This document provides a quick overview of all available CI/CD workflows in this
 - The nightly check covers **all open issues**, including older issues without a grace label
 - Complete issues stay open; the bot removes `template-grace` and `invalid-template`, but keeps `invalid-template-again`
 - Incomplete issues receive a comment with the current failures and close; the bot removes grace before closure
+- A retry of a failed closure reuses the explanation for the same invalid state; a changed report or new reopen cycle gets a fresh explanation
+- A GitHub rate-limit response stops and fails the nightly check; it does not continue API calls for the remaining issues
 - Closed issues have no scheduled checks or automatic label cleanup
 - A manual closure leaves the labels alone; closed issues remain outside the nightly check
 - Retained grace after a manual close and reopen remains allowed intentionally

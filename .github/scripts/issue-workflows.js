@@ -1,6 +1,7 @@
 "use strict";
 
 const { TEMPLATES, validate, newIssueUrl } = require("./issue-template.js");
+const { createHash } = require("node:crypto");
 
 const INVALID = "invalid-template";
 const GRACE = "template-grace";
@@ -61,12 +62,20 @@ function issueApi(context, github, issue, requireCurrent = false) {
       }
       labels.delete(name);
     },
-    comment: async (key, body) => {
+    comment: async (key, body, { stateKey, forceNew = false } = {}) => {
       const marker = "<!-- meetily:" + key + " -->";
       const comments = await github.paginate(github.rest.issues.listComments, { ...args, per_page: 100 });
-      if (comments.some((comment) => comment.user && comment.user.type === "Bot" && (comment.body || "").includes(marker))) return;
+      const botComments = comments.filter((comment) => comment.user && comment.user.type === "Bot");
+      if (botComments.some((comment) => (comment.body || "").includes(marker))) return;
+      const stateMarker = stateKey ? "<!-- meetily:" + stateKey + " -->\n" : "";
+      if (stateKey && !forceNew) {
+        // Reuse an explanation only while it is the latest template action.
+        // A reopen or successful check starts a new cycle, even for the same body.
+        const latest = botComments.filter((comment) => /<!-- meetily:(?:template-check:|reopen:)/.test(comment.body || "")).at(-1);
+        if (latest && (latest.body || "").includes(stateMarker.trim())) return;
+      }
       await beforeWrite();
-      await github.rest.issues.createComment({ ...args, body: marker + "\n" + body });
+      await github.rest.issues.createComment({ ...args, body: marker + "\n" + stateMarker + body });
     },
   };
 }
@@ -135,10 +144,16 @@ async function checkOpenIssue({ context, github, core }, issue, { nightly = fals
     return;
   }
   const graceEnded = api.labels.has(GRACE) ? "The nightly check ends this issue's grace period.\n\n" : "";
-  await api.comment(key, graceEnded + "I will close this issue because required template information is missing.\n\n" +
+  // Ignore labels changed by a partial closure, so another run can retry it
+  // without repeating the same explanation. The repeat allowance changes help text.
+  const stateKey = "invalid-state:" + createHash("sha256")
+    .update(JSON.stringify([issue.title, issue.body, api.labels.has(AGAIN)])).digest("hex");
+  await api.comment(key + ":" + stateKey, graceEnded + "I will close this issue because required template information is missing.\n\n" +
     problems(result, context) + "\n\nI will add `" + INVALID + "`. " +
-    (api.labels.has(GRACE) ? "I will remove `" + GRACE + "`. " : "") +
-    reopenHelp(api.labels));
+    "I will remove `" + GRACE + "` if it is present. " + reopenHelp(api.labels), {
+      stateKey,
+      forceNew: context.eventName === "issues" && context.payload.action === "reopened",
+    });
   await api.add(INVALID);
   // Change labels while the issue is open. No cleanup runs on closed issues.
   await api.remove(GRACE);
@@ -271,6 +286,13 @@ async function sweep({ context, github, core }) {
         continue;
       }
       core.warning("Could not check #" + issue.number + ": " + error.message);
+      const headers = (error.response || {}).headers || {};
+      if (error.status === 429 || (error.status === 403 &&
+          (String(headers["x-ratelimit-remaining"]) === "0" || headers["retry-after"] !== undefined ||
+           /rate limit|abuse detection/i.test(error.message || "")))) {
+        throw new Error("The nightly check stopped at #" + issue.number +
+          " after a GitHub rate limit. Remaining issues were not checked.", { cause: error });
+      }
       failures.push(issue.number);
     }
   }
