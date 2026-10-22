@@ -989,6 +989,68 @@ test("an outdented fence after a list opens a separate top-level code block", ()
   assert.equal(result.unchecked.length, 2);
 });
 
+test("quotes inside lists preserve the container for later fences", async () => {
+  for (const example of [
+    "- item\n  > quote\n  ```text\n  code",
+    "1. item\n   > quote\n   ```text\n   code",
+    "- outer\n  - item\n    > quote\n    ```text\n    code",
+    "- item\n  > quote\n    ```text\n    code",
+  ]) {
+    const body = completeBody.replace("The app stops.", "The app stops.\n\n" + example);
+    for (const check of [enforce, sweep]) {
+      const f = fixture({ eventName: check === sweep ? "schedule" : "issues", issue: { body } });
+      await check(f);
+      assert.equal(f.issue.state, "open", example);
+    }
+  }
+});
+
+test("a quote does not let an outdented fence close a list-item code block", () => {
+  const { validate } = require("./issue-template.js");
+  for (const example of [
+    "- item\n  > quote\n  ```text\n  code\n```",
+    "- outer\n  - item\n    > quote\n    ```text\n    code\n```",
+    "- item\n> root quote\n  ```text\n  code",
+  ]) {
+    const body = completeBody.replace("The app stops.", "The app stops.\n\n" + example);
+    assert.equal(validate({ title: "[BUG] Test", body }).ok, false, example);
+  }
+});
+
+test("HTML blocks after GFM tables cannot supply required fields", async () => {
+  for (const example of [
+    "| a | b |\n| - | - |\n| 1 | 2 |",
+    "a | b\n--|--\n1|2",
+    "| a | b |\n| :-- | --: |\n| 1 | 2 |",
+    "a\n| - |\n1",
+    "a\n:-\n1",
+    "| a | b |\n| - | - |\nplain row",
+    "paragraph\na | b\n--|--\n1|2",
+  ]) {
+    const body = completeBody.replace("The app stops.", "The app stops.\n\n" + example + "\n<span>");
+    for (const check of [enforce, sweep]) {
+      const f = fixture({ eventName: check === sweep ? "schedule" : "issues", issue: { body } });
+      await check(f);
+      assert.equal(f.issue.state, "closed", example);
+      assert.match(f.comments[0].body, /### Current Behavior/);
+    }
+  }
+});
+
+test("table lookalikes and new paragraphs keep inline HTML within their paragraph", () => {
+  const { validate } = require("./issue-template.js");
+  for (const example of [
+    "| a | b |\n| - |\n| 1 |",
+    "| a | b |\n| bad | --- |\n| 1 | 2 |",
+    "a\\|b\n--|--\n1|2",
+    "| a |\n---\n1",
+    "| a | b |\n| - | - |\n| 1 | 2 |\n\nA new paragraph.",
+  ]) {
+    const body = completeBody.replace("The app stops.", "The app stops.\n\n" + example + "\n<span>");
+    assert.equal(validate({ title: "[BUG] Test", body }).ok, true, example);
+  }
+});
+
 const htmlBlocks = [
   ["<pre>", "</pre>"],
   ['  <PRE class="example">', "  </pRe>"],

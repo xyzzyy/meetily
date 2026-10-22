@@ -91,6 +91,7 @@ function parseSections(markdown, { includeCode = true } = {}) {
   let current = null;
   let fence = null;
   let html = null;
+  let table = null;
   let inParagraph = false;
   let inComment = false;
   let inQuote = false;
@@ -103,6 +104,13 @@ function parseSections(markdown, { includeCode = true } = {}) {
   const thematicBreak = (line) => /^ {0,3}(?:(?:\*[ \t]*){3,}|(?:_[ \t]*){3,}|(?:-[ \t]*){3,})$/.test(line);
   const startsBlock = (line) => /^ {0,3}(?:#{1,6}(?:[ \t]+|$)|`{3,}|~{3,}|>|(?:[-+*]|\d{1,9}[.)])[ \t]+)/.test(line) ||
     thematicBreak(line) || !!htmlBlockStart(line, false);
+  function tableCells(line) {
+    // Escaped pipes are cell content, including pipes inside inline code.
+    const cells = line.trim().replace(/\\./g, "x").split("|");
+    if (cells[0] === "") cells.shift();
+    if (cells[cells.length - 1] === "") cells.pop();
+    return cells.map((cell) => cell.trim());
+  }
   let noCloseFrom = -1;
   let noCloseTo = -1;
   function inlineCommentCloses(line, offset, lineIndex) {
@@ -193,22 +201,35 @@ function parseSections(markdown, { includeCode = true } = {}) {
       }
       continue;
     }
+    if (table) {
+      const withinList = expandedLine.startsWith(" ".repeat(table.indent));
+      const row = expandedLine.slice(table.indent);
+      if (withinList && row.trim() && (lineIndex === table.delimiter || !startsBlock(row))) {
+        if (current) sections.get(current).push(rawLine);
+        continue;
+      }
+      table = null;
+      inParagraph = false;
+    }
 
     // Keep paragraph and fence state within their list or quote. Plain lines
     // can lazily continue a container paragraph; a new block cannot.
     let contentLine = expandedLine;
     let containerIndent = 0;
     if (!inComment) {
-      if (/^ {0,3}>/.test(expandedLine)) {
+      const indentation = expandedLine.match(/^ */)[0].length;
+      const parentIndent = listIndents.findLast((indent) => indent <= indentation) || 0;
+      const withinList = expandedLine.slice(parentIndent);
+      if (/^ {0,3}>/.test(withinList)) {
+        // A quote can be a child of the current list, rather than its replacement.
+        while (listIndents.length && indentation < listIndents[listIndents.length - 1]) listIndents.pop();
         if (!inQuote) inParagraph = false;
         inQuote = true;
-        listIndents.length = 0;
-      } else if (inQuote && (!expandedLine.trim() || !inParagraph || startsBlock(expandedLine))) {
+      } else if (inQuote && (!expandedLine.trim() || !inParagraph || startsBlock(withinList))) {
         inQuote = false;
         inParagraph = false;
       }
       if (!inQuote && expandedLine.trim()) {
-        const indentation = expandedLine.match(/^ */)[0].length;
         if (!inParagraph || startsBlock(expandedLine)) {
           while (listIndents.length && indentation < listIndents[listIndents.length - 1]) {
             listIndents.pop();
@@ -252,6 +273,23 @@ function parseSections(markdown, { includeCode = true } = {}) {
         if (!start.end || !start.end.test(rawLine)) html = start;
         inParagraph = false;
         continue;
+      }
+    }
+    // A table is a separate GFM block. Its rows do not leave a paragraph open
+    // when a later HTML tag or other block starts. Setext/list syntax takes precedence.
+    if (!inComment && !inQuote && contentLine.trim() && !startsBlock(contentLine)) {
+      const next = expandTabs(lines[lineIndex + 1] || "");
+      const delimiter = next.slice(containerIndent);
+      if (next.startsWith(" ".repeat(containerIndent)) && /^ {0,3}\S/.test(delimiter) &&
+          !startsBlock(delimiter) && !/^ {0,3}-+[ \t]*$/.test(delimiter)) {
+        const cells = tableCells(delimiter);
+        if (cells.length && cells.every((cell) => /^:?-+:?$/.test(cell)) &&
+            cells.length === tableCells(contentLine).length) {
+          table = { indent: containerIndent, delimiter: lineIndex + 1 };
+          inParagraph = false;
+          if (current) sections.get(current).push(rawLine);
+          continue;
+        }
       }
     }
     const line = withoutComments(rawLine, lineIndex);
