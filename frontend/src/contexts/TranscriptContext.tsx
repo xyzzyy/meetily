@@ -19,7 +19,7 @@ interface TranscriptContextType {
   setMeetingTitle: (title: string) => void;
   clearTranscripts: () => void;
   currentMeetingId: string | null;
-  markMeetingAsSaved: () => Promise<void>;
+  markMeetingAsSaved: (savedMeetingId?: string | null) => Promise<void>;
 }
 
 const TranscriptContext = createContext<TranscriptContextType | undefined>(undefined);
@@ -523,9 +523,11 @@ export function TranscriptProvider({ children }: { children: ReactNode }) {
   }, []);
 
   // Mark current meeting as saved in IndexedDB
-  const markMeetingAsSaved = useCallback(async () => {
-    // Try context state first, fallback to sessionStorage
-    const meetingId = currentMeetingId || sessionStorage.getItem('indexeddb_current_meeting_id');
+  const markMeetingAsSaved = useCallback(async (savedMeetingId?: string | null) => {
+    // A stop can name its original recording after another one has started.
+    const meetingId = savedMeetingId === undefined
+      ? currentMeetingId || sessionStorage.getItem('indexeddb_current_meeting_id')
+      : savedMeetingId;
 
     if (!meetingId) {
       console.error('[IndexedDB] ❌ Cannot mark meeting as saved: No meeting ID available!');

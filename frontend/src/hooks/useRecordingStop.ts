@@ -64,6 +64,7 @@ export function useRecordingStop(
     clearTranscripts,
     meetingTitle,
     markMeetingAsSaved,
+    currentMeetingId,
   } = useTranscripts();
 
   const {
@@ -79,6 +80,8 @@ export function useRecordingStop(
   // A stop owns its session until a later recording starts.
   const stopSessionRef = useRef<RecordingStopSession>({ saveError: null, transcriptWarning: null });
   const stopInProgressRef = useRef<RecordingStopSession | null>(null);
+  const isMountedRef = useRef(true);
+  const disposeListenersRef = useRef<(() => void) | null>(null);
 
   // Promise to track recording-stopped event data (fixes race condition with recording-stop-complete)
   const recordingStoppedDataRef = useRef<Promise<void> | null>(null);
@@ -91,6 +94,7 @@ export function useRecordingStop(
 
   // Set up recording lifecycle listeners once per mount.
   useEffect(() => {
+    isMountedRef.current = true;
     const unlisteners: (() => void)[] = [];
     let cancelled = false;
     const retainUnlistener = (unlisten: () => void) => {
@@ -117,16 +121,16 @@ export function useRecordingStop(
             const { folder_path, meeting_name, save_error, transcript_warning } = event.payload;
             stopSessionRef.current.saveError = save_error ?? null;
             stopSessionRef.current.transcriptWarning = transcript_warning ?? null;
-            if (transcript_warning) {
+            if (transcript_warning && isMountedRef.current) {
               toast.warning('Transcript may be incomplete', {
                 id: 'recording-transcript-incomplete',
                 description: transcript_warning,
                 duration: 20000,
               });
-            } else {
+            } else if (!transcript_warning) {
               toast.dismiss('recording-transcript-incomplete');
             }
-            if (save_error) {
+            if (save_error && isMountedRef.current) {
               const { flushBuffer, setIsRecording, setIsRecordingDisabled, setIsMeetingActive, setStatus } = eventHandlersRef.current;
               flushBuffer();
               setIsRecording(false);
@@ -159,11 +163,16 @@ export function useRecordingStop(
 
     setupRecordingStoppedListener();
 
-    return () => {
+    const disposeListeners = () => {
       cancelled = true;
-      stopSessionRef.current = { saveError: null, transcriptWarning: null };
-      console.log('Cleaning up recording stopped listener...');
       unlisteners.forEach(unlisten => unlisten());
+      unlisteners.length = 0;
+    };
+    disposeListenersRef.current = disposeListeners;
+    return () => {
+      isMountedRef.current = false;
+      // Keep start/stop results available until an in-flight save has finished.
+      if (!stopInProgressRef.current) disposeListeners();
     };
   }, []);
 
@@ -172,28 +181,26 @@ export function useRecordingStop(
     // Late stop events update this session. A new recording cancels its UI work.
     const stopSession = stopSessionRef.current;
     const isCurrent = () => stopSessionRef.current === stopSession;
-    if (recordingStoppedDataRef.current) {
-      await recordingStoppedDataRef.current;
-    }
-
-    // Guard: prevent duplicate/concurrent stop calls
-    if (!isCurrent() || stopInProgressRef.current === stopSession) {
-      return;
-    }
+    const recoveryMeetingId = currentMeetingId || sessionStorage.getItem('indexeddb_current_meeting_id');
+    if (stopInProgressRef.current === stopSession) return;
     stopInProgressRef.current = stopSession;
-
-    // Set status to STOPPING immediately
-    setStatus(RecordingStatus.STOPPING);
-    setIsRecording(false);
-    setIsRecordingDisabled(true);
-    const stopStartTime = Date.now();
-
     let unlistenComplete: (() => void) | undefined;
+    let savedToSQLite = false;
     try {
+      if (recordingStoppedDataRef.current) await recordingStoppedDataRef.current;
+      if (!isCurrent()) return;
+
+      if (isMountedRef.current) {
+        setStatus(RecordingStatus.STOPPING);
+        setIsRecording(false);
+        setIsRecordingDisabled(true);
+      }
+      const stopStartTime = Date.now();
+
       // Keep the transcript recovery copy after a failed file save.
       if (stopSession.saveError) {
         flushBuffer();
-        setIsMeetingActive(false);
+        if (isMountedRef.current) setIsMeetingActive(false);
         throw new Error(stopSession.saveError);
       }
       console.log('Post-stop processing (new implementation)...', {
@@ -331,7 +338,6 @@ export function useRecordingStop(
             freshTranscripts,
             folderPath
           );
-          if (!isCurrent()) return;
 
           const meetingId = responseData.meeting_id;
           if (!meetingId) {
@@ -339,14 +345,17 @@ export function useRecordingStop(
             throw new Error('No meeting ID received from save operation');
           }
 
+          if (stopSession.saveError) throw new Error(stopSession.saveError);
+          // SQLite is committed. Mark that recording even if a new one has started.
+          await markMeetingAsSaved(recoveryMeetingId);
+          savedToSQLite = true;
+
           let shouldDetectSummaryLanguage = false;
           try {
             shouldDetectSummaryLanguage = !(await applyPinnedSummaryLanguageToMeeting(meetingId));
-            if (!isCurrent()) return;
           } catch (error) {
-            if (!isCurrent()) return;
             console.warn('Failed to apply pinned summary language preference for new meeting:', error);
-            toast.warning('Could not apply default summary language', {
+            if (isCurrent() && isMountedRef.current) toast.warning('Could not apply default summary language', {
               description: 'The meeting was saved, but the default summary language was not applied.',
             });
           }
@@ -357,11 +366,9 @@ export function useRecordingStop(
                 meetingId,
                 freshTranscripts.map(t => t.text)
               );
-              if (!isCurrent()) return;
             } catch (error) {
-              if (!isCurrent()) return;
               console.warn('Failed to detect summary language for new meeting:', error);
-              toast.warning('Could not detect summary language', {
+              if (isCurrent() && isMountedRef.current) toast.warning('Could not detect summary language', {
                 description: 'The meeting was saved, but Auto could not detect the summary language.',
               });
             }
@@ -391,9 +398,8 @@ export function useRecordingStop(
             }
           })();
 
-          // Mark meeting as saved in IndexedDB (for recovery system)
-          await markMeetingAsSaved();
-          if (!isCurrent()) return;
+          // Only the current mounted page may change shared UI or navigation.
+          if (!isCurrent() || !isMountedRef.current) return;
 
           // Clean up session storage
           sessionStorage.removeItem('last_recording_folder_path');
@@ -401,11 +407,11 @@ export function useRecordingStop(
 
           // Refetch meetings and set current meeting
           await refetchMeetings();
-          if (!isCurrent()) return;
+          if (!isCurrent() || !isMountedRef.current) return;
 
           try {
             const meetingData = await storageService.getMeeting(meetingId);
-            if (!isCurrent()) return;
+            if (!isCurrent() || !isMountedRef.current) return;
             if (meetingData) {
               setCurrentMeeting({
                 id: meetingId,
@@ -414,7 +420,7 @@ export function useRecordingStop(
               console.log('✅ Current meeting set:', meetingData.title);
             }
           } catch (error) {
-            if (!isCurrent()) return;
+            if (!isCurrent() || !isMountedRef.current) return;
             console.warn('Could not fetch meeting details, using ID only:', error);
             setCurrentMeeting({ id: meetingId, title: savedMeetingName || meetingTitle || 'New Meeting' });
           }
@@ -444,7 +450,7 @@ export function useRecordingStop(
 
           // Auto-navigate after a short delay with source parameter
           setTimeout(() => {
-            if (!isCurrent()) return;
+            if (!isCurrent() || !isMountedRef.current) return;
             router.push(`/meeting-details?id=${meetingId}&source=recording`);
             clearTranscripts()
             Analytics.trackPageView('meeting_details');
@@ -510,17 +516,17 @@ export function useRecordingStop(
             : String(saveError || 'Unknown error');
           console.error('Failed to save meeting to database:', saveError);
           setStatus(RecordingStatus.ERROR, saveErrorMessage);
-          toast.error('Failed to save meeting', {
+          if (isMountedRef.current) toast.error('Failed to save meeting', {
             description: saveErrorMessage
           });
           throw saveError;
         }
       } else {
-        // No save needed, go back to IDLE
+        // No save needed, go back to IDLE.
         setStatus(RecordingStatus.IDLE);
       }
 
-      if (!isCurrent()) return;
+      if (!isCurrent() || !isMountedRef.current) return;
       setIsMeetingActive(false);
       // isRecording already set to false at function start
       setIsRecordingDisabled(false);
@@ -532,12 +538,20 @@ export function useRecordingStop(
       console.error('Error in handleRecordingStop:', error);
       setStatus(RecordingStatus.ERROR, errorMessage);
       // isRecording already set to false at function start
-      setIsRecordingDisabled(false);
+      if (isMountedRef.current) setIsRecordingDisabled(false);
     } finally {
       unlistenComplete?.();
+      // Navigation can unmount the page while the shared recording state lives on.
+      if (!isMountedRef.current && isCurrent() && savedToSQLite) {
+        setStatus(RecordingStatus.IDLE);
+        setIsMeetingActive(false);
+      }
       // An older stop must not release a newer stop's guard.
       if (stopInProgressRef.current === stopSession) {
         stopInProgressRef.current = null;
+      }
+      if (!isMountedRef.current && !stopInProgressRef.current) {
+        disposeListenersRef.current?.();
       }
     }
   }, [
@@ -549,6 +563,7 @@ export function useRecordingStop(
     clearTranscripts,
     meetingTitle,
     markMeetingAsSaved,
+    currentMeetingId,
     refetchMeetings,
     setCurrentMeeting,
     setMeetings,

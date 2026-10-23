@@ -30,8 +30,8 @@ async function loadHook({
     toasts.push(args);
     activeToasts.set(args[1]?.id ?? Symbol('toast'), args);
   };
-  const calls = { save: 0, clear: 0, markSaved: 0, flush: 0, poll: 0, transcriptionSuccess: 0, navigation: [], recording: [], disabled: [], active: [] };
-  const storage = new Map();
+  const calls = { save: 0, clear: 0, markSaved: 0, flush: 0, poll: 0, transcriptionSuccess: 0, markedIds: [], navigation: [], recording: [], disabled: [], active: [] };
+  const storage = new Map([['indexeddb_current_meeting_id', 'old-recording']]);
   const recordingStatus = Object.fromEntries([
     'IDLE', 'STOPPING', 'PROCESSING_TRANSCRIPTS', 'SAVING', 'ERROR', 'COMPLETED', 'RECORDING',
   ].map(value => [value, value]));
@@ -66,10 +66,14 @@ async function loadHook({
       useRecordingState: () => context, RecordingStatus: recordingStatus,
     };
     if (name === '@/contexts/TranscriptContext') return { useTranscripts: () => ({
-      transcriptsRef,
+      transcriptsRef, currentMeetingId: null,
       flushBuffer: () => calls.flush++,
       clearTranscripts: () => { calls.clear++; transcriptsRef.current = []; },
-      markMeetingAsSaved: async () => { calls.markSaved++; return markSaved(); },
+      markMeetingAsSaved: async id => {
+        calls.markSaved++;
+        calls.markedIds.push(id);
+        return markSaved();
+      },
     }) };
     if (name === '@/components/Sidebar/SidebarProvider') return { useSidebar: () => ({
       setIsMeetingActive: active => calls.active.push(active),
@@ -311,6 +315,8 @@ for (const pendingStep of ['transcription wait', 'meeting save', 'recovery updat
       : { meeting_id: 'saved-meeting', title: 'Saved meeting' });
     await stopping;
     assert.equal(state.calls.save, pendingStep === 'transcription wait' ? 0 : 1);
+    assert.equal(state.calls.markSaved, pendingStep === 'transcription wait' ? 0 : 1);
+    if (pendingStep !== 'transcription wait') assert.deepEqual(state.calls.markedIds, ['old-recording']);
     assert.equal(state.calls.transcriptionSuccess, 0);
     assert.equal(state.calls.clear, 0);
     assert.equal(state.calls.navigation.length, 0);
@@ -402,4 +408,79 @@ test('a rejected old meeting save cannot set the new recording to error', async 
   assert.equal(state.statuses.at(-1).status, 'RECORDING');
   assert.equal(state.toasts.length, 0);
   assert.equal(state.calls.clear, 0);
+});
+
+for (const pendingStep of ['transcription wait', 'meeting save']) {
+  test(`page unmount during ${pendingStep} keeps the recording save active`, async t => {
+    let finishStep;
+    const pending = () => new Promise(resolve => { finishStep = resolve; });
+    const state = await loadHook(pendingStep === 'meeting save' ? { save: pending } : { poll: pending });
+    t.after(state.unmount);
+    const stopping = state.hook.handleRecordingStop(true);
+    await new Promise(setImmediate);
+    await state.unmount();
+    assert.equal(typeof state.listeners.get('recording-started'), 'function');
+    finishStep(pendingStep === 'meeting save'
+      ? { meeting_id: 'saved-meeting' }
+      : { is_processing: false, chunks_in_queue: 0 });
+    await stopping;
+    assert.equal(state.calls.save, 1);
+    assert.equal(state.calls.markSaved, 1);
+    assert.deepEqual(state.calls.markedIds, ['old-recording']);
+    assert.equal(state.calls.clear, 0);
+    assert.equal(state.calls.navigation.length, 0);
+    assert.equal(state.toasts.length, 0);
+    assert.equal(state.statuses.at(-1).status, 'IDLE');
+    assert.equal(state.listeners.size, 0);
+  });
+}
+
+test('a new recording after page unmount still cancels the old transcript wait', async t => {
+  let finishPoll;
+  const state = await loadHook({ poll: () => new Promise(resolve => { finishPoll = resolve; }) });
+  t.after(state.unmount);
+  const stopping = state.hook.handleRecordingStop(true);
+  await new Promise(setImmediate);
+  await state.unmount();
+  state.listeners.get('recording-started')({ payload: {} });
+  state.storage.set('indexeddb_current_meeting_id', 'new-recording');
+  finishPoll({ is_processing: false, chunks_in_queue: 0 });
+  await stopping;
+  assert.equal(state.calls.save, 0);
+  assert.equal(state.calls.markSaved, 0);
+  assert.equal(state.storage.get('indexeddb_current_meeting_id'), 'new-recording');
+  assert.equal(state.listeners.size, 0);
+});
+
+test('a database save failure after unmount keeps recovery and reports an error', async t => {
+  let rejectSave;
+  const state = await loadHook({ save: () => new Promise((_, reject) => { rejectSave = reject; }) });
+  t.after(state.unmount);
+  const stopping = state.hook.handleRecordingStop(true);
+  await new Promise(setImmediate);
+  await state.unmount();
+  rejectSave(new Error('Database write failed'));
+  await stopping;
+  assert.equal(state.calls.markSaved, 0);
+  assert.equal(state.storage.get('indexeddb_current_meeting_id'), 'old-recording');
+  assert.equal(state.statuses.at(-1).status, 'ERROR');
+  assert.equal(state.calls.clear, 0);
+  assert.equal(state.listeners.size, 0);
+});
+
+test('a late audio save error after unmount still prevents recovery cleanup', async t => {
+  let finishPoll;
+  const state = await loadHook({ poll: () => new Promise(resolve => { finishPoll = resolve; }) });
+  t.after(state.unmount);
+  const stopping = state.hook.handleRecordingStop(true);
+  await new Promise(setImmediate);
+  await state.unmount();
+  await state.listeners.get('recording-stopped')({ payload: { save_error: 'Final audio write failed' } });
+  finishPoll({ is_processing: false, chunks_in_queue: 0 });
+  await stopping;
+  assert.equal(state.calls.save, 0);
+  assert.equal(state.calls.markSaved, 0);
+  assert.equal(state.storage.get('indexeddb_current_meeting_id'), 'old-recording');
+  assert.equal(state.statuses.at(-1).status, 'ERROR');
+  assert.equal(state.listeners.size, 0);
 });

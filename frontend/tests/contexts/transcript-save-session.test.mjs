@@ -5,7 +5,7 @@ import vm from 'node:vm';
 import ts from 'typescript';
 
 /** Run the provider's real recovery cleanup with a delayed IndexedDB write. */
-function loadMarkSaved() {
+function loadMarkSaved({ contextMeetingId = 'old-recording' } = {}) {
   const source = fs.readFileSync(new URL('../../src/contexts/TranscriptContext.tsx', import.meta.url), 'utf8');
   const file = ts.createSourceFile('TranscriptContext.tsx', source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
   let initializer;
@@ -26,7 +26,7 @@ function loadMarkSaved() {
   }).outputText;
   const mark = vm.runInNewContext(compiled, {
     useCallback: fn => fn,
-    currentMeetingId: meetingId,
+    currentMeetingId: contextMeetingId,
     setCurrentMeetingId: value => { meetingId = typeof value === 'function' ? value(meetingId) : value; },
     indexedDBService: { markMeetingSaved: id => {
       saved.push(id);
@@ -62,6 +62,17 @@ test('an old IndexedDB save preserves the new recording recovery ID', async () =
   const state = loadMarkSaved();
   const marking = state.mark();
   state.startNew();
+  state.finish();
+  await marking;
+  assert.deepEqual(state.saved, ['old-recording']);
+  assert.equal(state.meetingId, 'new-recording');
+  assert.equal(state.storage.get('indexeddb_current_meeting_id'), 'new-recording');
+});
+
+test('a stop can mark its original recovery ID after the next recording starts', async () => {
+  const state = loadMarkSaved({ contextMeetingId: null });
+  state.startNew();
+  const marking = state.mark('old-recording');
   state.finish();
   await marking;
   assert.deepEqual(state.saved, ['old-recording']);
