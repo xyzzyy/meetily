@@ -390,9 +390,9 @@ impl RecordingManager {
             error!("Error stopping audio streams: {}", e);
         }
 
-        // CRITICAL: Force pipeline to flush ALL accumulated audio before stopping
-        debug!("💨 Forcing pipeline to flush accumulated audio immediately");
-        if let Err(e) = self.pipeline_manager.force_flush_and_stop().await {
+        // The pipeline drains its channel, mixer and VAD before it ends
+        debug!("💨 Stopping pipeline and flushing accumulated audio");
+        if let Err(e) = self.pipeline_manager.stop().await {
             error!("Error during force flush: {}", e);
         }
 

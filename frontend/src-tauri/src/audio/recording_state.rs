@@ -6,7 +6,6 @@ use tokio::sync::mpsc;
 
 use super::buffer_pool::AudioBufferPool;
 use super::devices::AudioDevice;
-use super::pipeline::AudioCapture;
 
 /// Device type for audio chunks
 #[derive(Debug, Clone, PartialEq)]
@@ -118,8 +117,6 @@ pub struct RecordingState {
 
     // Audio pipeline
     audio_sender: Mutex<Option<mpsc::UnboundedSender<AudioChunk>>>,
-    // Captures that have not finished; each holds a pipeline sender until it does
-    captures: Mutex<Vec<AudioCapture>>,
 
     // Memory optimization
     buffer_pool: AudioBufferPool,
@@ -148,7 +145,6 @@ impl RecordingState {
             microphone_device: Mutex::new(None),
             system_device: Mutex::new(None),
             audio_sender: Mutex::new(None),
-            captures: Mutex::new(Vec::new()),
             buffer_pool: AudioBufferPool::new(16, 48000), // Pool of 16 buffers with 48kHz samples capacity
             error_count: AtomicU32::new(0),
             recoverable_error_count: AtomicU32::new(0),
@@ -176,9 +172,8 @@ impl RecordingState {
         self.is_paused.store(false, Ordering::SeqCst);
         // Clear pause tracking when stopping
         *self.pause_start.lock().unwrap() = None;
-        // CRITICAL: Clear audio sender to close the pipeline channel
-        // This ensures the pipeline loop exits properly after processing all chunks
-        *self.audio_sender.lock().unwrap() = None;
+        // The audio sender stays open so captures can drain their final audio.
+        // AudioPipelineManager::stop() closes it after the streams stop.
         // CRITICAL: Clear device references to release microphone/speaker
         // Without this, Arc<AudioDevice> references persist and keep the mic active
         *self.microphone_device.lock().unwrap() = None;
@@ -256,55 +251,28 @@ impl RecordingState {
         *self.audio_sender.lock().unwrap() = Some(sender);
     }
 
-    pub(super) fn register_capture(&self, capture: AudioCapture) {
-        self.captures.lock().unwrap().push(capture);
+    /// Close the pipeline channel. Captures still holding this state cannot reopen it.
+    pub(super) fn close_audio_sender(&self) {
+        *self.audio_sender.lock().unwrap() = None;
     }
 
-    pub(super) fn unregister_capture(&self, id: u64) {
-        self.captures.lock().unwrap().retain(|capture| capture.id() != id);
-    }
-
-    /// Finish every capture that is still open, including streams a device swap
-    /// removed from the manager whose native teardown has not returned.
-    pub(super) fn finish_captures(&self) -> Result<()> {
-        let captures = std::mem::take(&mut *self.captures.lock().unwrap());
-        let mut result = Ok(());
-        for capture in captures {
-            if let Err(e) = capture.finish() {
-                result = Err(e);
-            }
-        }
-        result
-    }
-
-    pub(super) fn audio_sender(&self) -> Option<mpsc::UnboundedSender<AudioChunk>> {
-        self.audio_sender.lock().unwrap().clone()
-    }
-
-    pub fn send_audio_chunk(&self, chunk: AudioChunk) -> Result<()> {
-        // Don't send audio chunks when paused
-        if self.is_paused() {
-            return Ok(()); // Silently discard chunks while paused
-        }
-
-        if let Some(sender) = self.audio_sender.lock().unwrap().as_ref() {
-            self.send_captured_chunk(sender, chunk)
-        } else {
-            // Return an error when no sender is available (pipeline not ready)
-            Err(anyhow::anyhow!(
+    /// Send a chunk that capture already accepted. Pause does not drop it.
+    pub(super) fn send_captured_chunk(&self, chunk: AudioChunk) -> Result<()> {
+        let mut sender = self.audio_sender.lock().unwrap();
+        let Some(channel) = sender.as_ref() else {
+            // Return an error when no sender is available (pipeline not ready or closed)
+            return Err(anyhow::anyhow!(
                 "Audio pipeline not ready - no sender available"
-            ))
+            ));
+        };
+        if channel.send(chunk).is_err() {
+            // The receiver is gone. Later chunks have nowhere to go, so report once.
+            *sender = None;
+            return Err(anyhow::anyhow!("Failed to send audio chunk: channel closed"));
         }
-    }
+        drop(sender);
 
-    pub(super) fn send_captured_chunk(
-        &self,
-        sender: &mpsc::UnboundedSender<AudioChunk>,
-        chunk: AudioChunk,
-    ) -> Result<()> {
-        sender
-            .send(chunk)
-            .map_err(|_| anyhow::anyhow!("Failed to send audio chunk"))?;
+        // Update statistics
         let mut stats = self.stats.lock().unwrap();
         stats.chunks_processed += 1;
         stats.last_activity = Some(Instant::now());
@@ -437,7 +405,6 @@ impl RecordingState {
         *self.microphone_device.lock().unwrap() = None;
         *self.system_device.lock().unwrap() = None;
         *self.audio_sender.lock().unwrap() = None;
-        self.captures.lock().unwrap().clear();
         *self.last_error.lock().unwrap() = None;
         *self.error_callback.lock().unwrap() = None;
         *self.stats.lock().unwrap() = RecordingStats::default();
@@ -460,7 +427,6 @@ impl Default for RecordingState {
             microphone_device: Mutex::new(None),
             system_device: Mutex::new(None),
             audio_sender: Mutex::new(None),
-            captures: Mutex::new(Vec::new()),
             buffer_pool: AudioBufferPool::new(16, 48000), // Pool of 16 buffers with 48kHz samples capacity
             error_count: AtomicU32::new(0),
             recoverable_error_count: AtomicU32::new(0),

@@ -83,15 +83,19 @@ impl AudioMixerRingBuffer {
     }
 
     fn add_samples(&mut self, device_type: DeviceType, samples: Vec<f32>) {
-        // Log buffer health periodically for diagnostics
-        static SAMPLE_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        if SAMPLE_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % 200 == 0 {
-            debug!(
-                "Ring buffer status: mic={} samples, sys={} samples (max={})",
-                self.mic_buffer.len(),
-                self.system_buffer.len(),
-                self.max_buffer_size
-            );
+        // Log buffer health periodically for diagnostics (debug builds only)
+        #[cfg(debug_assertions)]
+        {
+            static SAMPLE_COUNTER: std::sync::atomic::AtomicU64 =
+                std::sync::atomic::AtomicU64::new(0);
+            if SAMPLE_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % 200 == 0 {
+                perf_debug!(
+                    "Ring buffer status: mic={} samples, sys={} samples (max={})",
+                    self.mic_buffer.len(),
+                    self.system_buffer.len(),
+                    self.max_buffer_size
+                );
+            }
         }
 
         match device_type {
@@ -242,10 +246,14 @@ impl ProfessionalAudioMixer {
     }
 }
 
+/// Lock a mutex even if a callback panicked while holding it, so stop can still drain.
+pub(super) fn lock_unpoisoned<T>(mutex: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 /// Simplified audio capture without broadcast channels
 #[derive(Clone)]
 pub struct AudioCapture {
-    id: u64,
     device: Arc<AudioDevice>,
     state: Arc<RecordingState>,
     sample_rate: u32, // Original device sample rate
@@ -268,7 +276,6 @@ pub struct AudioCapture {
 struct CaptureProcessing {
     finished: bool,
     pending_samples: Vec<f32>,
-    sender: Option<mpsc::UnboundedSender<AudioChunk>>,
 }
 
 impl AudioCapture {
@@ -444,10 +451,7 @@ impl AudioCapture {
             None
         };
 
-        let sender = state.audio_sender();
-        static NEXT_CAPTURE_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
-        let capture = Self {
-            id: NEXT_CAPTURE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+        Self {
             device,
             state,
             sample_rate,
@@ -460,101 +464,65 @@ impl AudioCapture {
             processing: Arc::new(std::sync::Mutex::new(CaptureProcessing {
                 finished: false,
                 pending_samples: Vec::with_capacity(1024),
-                sender,
             })),
             noise_suppressor: Arc::new(std::sync::Mutex::new(noise_suppressor)),
             high_pass_filter: Arc::new(std::sync::Mutex::new(high_pass_filter)),
             normalizer: Arc::new(std::sync::Mutex::new(normalizer)),
             // Using global recording time for sync
-        };
-        // The stream may leave its manager before it stops. Session stop finishes
-        // registered captures so a stalled teardown cannot keep the pipeline open.
-        capture.state.register_capture(capture.clone());
-        capture
+        }
     }
 
     /// Process audio data directly from callback
     pub fn process_audio_data(&self, data: &[f32]) {
-        let processing = self.processing.lock().unwrap();
+        let processing = lock_unpoisoned(&self.processing);
         if processing.finished || !self.state.is_active() {
             return;
         }
-        self.process_input(data, &processing.sender);
-    }
-
-    /// Batch Core Audio samples under the same lock used by finish().
-    #[cfg(target_os = "macos")]
-    pub fn process_audio_sample(&self, sample: f32) {
-        let mut processing = self.processing.lock().unwrap();
-        if processing.finished || !self.state.is_active() {
-            return;
-        }
-        processing.pending_samples.push(sample);
-        if processing.pending_samples.len() >= 1024 {
-            self.process_input(&processing.pending_samples, &processing.sender);
-            processing.pending_samples.clear();
-        }
+        self.process_input(data);
     }
 
     /// The native callback admits these samples before it puts them in its queue.
     #[cfg(target_os = "macos")]
     pub(super) fn process_captured_samples(&self, samples: &[f32]) {
-        let mut processing = self.processing.lock().unwrap();
+        let mut processing = lock_unpoisoned(&self.processing);
         if processing.finished {
             return;
         }
         for chunk in samples.chunks(1024) {
             processing.pending_samples.extend_from_slice(chunk);
             if processing.pending_samples.len() >= 1024 {
-                self.process_input(&processing.pending_samples, &processing.sender);
+                self.process_input(&processing.pending_samples);
                 processing.pending_samples.clear();
             }
         }
     }
 
-    pub(super) fn id(&self) -> u64 {
-        self.id
-    }
-
-    /// Send all accepted samples before closing this capture's pipeline sender.
+    /// Send all accepted samples, including filter and noise suppression tails.
     pub fn finish(&self) -> Result<()> {
-        let mut processing = self.processing.lock().unwrap();
+        let mut processing = lock_unpoisoned(&self.processing);
         if processing.finished {
             return Ok(());
         }
         processing.finished = true;
-        self.state.unregister_capture(self.id);
         let samples = std::mem::take(&mut processing.pending_samples);
-        self.process_input(&samples, &processing.sender);
-        let result = (|| {
-            if let Some(resampler) = self.resampler.lock().unwrap().as_mut() {
-                let tail = resampler.finish()?;
-                self.process_output(tail, &processing.sender);
+        self.process_input(&samples);
+        // A resampler failure must not skip the noise suppression tail.
+        let mut result = Ok(());
+        if let Some(resampler) = lock_unpoisoned(&self.resampler).as_mut() {
+            match resampler.finish() {
+                Ok(tail) => self.process_output(tail),
+                Err(e) => result = Err(e),
             }
-            let noise_tail = self
-                .noise_suppressor
-                .lock()
-                .unwrap()
-                .as_mut()
-                .map(|suppressor| suppressor.flush())
-                .unwrap_or_default();
-            self.normalize_and_send(noise_tail, &processing.sender);
-            let limiter_tail = self
-                .normalizer
-                .lock()
-                .unwrap()
-                .as_mut()
-                .map(|normalizer| normalizer.flush())
-                .unwrap_or_default();
-            self.send_output(limiter_tail, &processing.sender);
-            Ok(())
-        })();
-        // Release the sender even if the resampler fails, so stop can finish.
-        processing.sender = None;
+        }
+        let noise_tail = lock_unpoisoned(&self.noise_suppressor)
+            .as_mut()
+            .map(|suppressor| suppressor.flush())
+            .unwrap_or_default();
+        self.normalize_and_send(noise_tail);
         result
     }
 
-    fn process_input(&self, data: &[f32], sender: &Option<mpsc::UnboundedSender<AudioChunk>>) {
+    fn process_input(&self, data: &[f32]) {
         if data.is_empty() {
             return;
         }
@@ -566,7 +534,7 @@ impl AudioCapture {
         };
 
         if self.needs_resampling {
-            let mut resampler = self.resampler.lock().unwrap();
+            let mut resampler = lock_unpoisoned(&self.resampler);
             mono_data = if let Some(resampler) = resampler.as_mut() {
                 match resampler.process(&mono_data) {
                     Ok(output) => output,
@@ -580,14 +548,10 @@ impl AudioCapture {
                 super::audio_processing::resample_audio(&mono_data, self.sample_rate, 48000)
             };
         }
-        self.process_output(mono_data, sender);
+        self.process_output(mono_data);
     }
 
-    fn process_output(
-        &self,
-        mut mono_data: Vec<f32>,
-        sender: &Option<mpsc::UnboundedSender<AudioChunk>>,
-    ) {
+    fn process_output(&self, mut mono_data: Vec<f32>) {
         if mono_data.is_empty() {
             return;
         }
@@ -617,9 +581,7 @@ impl AudioCapture {
 
                         debug!("🔇 Noise suppression health: in={}, out={}, delta={}, buffered={}, RMS={:.4}",
                                    before_len, after_len, length_delta, buffered,
-                                   if !mono_data.is_empty() {
-                                       (mono_data.iter().map(|&x| x * x).sum::<f32>() / mono_data.len() as f32).sqrt()
-                                   } else { 0.0 });
+                                   rms(&mono_data));
 
                         // WARN if accumulating samples (potential latency buildup)
                         if buffered > 1000 {
@@ -638,14 +600,10 @@ impl AudioCapture {
                 }
             }
         }
-        self.normalize_and_send(mono_data, sender);
+        self.normalize_and_send(mono_data);
     }
 
-    fn normalize_and_send(
-        &self,
-        mut mono_data: Vec<f32>,
-        sender: &Option<mpsc::UnboundedSender<AudioChunk>>,
-    ) {
+    fn normalize_and_send(&self, mut mono_data: Vec<f32>) {
         if matches!(self.device_type, DeviceType::Microphone) {
             // STEP 3: Apply EBU R128 normalization (professional loudness standard)
             if let Ok(mut normalizer_lock) = self.normalizer.lock() {
@@ -655,9 +613,7 @@ impl AudioCapture {
                     // Log normalization occasionally for debugging
                     let chunk_id = self.chunk_counter.load(std::sync::atomic::Ordering::SeqCst);
                     if chunk_id % 200 == 0 && !mono_data.is_empty() {
-                        let rms = (mono_data.iter().map(|&x| x * x).sum::<f32>()
-                            / mono_data.len() as f32)
-                            .sqrt();
+                        let rms = rms(&mono_data);
                         let peak = mono_data.iter().map(|&x| x.abs()).fold(0.0f32, f32::max);
                         debug!(
                             "🎤 After normalization chunk {}: RMS={:.4}, Peak={:.4}",
@@ -668,10 +624,10 @@ impl AudioCapture {
             }
         }
 
-        self.send_output(mono_data, sender);
+        self.send_output(mono_data);
     }
 
-    fn send_output(&self, mono_data: Vec<f32>, sender: &Option<mpsc::UnboundedSender<AudioChunk>>) {
+    fn send_output(&self, mono_data: Vec<f32>) {
         if mono_data.is_empty() {
             return;
         }
@@ -732,12 +688,15 @@ impl AudioCapture {
         // This ensures we only record once: mic + system properly mixed
         // Individual raw streams go only to the transcription pipeline below
 
-        // Keep the session sender until finish(), even after recording state stops.
-        if let Some(sender) = sender {
-            if let Err(e) = self.state.send_captured_chunk(sender, audio_chunk) {
-                warn!("Failed to send audio chunk: {}", e);
-                self.state.report_error(AudioError::ChannelClosed);
+        // The state keeps its sender open after recording stops, so finish() can drain.
+        if let Err(e) = self.state.send_captured_chunk(audio_chunk) {
+            // Expected during initialization and after the pipeline closes
+            if e.to_string().contains("Audio pipeline not ready") {
+                debug!("Audio pipeline not ready yet, skipping chunk {}", chunk_id);
+                return;
             }
+            warn!("Failed to send audio chunk: {}", e);
+            self.state.report_error(AudioError::ChannelClosed);
         }
     }
 
@@ -910,18 +869,6 @@ impl AudioPipeline {
             .await
             {
                 Ok(Some(chunk)) => {
-                    // PERFORMANCE: Check for flush signal (special chunk with ID >= u64::MAX - 10)
-                    // Multiple flush signals may be sent to ensure processing
-                    if chunk.chunk_id >= u64::MAX - 10 {
-                        info!(
-                            "📥 Received FLUSH signal #{} - flushing VAD processor",
-                            u64::MAX - chunk.chunk_id
-                        );
-                        self.flush_remaining_audio()?;
-                        // Continue processing to handle any remaining chunks
-                        continue;
-                    }
-
                     // PERFORMANCE OPTIMIZATION: Eliminate per-chunk logging overhead
                     // Logging in hot paths causes severe performance degradation
                     self.processed_chunks += 1;
@@ -1172,6 +1119,7 @@ impl AudioPipeline {
 pub struct AudioPipelineManager {
     pipeline_handle: Option<JoinHandle<Result<()>>>,
     audio_sender: Option<mpsc::UnboundedSender<AudioChunk>>,
+    state: Option<Arc<RecordingState>>,
 }
 
 impl AudioPipelineManager {
@@ -1179,6 +1127,7 @@ impl AudioPipelineManager {
         Self {
             pipeline_handle: None,
             audio_sender: None,
+            state: None,
         }
     }
 
@@ -1233,15 +1182,22 @@ impl AudioPipelineManager {
 
         self.pipeline_handle = Some(handle);
         self.audio_sender = Some(audio_sender);
+        self.state = Some(state);
 
         info!("Audio pipeline manager started with mixed audio recording");
         Ok(())
     }
 
     /// Stop the audio pipeline
+    ///
+    /// Stop the capture streams first. Their final audio goes through the state's sender,
+    /// and this call closes it. A capture that is still stopping cannot hold the pipeline open.
     pub async fn stop(&mut self) -> Result<()> {
-        // Drop the sender to close the pipeline
+        // Drop the senders to close the pipeline
         self.audio_sender = None;
+        if let Some(state) = self.state.take() {
+            state.close_audio_sender();
+        }
 
         // Wait for pipeline to finish
         if let Some(handle) = self.pipeline_handle.take() {
@@ -1255,11 +1211,6 @@ impl AudioPipelineManager {
         } else {
             Ok(())
         }
-    }
-
-    /// Drain the channel, mixer, and VAD in that order.
-    pub async fn force_flush_and_stop(&mut self) -> Result<()> {
-        self.stop().await
     }
 }
 
@@ -1300,7 +1251,7 @@ mod tests {
     }
 
     #[test]
-    fn capture_drains_after_state_stops_and_closes_sender_once() {
+    fn capture_drains_after_state_stops_and_finishes_once() {
         for rate in [16000, 44100, 48000, 96000] {
             let (capture, state, mut receiver) = capture_for_test(rate, DeviceType::System);
             let input = vec![0.25; 128];
@@ -1309,6 +1260,7 @@ mod tests {
             capture.finish().unwrap();
             capture.finish().unwrap();
             capture.process_audio_data(&input);
+            state.close_audio_sender();
             let mut output = Vec::new();
             while let Ok(chunk) = receiver.try_recv() {
                 assert_eq!(chunk.sample_rate, 48000);
@@ -1324,38 +1276,16 @@ mod tests {
         }
     }
 
-    #[test]
-    fn session_stop_releases_capture_whose_stream_teardown_is_stalled() {
-        let (capture, state, mut receiver) = capture_for_test(16000, DeviceType::Microphone);
-        capture.process_audio_data(&[0.25; 128]);
-        state.stop_recording();
-        // The stalled stream still owns `capture`; session stop must not wait for it.
-        state.finish_captures().unwrap();
-        let mut output = Vec::new();
-        while let Ok(chunk) = receiver.try_recv() {
-            output.extend(chunk.data);
-        }
-        assert!(!output.is_empty());
-        assert!(matches!(
-            receiver.try_recv(),
-            Err(mpsc::error::TryRecvError::Disconnected)
-        ));
-        // The stream's own stop() runs later and finds nothing left to do.
-        capture.finish().unwrap();
-    }
-
     #[cfg(target_os = "macos")]
     #[test]
     fn core_audio_batch_keeps_samples_accepted_before_pause_and_stop() {
         let (capture, state, mut receiver) = capture_for_test(48000, DeviceType::System);
-        for _ in 0..127 {
-            capture.process_audio_sample(0.25);
-        }
+        capture.process_captured_samples(&[0.25; 127]);
         state.pause_recording().unwrap();
-        capture.process_audio_sample(0.75);
         capture.process_audio_data(&[0.75; 128]);
         state.stop_recording();
         capture.finish().unwrap();
+        state.close_audio_sender();
         assert_eq!(receiver.try_recv().unwrap().data, vec![0.25; 127]);
         assert!(matches!(
             receiver.try_recv(),
@@ -1520,7 +1450,7 @@ mod tests {
         );
     }
     #[tokio::test]
-    async fn stop_drains_capture_before_pipeline_and_releases_cloned_senders() {
+    async fn stop_drains_capture_before_pipeline_closes() {
         use super::super::device_detection::InputDeviceKind;
         for rate in [16000, 44100, 48000, 96000] {
             let state = RecordingState::new();
@@ -1559,7 +1489,7 @@ mod tests {
             capture.finish().unwrap();
             tokio::time::timeout(
                 std::time::Duration::from_secs(5),
-                manager.force_flush_and_stop(),
+                manager.stop(),
             )
             .await
             .unwrap()
@@ -1575,6 +1505,57 @@ mod tests {
             ));
         }
     }
+    #[tokio::test]
+    async fn pipeline_stops_while_a_capture_is_still_stopping() {
+        use super::super::device_detection::InputDeviceKind;
+        let state = RecordingState::new();
+        state.start_recording().unwrap();
+        let (transcription_sender, _transcription) = mpsc::unbounded_channel();
+        let (recording_sender, mut recording) = mpsc::unbounded_channel();
+        let mut manager = AudioPipelineManager::new();
+        manager
+            .start(
+                state.clone(),
+                transcription_sender,
+                600,
+                48000,
+                Some(recording_sender),
+                None,
+                "Test microphone".into(),
+                InputDeviceKind::Wired,
+                "Test system".into(),
+                InputDeviceKind::Wired,
+            )
+            .unwrap();
+        let capture = AudioCapture::new(
+            Arc::new(AudioDevice::new(
+                "Test capture".into(),
+                super::super::devices::DeviceType::Output,
+            )),
+            state.clone(),
+            48000,
+            1,
+            DeviceType::Microphone,
+            None,
+        );
+        capture.process_audio_data(&[0.25; 127]);
+        state.stop_recording();
+        // A swapped-out stream whose native teardown is stalled never reaches
+        // capture.finish(). The pipeline must still stop and keep the audio it received.
+        tokio::time::timeout(std::time::Duration::from_secs(5), manager.stop())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(recording.try_recv().is_ok());
+        // The stalled stream's own stop() runs later and finds nothing to send to.
+        capture.process_audio_data(&[0.75; 127]);
+        capture.finish().unwrap();
+        assert!(matches!(
+            recording.try_recv(),
+            Err(mpsc::error::TryRecvError::Disconnected)
+        ));
+    }
+
     #[test]
     fn microphone_drain_keeps_the_final_marker_and_real_duration() {
         for rate in [16000, 44100, 48000, 96000] {
@@ -1606,7 +1587,7 @@ mod tests {
     }
 
     #[test]
-    fn noise_suppression_and_limiter_tails_are_sent_once_in_order() {
+    fn noise_suppression_tail_is_sent_once_in_order() {
         let (capture, state, mut receiver) = capture_for_test(48000, DeviceType::Microphone);
         *capture.high_pass_filter.lock().unwrap() = None;
         *capture.noise_suppressor.lock().unwrap() =
@@ -1625,8 +1606,7 @@ mod tests {
         let mut denoised = suppressor.process(&input);
         denoised.extend(suppressor.flush());
         let mut normalizer = LoudnessNormalizer::new(1, 48000).unwrap();
-        let mut expected = normalizer.normalize_loudness(&denoised);
-        expected.extend(normalizer.flush());
+        let expected = normalizer.normalize_loudness(&denoised);
         assert_eq!(output.len(), input.len());
         assert_eq!(output, expected);
     }
@@ -1635,7 +1615,7 @@ mod tests {
     #[test]
     fn queued_native_samples_are_delivered_before_the_capture_finishes() {
         let (capture, state, mut receiver) = capture_for_test(48000, DeviceType::System);
-        capture.process_audio_sample(0.25);
+        capture.process_captured_samples(&[0.25]);
         state.stop_recording();
         // These samples were admitted by the producer before stop and can arrive afterwards.
         capture.process_captured_samples(&[0.5; 131072]);

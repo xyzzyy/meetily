@@ -38,6 +38,8 @@ pub struct CoreAudioStream {
     _tap: ca::TapGuard,
     waker_state: Arc<Mutex<WakerState>>,
     current_sample_rate: Arc<AtomicU32>,
+    // Set by stop_and_drain: the end of the stream is expected, not buffer pressure.
+    stopped: bool,
 }
 
 /// Audio processing context
@@ -301,6 +303,7 @@ impl CoreAudioCapture {
             _tap: self.tap,
             waker_state,
             current_sample_rate,
+            stopped: false,
         })
     }
 }
@@ -349,13 +352,14 @@ fn process_audio_data(ctx: &mut AudioContext, data: &[f32]) {
 
 #[cfg(target_os = "macos")]
 fn drain_samples(consumer: &mut HeapCons<f32>) -> Vec<f32> {
-    std::iter::from_fn(|| consumer.try_pop()).collect()
+    consumer.pop_iter().collect()
 }
 
 #[cfg(target_os = "macos")]
 impl CoreAudioStream {
     /// Stop the native producer while its callback context is still alive, then drain its queue.
     pub fn stop_and_drain(&mut self) -> Vec<f32> {
+        self.stopped = true;
         self._ctx.should_terminate.store(true, Ordering::Release);
         drop(self._device.take());
         drain_samples(&mut self.consumer)
@@ -378,6 +382,10 @@ impl Stream for CoreAudioStream {
         // Try to pop a sample from the ring buffer
         if let Some(sample) = self.consumer.try_pop() {
             return Poll::Ready(Some(sample));
+        }
+
+        if self.stopped {
+            return Poll::Ready(None);
         }
 
         // Check if we should terminate

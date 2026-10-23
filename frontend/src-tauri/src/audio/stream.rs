@@ -6,7 +6,7 @@ use log::{error, info, warn};
 use tokio::sync::mpsc;
 
 use super::devices::{AudioDevice, get_device_and_config};
-use super::pipeline::AudioCapture;
+use super::pipeline::{lock_unpoisoned, AudioCapture};
 use super::recording_state::{RecordingState, DeviceType};
 use super::capture::{AudioCaptureBackend, get_current_backend};
 
@@ -195,18 +195,35 @@ impl AudioStream {
                 use futures_util::StreamExt;
 
                 info!("Core Audio processing task started for {}", device_name);
-                while futures_util::future::poll_fn(|cx| {
-                    // Keep poll and delivery under one lock so stop cannot overtake a sample.
-                    let mut stream = stream.lock().unwrap();
-                    match stream.poll_next_unpin(cx) {
-                        std::task::Poll::Ready(Some(sample)) => {
-                            capture.process_captured_samples(&[sample]);
-                            std::task::Poll::Ready(Some(()))
+                const MAX_BATCH: usize = 4096;
+                let mut batch = Vec::with_capacity(MAX_BATCH);
+                loop {
+                    let ended = futures_util::future::poll_fn(|cx| {
+                        // Keep poll and delivery under one lock so stop cannot overtake a sample.
+                        let mut stream = lock_unpoisoned(&stream);
+                        batch.clear();
+                        let mut ended = false;
+                        while batch.len() < MAX_BATCH {
+                            match stream.poll_next_unpin(cx) {
+                                std::task::Poll::Ready(Some(sample)) => batch.push(sample),
+                                std::task::Poll::Ready(None) => {
+                                    ended = true;
+                                    break;
+                                }
+                                std::task::Poll::Pending => break,
+                            }
                         }
-                        std::task::Poll::Ready(None) => std::task::Poll::Ready(None),
-                        std::task::Poll::Pending => std::task::Poll::Pending,
+                        if batch.is_empty() && !ended {
+                            return std::task::Poll::Pending;
+                        }
+                        capture.process_captured_samples(&batch);
+                        std::task::Poll::Ready(ended)
+                    })
+                    .await;
+                    if ended {
+                        break;
                     }
-                }).await.is_some() {}
+                }
                 if let Err(e) = capture.finish() {
                     error!("Failed to drain Core Audio capture: {}", e);
                 }
@@ -314,7 +331,7 @@ impl AudioStream {
     pub fn stop(self) -> Result<()> {
         info!("Stopping audio stream for device: {}", self.device.name);
 
-        match self.backend {
+        let drain_result = match self.backend {
             StreamBackend::Cpal(stream) => {
                 // CRITICAL: Pause the stream first to stop callbacks immediately
                 // This ensures closures stop executing before we drop the stream,
@@ -324,6 +341,8 @@ impl AudioStream {
                 }
                 info!("Stream paused, now dropping to release callbacks");
                 drop(stream);
+                // This waits for any callback in progress and prevents later callbacks from sending.
+                self.capture.finish()
             }
             #[cfg(target_os = "macos")]
             StreamBackend::CoreAudio { task, stream } => {
@@ -331,16 +350,13 @@ impl AudioStream {
                 if let Some(task_handle) = task {
                     task_handle.abort();
                 }
-                let mut stream = stream.lock().unwrap();
+                let mut stream = lock_unpoisoned(&stream);
                 let samples = stream.stop_and_drain();
                 self.capture.process_captured_samples(&samples);
                 // Finish before releasing the lock, even if the cancelled task is still running.
-                self.capture.finish()?;
+                self.capture.finish()
             }
-        }
-
-        // This waits for any callback in progress and prevents later callbacks from sending.
-        let drain_result = self.capture.finish();
+        };
 
         // Explicitly drop self.device Arc reference
         drop(self.device);
@@ -443,13 +459,6 @@ impl AudioStreamManager {
                 error!("Failed to stop system stream: {}", e);
                 errors.push(e);
             }
-        }
-
-        // A stream a device swap took out of this manager may still be stopping.
-        // Finish its capture here so the pipeline sender is released now.
-        if let Err(e) = self.state.finish_captures() {
-            error!("Failed to finish remaining captures: {}", e);
-            errors.push(e);
         }
 
         if !errors.is_empty() {
