@@ -332,18 +332,13 @@ impl AudioStream {
         info!("Stopping audio stream for device: {}", self.device.name);
 
         let drain_result = match self.backend {
-            StreamBackend::Cpal(stream) => {
-                // CRITICAL: Pause the stream first to stop callbacks immediately
-                // This ensures closures stop executing before we drop the stream,
-                // allowing Arc references captured in callbacks to be released
+            StreamBackend::Cpal(stream) => finish_cpal_capture(&self.capture, || {
                 if let Err(e) = stream.pause() {
                     warn!("Failed to pause stream before drop: {}", e);
                 }
                 info!("Stream paused, now dropping to release callbacks");
                 drop(stream);
-                // This waits for any callback in progress and prevents later callbacks from sending.
-                self.capture.finish()
-            }
+            }),
             #[cfg(target_os = "macos")]
             StreamBackend::CoreAudio { task, stream } => {
                 // Stop owns the shared stream, so cancelling the task does not discard its queue.
@@ -363,6 +358,15 @@ impl AudioStream {
         info!("Audio stream stopped and device reference dropped");
         drain_result
     }
+}
+
+fn finish_cpal_capture(capture: &AudioCapture, teardown: impl FnOnce()) -> Result<()> {
+    // Finish waits for the current callback and prevents later callbacks from sending.
+    // Pause or drop can stall on a disconnected device. Send the tail before that
+    // stall lets session stop close the pipeline sender.
+    let drain_result = capture.finish();
+    teardown();
+    drain_result
 }
 
 /// Audio stream manager for handling multiple streams
@@ -504,5 +508,87 @@ impl Drop for AudioStreamManager {
         if let Err(e) = self.stop_streams() {
             error!("Error stopping streams during drop: {}", e);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::device_detection::InputDeviceKind;
+    use super::super::pipeline::AudioPipelineManager;
+    use super::*;
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn cpal_tail_reaches_recording_while_native_teardown_is_blocked() {
+        let state = RecordingState::new();
+        state.start_recording().unwrap();
+        let (transcription_sender, _transcription) = mpsc::unbounded_channel();
+        let (recording_sender, mut recording) = mpsc::unbounded_channel();
+        let mut manager = AudioPipelineManager::new();
+        manager
+            .start(
+                state.clone(),
+                transcription_sender,
+                600,
+                48000,
+                Some(recording_sender),
+                None,
+                "Test microphone".into(),
+                InputDeviceKind::Wired,
+                "Test system".into(),
+                InputDeviceKind::Wired,
+            )
+            .unwrap();
+        let capture = AudioCapture::new(
+            Arc::new(AudioDevice::new(
+                "Test microphone".into(),
+                super::super::devices::DeviceType::Input,
+            )),
+            state.clone(),
+            16000,
+            1,
+            DeviceType::Microphone,
+            None,
+        );
+        // Less than one resampler block: all 384 output samples need the final drain.
+        capture.process_audio_data(&[0.25; 128]);
+        let callback_capture = capture.clone();
+        let (entered_sender, entered_receiver) = tokio::sync::oneshot::channel();
+        let (release_sender, release_receiver) = std::sync::mpsc::channel();
+        // A swapped-out microphone stops outside the stream manager. Its native
+        // teardown can remain blocked while the rest of the session stops.
+        let stopping = std::thread::spawn(move || {
+            let mut released = false;
+            let result = finish_cpal_capture(&capture, || {
+                let _ = entered_sender.send(());
+                released = release_receiver
+                    .recv_timeout(Duration::from_secs(15))
+                    .is_ok();
+            });
+            (result, released)
+        });
+
+        let entered = tokio::time::timeout(Duration::from_secs(5), entered_receiver).await;
+        callback_capture.process_audio_data(&[0.75; 128]);
+        state.stop_recording();
+        let stopped = tokio::time::timeout(Duration::from_secs(5), manager.stop()).await;
+        let saved: Vec<f32> = std::iter::from_fn(|| recording.try_recv().ok())
+            .flat_map(|chunk| chunk.data)
+            .collect();
+        let teardown_still_blocked = !stopping.is_finished();
+
+        // Release and join before assertions, including on a timeout or stop error.
+        let _ = release_sender.send(());
+        let teardown = stopping.join();
+        entered.expect("Native teardown was not reached").unwrap();
+        stopped
+            .expect("Session stop waited for native teardown")
+            .unwrap();
+        let (drained, released) = teardown.unwrap();
+        drained.unwrap();
+        assert!(released, "Native teardown did not receive its release signal");
+        assert!(teardown_still_blocked);
+        assert_eq!(saved.len(), 384);
+        assert!(saved.iter().any(|sample| sample.abs() > 0.001));
     }
 }
