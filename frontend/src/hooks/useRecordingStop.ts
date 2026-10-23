@@ -15,6 +15,11 @@ import {
   detectAndCacheSummaryLanguage,
 } from '@/lib/summary-language-preferences';
 
+interface RecordingStopSession {
+  saveError: string | null;
+  transcriptWarning: string | null;
+}
+
 type SummaryStatus = 'idle' | 'processing' | 'summarizing' | 'regenerating' | 'completed' | 'error';
 
 interface UseRecordingStopReturn {
@@ -71,13 +76,9 @@ export function useRecordingStop(
 
   const router = useRouter();
 
-  // Guard to prevent duplicate/concurrent stop calls (e.g., from UI and tray simultaneously)
-  const stopInProgressRef = useRef(false);
-  // Keep the error for this recording, including duplicate stop attempts.
-  // The recording-started event clears it for the next recording.
-  const saveErrorRef = useRef<string | null>(null);
-  // Each stop keeps this object if a later recording replaces the current one.
-  const transcriptWarningRef = useRef<{ message: string | null }>({ message: null });
+  // A stop owns its session until a later recording starts.
+  const stopSessionRef = useRef<RecordingStopSession>({ saveError: null, transcriptWarning: null });
+  const stopInProgressRef = useRef<RecordingStopSession | null>(null);
 
   // Promise to track recording-stopped event data (fixes race condition with recording-stop-complete)
   const recordingStoppedDataRef = useRef<Promise<void> | null>(null);
@@ -98,10 +99,11 @@ export function useRecordingStop(
     };
 
     void listen('recording-started', () => {
-      saveErrorRef.current = null;
-      transcriptWarningRef.current = { message: null };
+      stopSessionRef.current = { saveError: null, transcriptWarning: null };
       toast.dismiss('recording-transcript-incomplete');
       recordingStoppedDataRef.current = null;
+      sessionStorage.removeItem('last_recording_folder_path');
+      sessionStorage.removeItem('last_recording_meeting_name');
     }).then(retainUnlistener).catch(error => {
       console.error('Failed to setup recording started listener:', error);
     });
@@ -113,14 +115,16 @@ export function useRecordingStop(
           // Create promise that resolves when sessionStorage is set (prevents race condition)
           recordingStoppedDataRef.current = (async () => {
             const { folder_path, meeting_name, save_error, transcript_warning } = event.payload;
-            saveErrorRef.current = save_error ?? null;
-            transcriptWarningRef.current.message = transcript_warning ?? null;
+            stopSessionRef.current.saveError = save_error ?? null;
+            stopSessionRef.current.transcriptWarning = transcript_warning ?? null;
             if (transcript_warning) {
               toast.warning('Transcript may be incomplete', {
                 id: 'recording-transcript-incomplete',
                 description: transcript_warning,
                 duration: 20000,
               });
+            } else {
+              toast.dismiss('recording-transcript-incomplete');
             }
             if (save_error) {
               const { flushBuffer, setIsRecording, setIsRecordingDisabled, setIsMeetingActive, setStatus } = eventHandlersRef.current;
@@ -157,6 +161,7 @@ export function useRecordingStop(
 
     return () => {
       cancelled = true;
+      stopSessionRef.current = { saveError: null, transcriptWarning: null };
       console.log('Cleaning up recording stopped listener...');
       unlisteners.forEach(unlisten => unlisten());
     };
@@ -164,17 +169,18 @@ export function useRecordingStop(
 
   // Main recording stop handler
   const handleRecordingStop = useCallback(async (isCallApi: boolean) => {
-    // Late stop events can update this object. A new recording gets a new object.
-    const transcriptWarning = transcriptWarningRef.current;
+    // Late stop events update this session. A new recording cancels its UI work.
+    const stopSession = stopSessionRef.current;
+    const isCurrent = () => stopSessionRef.current === stopSession;
     if (recordingStoppedDataRef.current) {
       await recordingStoppedDataRef.current;
     }
 
     // Guard: prevent duplicate/concurrent stop calls
-    if (stopInProgressRef.current) {
+    if (!isCurrent() || stopInProgressRef.current === stopSession) {
       return;
     }
-    stopInProgressRef.current = true;
+    stopInProgressRef.current = stopSession;
 
     // Set status to STOPPING immediately
     setStatus(RecordingStatus.STOPPING);
@@ -182,12 +188,13 @@ export function useRecordingStop(
     setIsRecordingDisabled(true);
     const stopStartTime = Date.now();
 
+    let unlistenComplete: (() => void) | undefined;
     try {
       // Keep the transcript recovery copy after a failed file save.
-      if (saveErrorRef.current) {
+      if (stopSession.saveError) {
         flushBuffer();
         setIsMeetingActive(false);
-        throw new Error(saveErrorRef.current);
+        throw new Error(stopSession.saveError);
       }
       console.log('Post-stop processing (new implementation)...', {
         stop_initiated_at: new Date(stopStartTime).toISOString(),
@@ -208,15 +215,18 @@ export function useRecordingStop(
       let transcriptionComplete = false;
 
       // Listen for transcription-complete event
-      const unlistenComplete = await listen('transcription-complete', () => {
+      unlistenComplete = await listen('transcription-complete', () => {
         console.log('Received transcription-complete event');
         transcriptionComplete = true;
       });
+
+      if (!isCurrent()) return;
 
       // Poll for transcription status
       while (elapsedTime < MAX_WAIT_TIME && !transcriptionComplete) {
         try {
           const status = await transcriptService.getTranscriptionStatus();
+          if (!isCurrent()) return;
           console.log('Transcription status:', status);
 
           // Check if transcription is complete
@@ -241,6 +251,7 @@ export function useRecordingStop(
 
           // Wait before next check
           await new Promise(resolve => setTimeout(resolve, POLL_INTERVAL));
+          if (!isCurrent()) return;
           elapsedTime += POLL_INTERVAL;
         } catch (error) {
           console.error('Error checking transcription status:', error);
@@ -248,9 +259,12 @@ export function useRecordingStop(
         }
       }
 
+      if (!isCurrent()) return;
+
       // Clean up listener
       console.log('🧹 CLEANUP: Cleaning up transcription-complete listener');
       unlistenComplete();
+      unlistenComplete = undefined;
 
       if (!transcriptionComplete && elapsedTime >= MAX_WAIT_TIME) {
         console.warn('⏰ Transcription wait timeout reached after', elapsedTime, 'ms');
@@ -259,6 +273,7 @@ export function useRecordingStop(
         // Wait longer for any late transcript segments (increased from 1s to 4s)
         console.log('⏳ Waiting for late transcript segments...');
         await new Promise(resolve => setTimeout(resolve, 4000));
+        if (!isCurrent()) return;
       }
 
       // Final buffer flush: process ALL remaining transcripts regardless of timing
@@ -282,9 +297,10 @@ export function useRecordingStop(
       // Wait a bit more to ensure all transcript state updates have been processed
       console.log('Waiting for transcript state updates to complete...');
       await new Promise(resolve => setTimeout(resolve, 500));
+      if (!isCurrent()) return;
 
-      if (saveErrorRef.current) {
-        throw new Error(saveErrorRef.current);
+      if (stopSession.saveError) {
+        throw new Error(stopSession.saveError);
       }
 
       // Save to SQLite
@@ -315,6 +331,7 @@ export function useRecordingStop(
             freshTranscripts,
             folderPath
           );
+          if (!isCurrent()) return;
 
           const meetingId = responseData.meeting_id;
           if (!meetingId) {
@@ -325,7 +342,9 @@ export function useRecordingStop(
           let shouldDetectSummaryLanguage = false;
           try {
             shouldDetectSummaryLanguage = !(await applyPinnedSummaryLanguageToMeeting(meetingId));
+            if (!isCurrent()) return;
           } catch (error) {
+            if (!isCurrent()) return;
             console.warn('Failed to apply pinned summary language preference for new meeting:', error);
             toast.warning('Could not apply default summary language', {
               description: 'The meeting was saved, but the default summary language was not applied.',
@@ -338,7 +357,9 @@ export function useRecordingStop(
                 meetingId,
                 freshTranscripts.map(t => t.text)
               );
+              if (!isCurrent()) return;
             } catch (error) {
+              if (!isCurrent()) return;
               console.warn('Failed to detect summary language for new meeting:', error);
               toast.warning('Could not detect summary language', {
                 description: 'The meeting was saved, but Auto could not detect the summary language.',
@@ -372,18 +393,19 @@ export function useRecordingStop(
 
           // Mark meeting as saved in IndexedDB (for recovery system)
           await markMeetingAsSaved();
+          if (!isCurrent()) return;
 
           // Clean up session storage
           sessionStorage.removeItem('last_recording_folder_path');
           sessionStorage.removeItem('last_recording_meeting_name');
-          // Clean up IndexedDB meeting ID (redundant with markMeetingAsSaved cleanup, but ensures cleanup)
-          sessionStorage.removeItem('indexeddb_current_meeting_id');
 
           // Refetch meetings and set current meeting
           await refetchMeetings();
+          if (!isCurrent()) return;
 
           try {
             const meetingData = await storageService.getMeeting(meetingId);
+            if (!isCurrent()) return;
             if (meetingData) {
               setCurrentMeeting({
                 id: meetingId,
@@ -392,6 +414,7 @@ export function useRecordingStop(
               console.log('✅ Current meeting set:', meetingData.title);
             }
           } catch (error) {
+            if (!isCurrent()) return;
             console.warn('Could not fetch meeting details, using ID only:', error);
             setCurrentMeeting({ id: meetingId, title: savedMeetingName || meetingTitle || 'New Meeting' });
           }
@@ -400,15 +423,15 @@ export function useRecordingStop(
           setStatus(RecordingStatus.COMPLETED);
 
           // Record success only after the final transcript result is known.
-          if (!transcriptWarning.message) {
+          if (!stopSession.transcriptWarning) {
             Analytics.trackTranscriptionSuccess();
           }
 
           // Keep the transcript warning visible after the meeting is saved.
-          const showSavedToast = transcriptWarning.message ? toast.warning : toast.success;
-          showSavedToast(transcriptWarning.message ? 'Meeting saved. Transcript may be incomplete' : 'Recording saved successfully!', {
-            id: transcriptWarning.message ? 'recording-transcript-incomplete' : undefined,
-            description: transcriptWarning.message ?? `${freshTranscripts.length} transcript segments saved.`,
+          const showSavedToast = stopSession.transcriptWarning ? toast.warning : toast.success;
+          showSavedToast(stopSession.transcriptWarning ? 'Meeting saved. Transcript may be incomplete' : 'Recording saved successfully!', {
+            id: stopSession.transcriptWarning ? 'recording-transcript-incomplete' : undefined,
+            description: stopSession.transcriptWarning ?? `${freshTranscripts.length} transcript segments saved.`,
             action: {
               label: 'View Meeting',
               onClick: () => {
@@ -416,11 +439,12 @@ export function useRecordingStop(
                 Analytics.trackButtonClick('view_meeting_from_toast', 'recording_complete');
               }
             },
-            duration: transcriptWarning.message ? 20000 : 10000,
+            duration: stopSession.transcriptWarning ? 20000 : 10000,
           });
 
           // Auto-navigate after a short delay with source parameter
           setTimeout(() => {
+            if (!isCurrent()) return;
             router.push(`/meeting-details?id=${meetingId}&source=recording`);
             clearTranscripts()
             Analytics.trackPageView('meeting_details');
@@ -480,6 +504,7 @@ export function useRecordingStop(
           }
 
         } catch (saveError) {
+          if (!isCurrent()) return;
           const saveErrorMessage = saveError instanceof Error
             ? saveError.message
             : String(saveError || 'Unknown error');
@@ -495,10 +520,12 @@ export function useRecordingStop(
         setStatus(RecordingStatus.IDLE);
       }
 
+      if (!isCurrent()) return;
       setIsMeetingActive(false);
       // isRecording already set to false at function start
       setIsRecordingDisabled(false);
     } catch (error) {
+      if (!isCurrent()) return;
       const errorMessage = error instanceof Error
         ? error.message
         : String(error || 'Unknown error');
@@ -507,8 +534,11 @@ export function useRecordingStop(
       // isRecording already set to false at function start
       setIsRecordingDisabled(false);
     } finally {
-      // Always reset the guard flag when done
-      stopInProgressRef.current = false;
+      unlistenComplete?.();
+      // An older stop must not release a newer stop's guard.
+      if (stopInProgressRef.current === stopSession) {
+        stopInProgressRef.current = null;
+      }
     }
   }, [
     setIsRecording,

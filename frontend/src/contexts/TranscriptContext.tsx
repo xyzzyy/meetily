@@ -537,9 +537,11 @@ export function TranscriptProvider({ children }: { children: ReactNode }) {
     try {
       await indexedDBService.markMeetingSaved(meetingId);
 
-      // Clear both sources
-      setCurrentMeetingId(null);
-      sessionStorage.removeItem('indexeddb_current_meeting_id');
+      // A new recording may have started while IndexedDB was being updated.
+      setCurrentMeetingId(current => current === meetingId ? null : current);
+      if (sessionStorage.getItem('indexeddb_current_meeting_id') === meetingId) {
+        sessionStorage.removeItem('indexeddb_current_meeting_id');
+      }
     } catch (error) {
       console.error('[IndexedDB] ❌ Failed to mark meeting as saved:', error);
     }

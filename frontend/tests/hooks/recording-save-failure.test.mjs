@@ -12,6 +12,10 @@ async function loadHook({
   deferRegistration = false,
   allowSuccess = false,
   save = async () => ({ meeting_id: 'saved-meeting' }),
+  markSaved = async () => {},
+  refetch = async () => {},
+  getMeeting = async () => ({ title: 'Saved meeting' }),
+  deferNavigation = false,
 } = {}) {
   const listeners = new Map();
   const statuses = [];
@@ -19,15 +23,17 @@ async function loadHook({
   const removals = new Map();
   const pendingRegistrations = [];
   const toasts = [];
+  const navigationTimers = [];
+  const transcriptsRef = { current: [{ text: 'Keep this transcript' }] };
   const activeToasts = new Map();
   const showToast = (...args) => {
     toasts.push(args);
     activeToasts.set(args[1]?.id ?? Symbol('toast'), args);
   };
-  const calls = { save: 0, clear: 0, markSaved: 0, flush: 0, poll: 0, transcriptionSuccess: 0 };
+  const calls = { save: 0, clear: 0, markSaved: 0, flush: 0, poll: 0, transcriptionSuccess: 0, navigation: [], recording: [], disabled: [], active: [] };
   const storage = new Map();
   const recordingStatus = Object.fromEntries([
-    'IDLE', 'STOPPING', 'PROCESSING_TRANSCRIPTS', 'SAVING', 'ERROR', 'COMPLETED',
+    'IDLE', 'STOPPING', 'PROCESSING_TRANSCRIPTS', 'SAVING', 'ERROR', 'COMPLETED', 'RECORDING',
   ].map(value => [value, value]));
   const context = {
     status: 'STOPPING',
@@ -35,13 +41,13 @@ async function loadHook({
   };
   const require = (name) => {
     if (name === 'react') return React;
-    if (name === 'next/navigation') return { useRouter: () => ({ push() {} }) };
+    if (name === 'next/navigation') return { useRouter: () => ({ push: path => calls.navigation.push(path) }) };
     if (name === '@tauri-apps/api/event') return { listen: (event, callback) => {
       subscriptions.set(event, (subscriptions.get(event) || 0) + 1);
       listeners.set(event, callback);
       const unlisten = () => {
         removals.set(event, (removals.get(event) || 0) + 1);
-        listeners.delete(event);
+        if (listeners.get(event) === callback) listeners.delete(event);
       };
       return deferRegistration
         ? new Promise(resolve => pendingRegistrations.push(() => resolve(unlisten)))
@@ -60,16 +66,18 @@ async function loadHook({
       useRecordingState: () => context, RecordingStatus: recordingStatus,
     };
     if (name === '@/contexts/TranscriptContext') return { useTranscripts: () => ({
-      transcriptsRef: { current: [{ text: 'Keep this transcript' }] },
-      flushBuffer: () => calls.flush++, clearTranscripts: () => calls.clear++,
-      markMeetingAsSaved: async () => calls.markSaved++,
+      transcriptsRef,
+      flushBuffer: () => calls.flush++,
+      clearTranscripts: () => { calls.clear++; transcriptsRef.current = []; },
+      markMeetingAsSaved: async () => { calls.markSaved++; return markSaved(); },
     }) };
     if (name === '@/components/Sidebar/SidebarProvider') return { useSidebar: () => ({
-      setIsMeetingActive() {}, refetchMeetings: async () => {}, setCurrentMeeting() {},
+      setIsMeetingActive: active => calls.active.push(active),
+      refetchMeetings: refetch, setCurrentMeeting() {},
     }) };
     if (name === '@/services/storageService') return { storageService: {
       saveMeeting: async () => { calls.save++; return save(); },
-      getMeeting: async () => ({ title: 'Saved meeting' }),
+      getMeeting,
     } };
     if (name === '@/lib/summary-language-preferences') return {
       applyPinnedSummaryLanguageToMeeting: async () => true,
@@ -97,19 +105,24 @@ async function loadHook({
       setItem: (key, value) => storage.set(key, value),
       getItem: key => storage.get(key), removeItem: key => storage.delete(key),
     },
-    setTimeout: fn => fn(),
+    setTimeout: (fn, ms) => {
+      if (deferNavigation && ms === 2000) navigationTimers.push(fn);
+      else fn();
+    },
   });
   let hook;
   let renderer;
   function View() {
     // Match callers whose callback props change on every render.
-    hook = module.exports.useRecordingStop(() => {}, () => {});
+    hook = module.exports.useRecordingStop(
+      value => calls.recording.push(value), value => calls.disabled.push(value)
+    );
     return null;
   }
   await act(async () => { renderer = create(React.createElement(View)); });
   return {
     get hook() { return hook; },
-    listeners, statuses, toasts, activeToasts, calls, storage, context, subscriptions, removals, pendingRegistrations,
+    listeners, statuses, toasts, activeToasts, calls, storage, transcriptsRef, navigationTimers, context, subscriptions, removals, pendingRegistrations,
     render: () => act(async () => { renderer.update(React.createElement(View)); }),
     unmount: () => act(async () => { renderer.unmount(); }),
   };
@@ -272,24 +285,121 @@ test('a new recording clears the transcript warning before a successful stop', a
   assert.equal(state.toasts.at(-1)[0], 'Recording saved successfully!');
 });
 
-for (const pendingStep of ['transcription wait', 'meeting save']) {
-  test(`a new recording during ${pendingStep} does not clear the previous stop warning`, async t => {
+
+for (const pendingStep of ['transcription wait', 'meeting save', 'recovery update', 'meeting list', 'meeting fetch']) {
+  test(`a new recording during ${pendingStep} cancels the previous stop UI work`, async t => {
     let finishStep;
     const pending = () => new Promise(resolve => { finishStep = resolve; });
-    const state = await loadHook(pendingStep === 'meeting save' ? { save: pending } : { poll: pending });
+    const options = {
+      'transcription wait': { poll: pending }, 'meeting save': { save: pending },
+      'recovery update': { markSaved: pending }, 'meeting list': { refetch: pending },
+      'meeting fetch': { getMeeting: pending },
+    };
+    const state = await loadHook(options[pendingStep]);
     t.after(state.unmount);
     await state.listeners.get('recording-stopped')({ payload: { transcript_warning: transcriptWarning } });
     const stopping = state.hook.handleRecordingStop(true);
     await new Promise(setImmediate);
     assert.equal(typeof finishStep, 'function');
     state.listeners.get('recording-started')({ payload: {} });
-    finishStep(pendingStep === 'meeting save'
-      ? { meeting_id: 'saved-meeting' }
-      : { is_processing: false, chunks_in_queue: 0 });
+    state.transcriptsRef.current = [{ text: 'New recording transcript' }];
+    state.storage.set('indexeddb_current_meeting_id', 'new-recording');
+    state.statuses.push({ status: 'RECORDING' });
+    const changes = { statuses: state.statuses.length, active: state.calls.active.length, disabled: state.calls.disabled.length };
+    finishStep(pendingStep === 'transcription wait'
+      ? { is_processing: false, chunks_in_queue: 0 }
+      : { meeting_id: 'saved-meeting', title: 'Saved meeting' });
     await stopping;
-    assert.equal(state.calls.save, 1);
+    assert.equal(state.calls.save, pendingStep === 'transcription wait' ? 0 : 1);
     assert.equal(state.calls.transcriptionSuccess, 0);
-    assert.equal(state.toasts.at(-1)[0], 'Meeting saved. Transcript may be incomplete');
-    assert.equal(state.toasts.at(-1)[1].description, transcriptWarning);
+    assert.equal(state.calls.clear, 0);
+    assert.equal(state.calls.navigation.length, 0);
+    assert.equal(state.activeToasts.has('recording-transcript-incomplete'), false);
+    assert.equal(state.transcriptsRef.current[0].text, 'New recording transcript');
+    assert.equal(state.storage.get('indexeddb_current_meeting_id'), 'new-recording');
+    assert.equal(state.statuses.length, changes.statuses);
+    assert.equal(state.calls.active.length, changes.active);
+    assert.equal(state.calls.disabled.length, changes.disabled);
   });
 }
+
+test('a late save error cannot become success when a new recording starts', async t => {
+  let finishPoll;
+  const state = await loadHook({ poll: () => new Promise(resolve => { finishPoll = resolve; }) });
+  t.after(state.unmount);
+  const stopping = state.hook.handleRecordingStop(true);
+  await new Promise(setImmediate);
+  await state.listeners.get('recording-stopped')({ payload: { save_error: 'Previous save failed' } });
+  state.listeners.get('recording-started')({ payload: {} });
+  state.statuses.push({ status: 'RECORDING' });
+  finishPoll({ is_processing: false, chunks_in_queue: 0 });
+  await stopping;
+  assert.equal(state.calls.save, 0);
+  assert.equal(state.calls.transcriptionSuccess, 0);
+  assert.equal(state.calls.markSaved, 0);
+  assert.equal(state.statuses.at(-1).status, 'RECORDING');
+});
+
+test('a new recording cancels the prior stop delayed navigation', async t => {
+  const state = await loadHook({ allowSuccess: true, deferNavigation: true });
+  t.after(state.unmount);
+  await state.hook.handleRecordingStop(true);
+  assert.equal(state.navigationTimers.length, 1);
+  state.listeners.get('recording-started')({ payload: {} });
+  state.transcriptsRef.current = [{ text: 'New recording transcript' }];
+  state.storage.set('indexeddb_current_meeting_id', 'new-recording');
+  state.statuses.push({ status: 'RECORDING' });
+  state.navigationTimers[0]();
+  assert.equal(state.calls.clear, 0);
+  assert.equal(state.calls.navigation.length, 0);
+  assert.equal(state.transcriptsRef.current[0].text, 'New recording transcript');
+  assert.equal(state.storage.get('indexeddb_current_meeting_id'), 'new-recording');
+  assert.equal(state.statuses.at(-1).status, 'RECORDING');
+});
+
+test('a successful stop dismisses an earlier transcript warning', async t => {
+  const state = await loadHook({ allowSuccess: true });
+  t.after(state.unmount);
+  await state.listeners.get('recording-stopped')({ payload: { transcript_warning: transcriptWarning } });
+  await state.listeners.get('recording-stopped')({ payload: { transcript_warning: null } });
+  await state.hook.handleRecordingStop(true);
+  assert.equal(state.activeToasts.has('recording-transcript-incomplete'), false);
+  assert.equal(state.toasts.at(-1)[0], 'Recording saved successfully!');
+});
+
+test('an older stop cannot block or release the newer stop guard', async t => {
+  const finishSaves = [];
+  const state = await loadHook({ allowSuccess: true, save: () => new Promise(resolve => finishSaves.push(resolve)) });
+  t.after(state.unmount);
+  await state.listeners.get('recording-stopped')({ payload: { transcript_warning: transcriptWarning } });
+  const first = state.hook.handleRecordingStop(true);
+  await new Promise(setImmediate);
+  state.listeners.get('recording-started')({ payload: {} });
+  await state.listeners.get('recording-stopped')({ payload: {} });
+  const second = state.hook.handleRecordingStop(true);
+  await new Promise(setImmediate);
+  assert.equal(finishSaves.length, 2);
+  finishSaves[0]({ meeting_id: 'first-meeting' });
+  await first;
+  await state.hook.handleRecordingStop(true);
+  assert.equal(state.calls.save, 2);
+  finishSaves[1]({ meeting_id: 'second-meeting' });
+  await second;
+  assert.equal(state.calls.transcriptionSuccess, 1);
+  assert.equal(state.activeToasts.has('recording-transcript-incomplete'), false);
+});
+
+test('a rejected old meeting save cannot set the new recording to error', async t => {
+  let rejectSave;
+  const state = await loadHook({ save: () => new Promise((_, reject) => { rejectSave = reject; }) });
+  t.after(state.unmount);
+  const stopping = state.hook.handleRecordingStop(true);
+  await new Promise(setImmediate);
+  state.listeners.get('recording-started')({ payload: {} });
+  state.statuses.push({ status: 'RECORDING' });
+  rejectSave(new Error('Previous database save failed'));
+  await stopping;
+  assert.equal(state.statuses.at(-1).status, 'RECORDING');
+  assert.equal(state.toasts.length, 0);
+  assert.equal(state.calls.clear, 0);
+});
