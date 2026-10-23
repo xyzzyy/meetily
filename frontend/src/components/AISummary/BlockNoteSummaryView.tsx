@@ -27,6 +27,8 @@ interface BlockNoteSummaryViewProps {
     created_at: string;
   };
   onDirtyChange?: (isDirty: boolean) => void;
+  /** Called when a transcript reference is clicked */
+  onTranscriptRefClick?: (startTime: number, endTime: number) => void;
 }
 
 export interface BlockNoteSummaryViewRef {
@@ -74,7 +76,8 @@ export const BlockNoteSummaryView = forwardRef<BlockNoteSummaryViewRef, BlockNot
   error = null,
   onRegenerateSummary,
   meeting,
-  onDirtyChange
+  onDirtyChange,
+  onTranscriptRefClick
 }, ref) => {
   const { resolvedTheme } = useTheme();
   const { format, data } = detectSummaryFormat(summaryData);
@@ -82,6 +85,7 @@ export const BlockNoteSummaryView = forwardRef<BlockNoteSummaryViewRef, BlockNot
   const [currentBlocks, setCurrentBlocks] = useState<Block[]>([]);
   const [isSaving, setIsSaving] = useState(false);
   const isContentLoaded = useRef(false);
+  const containerRef = useRef<HTMLDivElement>(null);
 
   // Create BlockNote editor for markdown parsing
   const editor = useCreateBlockNote({
@@ -119,6 +123,80 @@ export const BlockNoteSummaryView = forwardRef<BlockNoteSummaryViewRef, BlockNot
       }, 100);
     }
   }, [format, data?.summary_json]);
+
+
+  // Make transcript references [MM:SS-MM:SS], [MM:SS–MM:SS], or [MM:SS] clickable in the rendered DOM
+  useEffect(() => {
+    if ((format !== 'markdown' && format !== 'blocknote') || !containerRef.current) return;
+
+    const root = containerRef.current;
+    // Matches [MM:SS-MM:SS], [MM:SS–MM:SS], [MM:SS—MM:SS], or single [MM:SS]
+    const TIMESTAMP_REF = /\[(\d{1,4}:\d{2})(?:[-–—](\d{1,4}:\d{2}))?\]/g;
+
+    function walkTextNodes(node: Node) {
+      if (node.nodeType === Node.TEXT_NODE) {
+        const text = node.textContent || '';
+        if (!TIMESTAMP_REF.test(text)) return;
+        TIMESTAMP_REF.lastIndex = 0;
+
+        const fragment = document.createDocumentFragment();
+        let lastIndex = 0;
+        let match: RegExpExecArray | null;
+
+        while ((match = TIMESTAMP_REF.exec(text)) !== null) {
+          if (match.index > lastIndex) {
+            fragment.appendChild(document.createTextNode(text.slice(lastIndex, match.index)));
+          }
+
+          const startParts = match[1].split(':');
+          const startM = parseInt(startParts[0], 10);
+          const startS = parseInt(startParts[1], 10);
+          const startTime = startM * 60 + startS;
+
+          let endTime = startTime;
+          if (match[2]) {
+            const endParts = match[2].split(':');
+            const endM = parseInt(endParts[0], 10);
+            const endS = parseInt(endParts[1], 10);
+            endTime = endM * 60 + endS;
+          }
+
+          const refEl = document.createElement('span');
+          refEl.textContent = match[0];
+          refEl.className = 'transcript-ref inline text-xs font-semibold text-blue-600 dark:text-blue-400 bg-blue-50 dark:bg-blue-950/40 border border-blue-200 dark:border-blue-800 rounded px-1 mx-0.5 cursor-pointer select-none hover:bg-blue-100 dark:hover:bg-blue-900/60 hover:text-blue-800 dark:hover:text-blue-300 transition-colors';
+          refEl.title = `Jump to transcript ${match[0]}`;
+          refEl.dataset.start = String(startTime);
+          refEl.dataset.end = String(endTime);
+          refEl.onclick = (e) => {
+            e.stopPropagation();
+            onTranscriptRefClick?.(startTime, endTime);
+          };
+          fragment.appendChild(refEl);
+
+          lastIndex = match.index + match[0].length;
+        }
+
+        if (lastIndex < text.length) {
+          fragment.appendChild(document.createTextNode(text.slice(lastIndex)));
+        }
+
+        node.parentNode?.replaceChild(fragment, node);
+      } else if (node.nodeType === Node.ELEMENT_NODE) {
+        const el = node as HTMLElement;
+        if (el.classList.contains('transcript-ref')) return;
+        const children = Array.from(el.childNodes);
+        for (const child of children) {
+          walkTextNodes(child);
+        }
+      }
+    }
+
+    const timer = setTimeout(() => {
+      walkTextNodes(root);
+    }, 200);
+
+    return () => clearTimeout(timer);
+  }, [format, data?.markdown, data?.summary_json, onTranscriptRefClick]);
 
   const handleEditorChange = useCallback((blocks: Block[]) => {
     // Only set dirty flag if content has finished loading
@@ -238,7 +316,7 @@ export const BlockNoteSummaryView = forwardRef<BlockNoteSummaryViewRef, BlockNot
   if (format === 'blocknote') {
     console.log('🎨 Rendering BLOCKNOTE format (direct)');
     return (
-      <div className="flex flex-col w-full">
+      <div ref={containerRef} className="flex flex-col w-full">
         <div className="w-full">
           <Editor
             initialContent={data.summary_json}
@@ -257,7 +335,7 @@ export const BlockNoteSummaryView = forwardRef<BlockNoteSummaryViewRef, BlockNot
   if (format === 'markdown') {
     console.log('🎨 Rendering MARKDOWN format (parsed to BlockNote)');
     return (
-      <div className="flex flex-col w-full">
+      <div ref={containerRef} className="flex flex-col w-full">
         <div className="w-full">
           <BlockNoteView
             editor={editor}

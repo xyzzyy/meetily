@@ -2,6 +2,7 @@ use crate::summary::llm_client::{generate_summary, LLMProvider};
 use crate::summary::templates::Template;
 use once_cell::sync::Lazy;
 use regex::Regex;
+use serde::{Deserialize, Serialize};
 use reqwest::Client;
 use std::path::PathBuf;
 use tokio_util::sync::CancellationToken;
@@ -12,6 +13,21 @@ static THINK_ENVELOPE_REGEX: Lazy<Regex> = Lazy::new(|| {
 });
 static THINK_MARKER_REGEX: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"(?is)</?think(?:ing)?(?:\s+[^>]*)?>").unwrap());
+
+/// Matches timestamp references like [14:32-15:18], [14:32–15:18], or single [14:32]
+static REFERENCE_REGEX: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"\[(\d{1,4}):(\d{2})(?:[-–—](\d{1,4}):(\d{2}))?\]").unwrap()
+});
+
+/// A parsed transcript reference extracted from the summary markdown.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TranscriptReference {
+    /// Start time in seconds
+    pub start_time: f64,
+    /// End time in seconds
+    pub end_time: f64,
+}
+
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CleanedLlmMarkdown {
@@ -78,6 +94,15 @@ fn should_retry_chunk_failure(
 
 const ENGLISH_BASE_SUMMARY_INSTRUCTION: &str =
     "**Write the summary/report in English regardless of transcript language; non-English prose is invalid.**";
+
+const REFERENCE_INSTRUCTION: &str = "**TRANSCRIPT REFERENCE REQUIREMENT:**\
+\nAfter each key point, decision, action item, or important detail, include the \
+timestamp range from the transcript where this was discussed, in the format `[MM:SS-MM:SS]`.\
+Use the `[MM:SS]` prefixes shown in the transcript text.\
+\nExample: \"Decision: Migrate authentication to OAuth2. [14:32-15:18]\"\
+\nExample: \"Alice will prepare the migration plan. [27:41-28:05]\"\
+\nInclude the reference at the end of each relevant item.";
+
 
 fn resolve_cached_english<'a>(
     cached: Option<&'a str>,
@@ -217,13 +242,13 @@ fn translation_system_prompt(target_language: &str) -> String {
 
 fn build_chunk_summary_user_prompt(chunk: &str) -> String {
     format!(
-        "{ENGLISH_BASE_SUMMARY_INSTRUCTION}\n\nProvide a concise but comprehensive summary of the following transcript chunk. Capture all key points, decisions, action items, and mentioned individuals. Do not include reasoning, self-correction, or meta-commentary — output only the summary content.\n\n<transcript_chunk>\n{chunk}\n</transcript_chunk>"
+        "{ENGLISH_BASE_SUMMARY_INSTRUCTION}\n\n{REFERENCE_INSTRUCTION}\n\nProvide a concise but comprehensive summary of the following transcript chunk. Capture all key points, decisions, action items, and mentioned individuals. Do not include reasoning, self-correction, or meta-commentary — output only the summary content.\n\n<transcript_chunk>\n{chunk}\n</transcript_chunk>"
     )
 }
 
 fn build_combine_summary_user_prompt(combined_text: &str) -> String {
     format!(
-        "{ENGLISH_BASE_SUMMARY_INSTRUCTION}\n\nThe following are consecutive summaries of a meeting. Combine them into a single, coherent, and detailed narrative summary that retains all important details, organized logically. Do not include reasoning, self-correction, or meta-commentary — output only the summary content.\n\n<summaries>\n{combined_text}\n</summaries>"
+        "{ENGLISH_BASE_SUMMARY_INSTRUCTION}\n\n{REFERENCE_INSTRUCTION}\n\nThe following are consecutive summaries of a meeting. Combine them into a single, coherent, and detailed narrative summary that retains all important details, organized logically. Preserve the transcript timestamp references from the individual summaries. Do not include reasoning, self-correction, or meta-commentary — output only the summary content.\n\n<summaries>\n{combined_text}\n</summaries>"
     )
 }
 fn build_final_report_system_prompt(
@@ -241,7 +266,8 @@ fn build_final_report_system_prompt(
 5. If a section has no relevant info, write "None noted in this section."
 6. Output **only** the completed Markdown report.
 7. Do not include reasoning, thinking, self-correction, decision strategy, or any meta-commentary sections — output only the completed Markdown report.
-8. If unsure about something, omit it.
+8. {REFERENCE_INSTRUCTION}
+9. If unsure about something, omit it.
 
 **SECTION-SPECIFIC INSTRUCTIONS:**
 {section_instructions}
@@ -335,6 +361,30 @@ pub fn chunk_text(text: &str, chunk_size_tokens: usize, overlap_tokens: usize) -
 
     info!("Created {} chunks from text", chunks.len());
     chunks
+}
+
+/// Extracts transcript timestamp references from markdown text.
+///
+/// Finds all `[MM:SS-MM:SS]`, `[MM:SS–MM:SS]`, or single `[MM:SS]` patterns and converts
+/// them to structured `TranscriptReference` values with start/end times in seconds.
+pub fn extract_transcript_references(markdown: &str) -> Vec<TranscriptReference> {
+    let mut refs = Vec::new();
+    for cap in REFERENCE_REGEX.captures_iter(markdown) {
+        let start_m: f64 = cap[1].parse().unwrap_or(0.0);
+        let start_s: f64 = cap[2].parse().unwrap_or(0.0);
+        let start_time = start_m * 60.0 + start_s;
+        let end_time = if let (Some(m_str), Some(s_str)) = (cap.get(3), cap.get(4)) {
+            let end_m: f64 = m_str.as_str().parse().unwrap_or(start_m);
+            let end_s: f64 = s_str.as_str().parse().unwrap_or(start_s);
+            end_m * 60.0 + end_s
+        } else {
+            start_time
+        };
+        if end_time >= start_time {
+            refs.push(TranscriptReference { start_time, end_time });
+        }
+    }
+    refs
 }
 
 /// Extracts meeting name from the first heading in markdown
@@ -916,5 +966,70 @@ mod tests {
         assert_eq!(cleaned.markdown, markdown);
         assert!(!cleaned.reasoning_stripped);
         assert_eq!(clean_llm_markdown_detailed(markdown).markdown, markdown);
+    }
+
+    // extract_transcript_references -------------------------------------------
+
+    #[test]
+    fn extracts_single_reference_hyphen() {
+        let refs = extract_transcript_references("Decision: Migrate to OAuth2. [14:32-15:18]");
+        assert_eq!(refs.len(), 1);
+        assert!((refs[0].start_time - 872.0).abs() < f64::EPSILON);
+        assert!((refs[0].end_time - 918.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn extracts_reference_with_en_dash() {
+        let refs = extract_transcript_references("Decision: Migrate to OAuth2. [14:32–15:18]");
+        assert_eq!(refs.len(), 1);
+        assert!((refs[0].start_time - 872.0).abs() < f64::EPSILON);
+        assert!((refs[0].end_time - 918.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn extracts_multiple_references() {
+        let refs = extract_transcript_references(
+            "First point. [01:05-02:30]
+Second point. [27:41–28:05]"
+        );
+        assert_eq!(refs.len(), 2);
+        assert!((refs[0].start_time - 65.0).abs() < f64::EPSILON);
+        assert!((refs[1].start_time - 1661.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn extracts_single_digit_and_long_minutes() {
+        let refs = extract_transcript_references("[1:23-4:56] and [125:10-126:40]");
+        assert_eq!(refs.len(), 2);
+        assert!((refs[0].start_time - 83.0).abs() < f64::EPSILON);
+        assert!((refs[0].end_time - 296.0).abs() < f64::EPSILON);
+        assert!((refs[1].start_time - 7510.0).abs() < f64::EPSILON);
+        assert!((refs[1].end_time - 7600.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn extracts_single_timestamp_as_point_in_time() {
+        let refs = extract_transcript_references("Key moment: [05:30]");
+        assert_eq!(refs.len(), 1);
+        assert!((refs[0].start_time - 330.0).abs() < f64::EPSILON);
+        assert!((refs[0].end_time - 330.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn no_references_returns_empty() {
+        let refs = extract_transcript_references("Just a plain summary without timestamps.");
+        assert!(refs.is_empty());
+    }
+
+    #[test]
+    fn prompt_tests_check_reference_instructions() {
+        let chunk_prompt = build_chunk_summary_user_prompt("chunk text");
+        assert!(chunk_prompt.contains(REFERENCE_INSTRUCTION));
+
+        let combine_prompt = build_combine_summary_user_prompt("combine text");
+        assert!(combine_prompt.contains(REFERENCE_INSTRUCTION));
+
+        let final_prompt = build_final_report_system_prompt("instructions", "template");
+        assert!(final_prompt.contains(REFERENCE_INSTRUCTION));
     }
 }

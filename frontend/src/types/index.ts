@@ -96,9 +96,16 @@ export interface BlockNoteBlock {
   children?: BlockNoteBlock[];
 }
 
+// Transcript reference linking summary items to transcript segments
+export interface TranscriptReference {
+  startTime: number; // Seconds from recording start
+  endTime: number;   // Seconds from recording start
+}
+
 export interface SummaryDataResponse {
   markdown?: string;
   summary_json?: BlockNoteBlock[];
+  transcript_references?: TranscriptReference[];
   reasoning_stripped?: boolean;
   normalization_fallback?: boolean;
   // Legacy format fields
