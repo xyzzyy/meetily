@@ -271,6 +271,19 @@ export function ParakeetModelManager({
           description: 'The download is still shutting down. Retry will be available when cleanup completes.',
           duration: 4000
         });
+      } else {
+        // The engine sends no terminal event when nothing was downloading, for
+        // example after the transfer finished. Read its state instead of
+        // keeping the card on a cancellation that will never be reported.
+        clearCancellingModel(modelName);
+        const modelList = await ParakeetAPI.getAvailableModels();
+        for (const model of modelList) {
+          latestStatusByModelRef.current.set(model.name, model.status);
+        }
+        setModels(modelList);
+        setDownloadingModels(new Set(modelList
+          .filter(model => typeof model.status === 'object' && 'Downloading' in model.status)
+          .map(model => model.name)));
       }
     } catch (err) {
       clearCancellingModel(modelName);

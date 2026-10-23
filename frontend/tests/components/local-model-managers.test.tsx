@@ -149,3 +149,23 @@ for (const engine of engines) {
     expect(errorToast.mock.calls.length).toBe(1);
   });
 }
+
+test('Parakeet: a cancel with nothing to cancel refreshes the card instead of waiting for an event', async () => {
+  const parakeet = engines[1];
+  available = [{ ...parakeet.model, status: { Downloading: { progress: 99 } } }];
+  reply = command => {
+    if (command === 'parakeet_cancel_download') {
+      // The transfer finished before the request: the engine answers without an event.
+      available = [{ ...parakeet.model }];
+      return 'cancelled';
+    }
+    return command === 'parakeet_get_available_models' ? available : undefined;
+  };
+  await act(async () => { renderer = create(<ParakeetModelManager selectedModel="previous" onModelSelect={selected} autoSave />); });
+  const cancel = renderer!.root.findAllByProps({ title: 'Cancel download' }).find(node => node.type === 'button')!;
+  await act(async () => { await cancel.props.onClick(); });
+  const text = JSON.stringify(renderer!.toJSON());
+  expect(text).not.toContain('Cancellation requested');
+  expect(text).toContain('Ready');
+  expect(renderer!.root.findAllByType('progress')).toHaveLength(0);
+});
