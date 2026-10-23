@@ -26,6 +26,14 @@ export interface TranscriptSettingsProps {
 /** Providers that run on this device and manage their own models. */
 const LOCAL_PROVIDERS = new Set(['localWhisper', 'parakeet', 'funasr']);
 const isLocalProvider = (provider: string) => LOCAL_PROVIDERS.has(provider);
+type LocalProvider = 'localWhisper' | 'parakeet' | 'funasr';
+
+/** What sets each local engine apart, shown above its models. */
+const LOCAL_ENGINE_NOTES: Record<LocalProvider, string> = {
+    localWhisper: 'Runs on this device and uses GPU acceleration when available. Larger models are more accurate but slower and need more disk space.',
+    parakeet: 'Runs on this device and is fast enough for real-time transcription. Precise is larger and more accurate; Lightning and Compact are smaller and faster.',
+    funasr: 'Runs on this device on the CPU (no GPU acceleration yet). Supports auto-detect, English, Chinese and Japanese. Needs a one-time download of about 950 MB: a shared speech encoder plus the decoder you choose.',
+};
 
 export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelConfig, onModelSelect }: TranscriptSettingsProps) {
     const [apiKey, setApiKey] = useState<string | null>(transcriptModelConfig.apiKey || null);
@@ -74,24 +82,11 @@ export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelCo
         }
     };
 
-    const handleWhisperModelSelect = (modelName: string) => {
-        // Always update config when model is selected, regardless of current provider
-        // This ensures the model is set when user switches back
+    // The managers save a selection before reporting it; mirror it and close the modal.
+    const handleLocalModelSelect = (provider: LocalProvider) => (modelName: string) => {
         setTranscriptModelConfig({
             ...transcriptModelConfig,
-            provider: 'localWhisper', // Ensure provider is set correctly
-            model: modelName
-        });
-        // Close modal after selection
-        if (onModelSelect) {
-            onModelSelect();
-        }
-    };
-
-    const handleFunAsrModelSelect = (modelName: string) => {
-        setTranscriptModelConfig({
-            ...transcriptModelConfig,
-            provider: 'funasr',
+            provider,
             model: modelName
         });
         if (onModelSelect) {
@@ -99,19 +94,11 @@ export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelCo
         }
     };
 
-    const handleParakeetModelSelect = (modelName: string) => {
-        // Always update config when model is selected, regardless of current provider
-        // This ensures the model is set when user switches back
-        setTranscriptModelConfig({
-            ...transcriptModelConfig,
-            provider: 'parakeet', // Ensure provider is set correctly
-            model: modelName
-        });
-        // Close modal after selection
-        if (onModelSelect) {
-            onModelSelect();
-        }
-    };
+    const localManagerProps = (provider: LocalProvider) => ({
+        selectedModel: transcriptModelConfig.provider === provider ? transcriptModelConfig.model : undefined,
+        onModelSelect: handleLocalModelSelect(provider),
+        autoSave: true,
+    });
 
     return (
         <div>
@@ -177,38 +164,14 @@ export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelCo
                         </p>
                     )}
 
-                    {uiProvider === 'localWhisper' && (
-                        <div className="mt-6">
-                            <ModelManager
-                                selectedModel={transcriptModelConfig.provider === 'localWhisper' ? transcriptModelConfig.model : undefined}
-                                onModelSelect={handleWhisperModelSelect}
-                                autoSave={true}
-                            />
-                        </div>
-                    )}
-
-                    {uiProvider === 'parakeet' && (
-                        <div className="mt-6">
-                            <ParakeetModelManager
-                                selectedModel={transcriptModelConfig.provider === 'parakeet' ? transcriptModelConfig.model : undefined}
-                                onModelSelect={handleParakeetModelSelect}
-                                autoSave={true}
-                            />
-                        </div>
-                    )}
-
-                    {uiProvider === 'funasr' && (
+                    {!!uiProvider && isLocalProvider(uiProvider) && (
                         <div className="mt-6 space-y-3">
                             <p className="text-sm text-muted-foreground">
-                                Runs on this device on the CPU (no GPU acceleration yet). Supports auto-detect,
-                                English, Chinese and Japanese. Needs a one-time download of about 950 MB:
-                                a shared speech encoder plus the decoder you choose.
+                                {LOCAL_ENGINE_NOTES[uiProvider as LocalProvider]}
                             </p>
-                            <FunAsrModelManager
-                                selectedModel={transcriptModelConfig.provider === 'funasr' ? transcriptModelConfig.model : undefined}
-                                onModelSelect={handleFunAsrModelSelect}
-                                autoSave={true}
-                            />
+                            {uiProvider === 'localWhisper' && <ModelManager {...localManagerProps('localWhisper')} />}
+                            {uiProvider === 'parakeet' && <ParakeetModelManager {...localManagerProps('parakeet')} />}
+                            {uiProvider === 'funasr' && <FunAsrModelManager {...localManagerProps('funasr')} />}
                         </div>
                     )}
 

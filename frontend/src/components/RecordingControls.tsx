@@ -133,7 +133,7 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
       } else {
         setDeviceError({
           title: 'Recording Failed',
-          message: 'Unable to start recording. Please check your audio device settings and try again.'
+          message: errorMsg || 'Unable to start recording. Please check your audio device settings and try again.'
         });
       }
     }
@@ -148,11 +148,15 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
       const savePath = `${dataDir}/recording-${timestamp}.wav`;
       console.log('Saving recording to:', savePath);
       console.log('About to call stop_recording command');
-      const result = await invoke('stop_recording', {
+      const result = await invoke<boolean>('stop_recording', {
         args: {
           save_path: savePath
         }
       });
+      if (!result) {
+        setIsProcessing(false);
+        return;
+      }
       console.log('stop_recording command completed successfully:', result);
       setRecordingPath(savePath);
       // setShowPlayback(true);

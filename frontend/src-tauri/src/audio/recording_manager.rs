@@ -242,10 +242,11 @@ impl RecordingManager {
         let (transcription_sender, transcription_receiver) = mpsc::unbounded_channel::<AudioChunk>();
         let (recording_sender, recording_receiver) = mpsc::unbounded_channel::<AudioChunk>();
 
+        // Check storage before starting the state, pipeline, or audio streams.
+        self.recording_saver.prepare_meeting_folder(auto_save)?;
+        self.recording_saver.start_accumulation(auto_save, recording_receiver)?;
+
         let stem_sender = if self.diarization_enabled && auto_save {
-            // Stems need the folder before the pipeline starts. Without stems,
-            // start_accumulation creates it after the pipeline starts.
-            self.recording_saver.prepare_meeting_folder(auto_save);
             self.recording_saver
                 .get_meeting_folder()
                 .and_then(|folder| match DiarizationStemSaver::start(folder, auto_save) {
@@ -312,7 +313,6 @@ impl RecordingManager {
             return Err(RecordingStartError::TranscriptionRuntime(error));
         }
 
-        self.recording_saver.start_accumulation(auto_save, recording_receiver);
         self.recording_saver.set_device_info(
             microphone_device.as_ref().map(|d| d.name.clone()),
             system_device.as_ref().map(|d| d.name.clone())
@@ -416,11 +416,9 @@ impl RecordingManager {
         info!("Recording duration from state: {:?}s", recording_duration);
 
         // Save the recording with actual duration
-        match self
-            .recording_saver
-            .stop_and_save(app, recording_duration)
-            .await
-        {
+        let save_result = self.recording_saver.stop_and_save(app, recording_duration).await;
+        self.finalize_diarization_stems().await;
+        match save_result {
             Ok(Some(file_path)) => {
                 info!("Recording saved successfully to: {}", file_path);
             }
@@ -429,12 +427,11 @@ impl RecordingManager {
             }
             Err(e) => {
                 error!("Failed to save recording: {}", e);
-                // Don't fail the stop operation if saving fails
+                return Err(anyhow::anyhow!(e));
             }
         }
 
         debug!("Recording save operation completed");
-        self.finalize_diarization_stems().await;
         Ok(())
     }
 
@@ -461,14 +458,11 @@ impl RecordingManager {
         if let Err(e) = self.pipeline_manager.stop().await {
             error!("Error stopping audio pipeline: {}", e);
         }
-        self.finalize_diarization_stems().await;
 
         // Save the recording with actual duration
-        match self
-            .recording_saver
-            .stop_and_save(app, recording_duration)
-            .await
-        {
+        let save_result = self.recording_saver.stop_and_save(app, recording_duration).await;
+        self.finalize_diarization_stems().await;
+        match save_result {
             Ok(Some(file_path)) => {
                 info!("Recording saved successfully to: {}", file_path);
             }
@@ -477,7 +471,7 @@ impl RecordingManager {
             }
             Err(e) => {
                 error!("Failed to save recording: {}", e);
-                // Don't fail the stop operation if saving fails
+                return Err(anyhow::anyhow!(e));
             }
         }
 

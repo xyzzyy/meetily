@@ -1,8 +1,6 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { listen } from '@tauri-apps/api/event';
-import { invoke } from '@tauri-apps/api/core';
 import { confirm } from '@tauri-apps/plugin-dialog';
-import { motion, AnimatePresence } from 'framer-motion';
 import { toast } from 'sonner';
 import {
   ModelStatus,
@@ -13,6 +11,17 @@ import {
   getModelDisplayInfo,
   getModelDisplayName
 } from '../lib/parakeet';
+import { useModelSelection } from '@/hooks/useModelSelection';
+import {
+  ModelListError,
+  ModelListSkeleton,
+  SelectedModelNote,
+  TranscriptionModelCard,
+  errorMessage,
+  modelCardStatus
+} from './TranscriptionModelCard';
+
+const RECOMMENDED_MODEL = 'parakeet-tdt-0.6b-v3-int8';
 
 interface ParakeetModelManagerProps {
   selectedModel?: string;
@@ -34,15 +43,12 @@ export function ParakeetModelManager({
   const [listenersReady, setListenersReady] = useState(false);
   const [downloadingModels, setDownloadingModels] = useState<Set<string>>(new Set());
   const [cancellingModels, setCancellingModels] = useState<Set<string>>(new Set());
-
-  // Refs for stable callbacks
-  const onModelSelectRef = useRef(onModelSelect);
-  const autoSaveRef = useRef(autoSave);
-
-  useEffect(() => {
-    onModelSelectRef.current = onModelSelect;
-    autoSaveRef.current = autoSave;
-  }, [onModelSelect, autoSave]);
+  const { savingModel, selectModel } = useModelSelection({
+    provider: 'parakeet',
+    autoSave,
+    onModelSelect,
+    displayName: getModelDisplayName
+  });
 
   // Progress throttle map to prevent rapid updates
   const progressThrottleRef = useRef<Map<string, { progress: number; timestamp: number }>>(new Map());
@@ -63,11 +69,16 @@ export function ParakeetModelManager({
       try {
         setLoading(true);
         await ParakeetAPI.init();
+        // The engine reports active downloads with their latest progress.
         const modelList = await ParakeetAPI.getAvailableModels();
-        setModels(modelList.map(model => ({
+        const restored = modelList.map(model => ({
           ...model,
           status: latestStatusByModelRef.current.get(model.name) ?? model.status
-        })));
+        }));
+        setModels(restored);
+        setDownloadingModels(new Set(restored
+          .filter(model => typeof model.status === 'object' && 'Downloading' in model.status)
+          .map(model => model.name)));
 
         setInitialized(true);
       } catch (err) {
@@ -148,8 +159,7 @@ export function ParakeetModelManager({
           'parakeet-model-download-complete',
           (event) => {
             const { modelName } = event.payload;
-            const displayInfo = getModelDisplayInfo(modelName);
-            const displayName = displayInfo?.friendlyName || modelName;
+            const displayName = getModelDisplayName(modelName);
             latestStatusByModelRef.current.set(modelName, 'Available');
             clearCancellingModel(modelName);
 
@@ -170,18 +180,11 @@ export function ParakeetModelManager({
             // Clean up throttle data
             progressThrottleRef.current.delete(modelName);
 
-            toast.success(`${displayInfo?.icon || '✓'} ${displayName} ready!`, {
-              description: 'Model downloaded and ready to use',
+            // Keep the saved model until the user chooses the new one.
+            toast.success(`${displayName} is ready`, {
+              description: 'Select it to use it for transcription.',
               duration: 4000
             });
-
-            // Auto-select after download using stable refs
-            if (onModelSelectRef.current) {
-              onModelSelectRef.current(modelName);
-              if (autoSaveRef.current) {
-                saveModelSelection(modelName);
-              }
-            }
           }
         ),
         listen<{ modelName: string; error: string }>(
@@ -256,18 +259,6 @@ export function ParakeetModelManager({
     };
   }, []); // Empty dependency array - listeners use refs for stable callbacks
 
-  const saveModelSelection = async (modelName: string) => {
-    try {
-      await invoke('api_save_transcript_config', {
-        provider: 'parakeet',
-        model: modelName,
-        apiKey: null
-      });
-    } catch (error) {
-      console.error('Failed to save model selection:', error);
-    }
-  };
-
   const cancelDownload = async (modelName: string) => {
     const displayInfo = getModelDisplayInfo(modelName);
     const displayName = displayInfo?.friendlyName || modelName;
@@ -280,6 +271,19 @@ export function ParakeetModelManager({
           description: 'The download is still shutting down. Retry will be available when cleanup completes.',
           duration: 4000
         });
+      } else {
+        // The engine sends no terminal event when nothing was downloading, for
+        // example after the transfer finished. Read its state instead of
+        // keeping the card on a cancellation that will never be reported.
+        clearCancellingModel(modelName);
+        const modelList = await ParakeetAPI.getAvailableModels();
+        for (const model of modelList) {
+          latestStatusByModelRef.current.set(model.name, model.status);
+        }
+        setModels(modelList);
+        setDownloadingModels(new Set(modelList
+          .filter(model => typeof model.status === 'object' && 'Downloading' in model.status)
+          .map(model => model.name)));
       }
     } catch (err) {
       clearCancellingModel(modelName);
@@ -295,9 +299,6 @@ export function ParakeetModelManager({
     if (downloadingModels.has(modelName) || cancellingModels.has(modelName)) return;
     clearCancellingModel(modelName);
 
-    const displayInfo = getModelDisplayInfo(modelName);
-    const displayName = displayInfo?.friendlyName || modelName;
-
     try {
       setDownloadingModels(prev => new Set([...prev, modelName]));
 
@@ -309,11 +310,6 @@ export function ParakeetModelManager({
         )
       );
 
-      toast.info(`Downloading ${displayName}...`, {
-        description: 'This may take a few minutes',
-        duration: 5000  // Auto-dismiss after 5 seconds
-      });
-
       await ParakeetAPI.downloadModel(modelName);
     } catch (err) {
       console.error('Download failed:', err);
@@ -323,38 +319,29 @@ export function ParakeetModelManager({
         return newSet;
       });
 
-      const errorMessage = err instanceof Error ? err.message : 'Download failed';
+      const message = errorMessage(err) || 'Download failed';
       setModels(prev =>
         prev.map(model =>
-          model.name === modelName ? { ...model, status: { Error: errorMessage } } : model
+          model.name === modelName ? { ...model, status: { Error: message } } : model
         )
       );
     }
   };
 
-  const selectModel = async (modelName: string) => {
-    if (onModelSelect) {
-      onModelSelect(modelName);
-    }
-
-    if (autoSave) {
-      await saveModelSelection(modelName);
-    }
-
-    const displayInfo = getModelDisplayInfo(modelName);
-    const displayName = displayInfo?.friendlyName || modelName;
-    toast.success(`Switched to ${displayName}`, {
-      duration: 3000
-    });
-  };
-
   const deletionPendingRef = useRef(false);
 
-  const deleteModel = async (modelName: string) => {
+  const deleteModel = async (model: ParakeetModelInfo) => {
+    const modelName = model.name;
+    const displayName = getModelDisplayName(modelName);
+    // A ready selected model must be replaced before it is removed. Damaged or
+    // partial files of the selected model can still be deleted: that selection
+    // was already unusable, and SelectedModelNote says so.
+    if (selectedModel === modelName && model.status === 'Available') {
+      toast.error('Select another model before deleting this one');
+      return;
+    }
     if (deletionPendingRef.current) return;
     deletionPendingRef.current = true;
-    const displayInfo = getModelDisplayInfo(modelName);
-    const displayName = displayInfo?.friendlyName || modelName;
     try {
       const confirmed = await confirm(
         `Delete transcription model ${displayName}? This will remove it from disk.`,
@@ -373,11 +360,6 @@ export function ParakeetModelManager({
         description: 'Model removed to free up space',
         duration: 3000
       });
-
-      // If deleted model was selected, clear selection
-      if (selectedModel === modelName && onModelSelect) {
-        onModelSelect('');
-      }
     } catch (err) {
       console.error('Failed to delete model:', err);
       toast.error(`Failed to delete ${displayName}`, {
@@ -390,317 +372,52 @@ export function ParakeetModelManager({
   };
 
   if (loading) {
-    return (
-      <div className={`space-y-3 ${className}`}>
-        <div className="animate-pulse space-y-3">
-          <div className="h-20 bg-gray-100 dark:bg-ink-800 rounded-lg"></div>
-          <div className="h-20 bg-gray-100 dark:bg-ink-800 rounded-lg"></div>
-        </div>
-      </div>
-    );
+    return <div className={className}><ModelListSkeleton rows={2} /></div>;
   }
 
   if (error) {
-    return (
-      <div className={`bg-red-50 dark:bg-red-500/10 border border-red-200 dark:border-red-500/30 rounded-lg p-4 ${className}`}>
-        <p className="text-sm text-red-800 dark:text-red-200">Failed to load models</p>
-        <p className="text-xs text-red-600 dark:text-red-400 mt-1">{error}</p>
-      </div>
-    );
+    return <div className={className}><ModelListError message={error} /></div>;
   }
 
-  const recommendedModel = models.find(m =>
-    m.name === 'parakeet-tdt-0.6b-v3-int8'
-  );
-  const otherModels = models.filter(m =>
-    m.name !== 'parakeet-tdt-0.6b-v3-int8'
-  );
+  // Recommended model first, then the others in engine order.
+  const orderedModels = [
+    ...models.filter(model => model.name === RECOMMENDED_MODEL),
+    ...models.filter(model => model.name !== RECOMMENDED_MODEL)
+  ];
 
   return (
     <div className={`space-y-3 ${className}`}>
-      {/* Recommended Model */}
-      {recommendedModel && (
-        <ModelCard
-          model={recommendedModel}
-          isSelected={selectedModel === recommendedModel.name}
-          isRecommended={true}
-          onSelect={() => {
-            if (recommendedModel.status === 'Available') {
-              selectModel(recommendedModel.name);
-            }
-          }}
-          onDownload={() => downloadModel(recommendedModel.name)}
-          onCancel={() => cancelDownload(recommendedModel.name)}
-          onDelete={() => deleteModel(recommendedModel.name)}
-          isDownloading={downloadingModels.has(recommendedModel.name)}
-          isCancelling={cancellingModels.has(recommendedModel.name)}
-        />
-      )}
+      {orderedModels.map(model => {
+        const displayInfo = getModelDisplayInfo(model.name);
+        return (
+          <TranscriptionModelCard
+            key={model.name}
+            displayName={getModelDisplayName(model.name)}
+            icon={displayInfo?.icon || '📦'}
+            description={displayInfo?.tagline || model.description}
+            details={[formatFileSize(model.size_mb), `${model.quantization} weights`]}
+            recommended={model.name === RECOMMENDED_MODEL}
+            selected={selectedModel === model.name}
+            saving={savingModel === model.name}
+            selectionLocked={savingModel !== null}
+            status={modelCardStatus(model.status, {
+              cancelling: cancellingModels.has(model.name),
+              detail: progress => model.size_mb
+                ? `${formatFileSize(Math.round(model.size_mb * progress / 100))} / ${formatFileSize(model.size_mb)}`
+                : undefined
+            })}
+            onSelect={() => selectModel(model.name)}
+            onDownload={() => downloadModel(model.name)}
+            onCancel={() => cancelDownload(model.name)}
+            onDelete={() => deleteModel(model)}
+          />
+        );
+      })}
 
-      {/* Other Models */}
-      {otherModels.length > 0 && (
-        <div className="space-y-3">
-          {otherModels.map(model => (
-            <ModelCard
-              key={model.name}
-              model={model}
-              isSelected={selectedModel === model.name}
-              isRecommended={false}
-              onSelect={() => {
-                if (model.status === 'Available') {
-                  selectModel(model.name);
-                }
-              }}
-              onDownload={() => downloadModel(model.name)}
-              onCancel={() => cancelDownload(model.name)}
-              onDelete={() => deleteModel(model.name)}
-              isDownloading={downloadingModels.has(model.name)}
-              isCancelling={cancellingModels.has(model.name)}
-            />
-          ))}
-        </div>
-      )}
-
-      {/* Helper text */}
-      {selectedModel && (
-        <motion.div
-          initial={{ opacity: 0, y: -5 }}
-          animate={{ opacity: 1, y: 0 }}
-          className="text-xs text-gray-500 dark:text-ink-400 text-center pt-2"
-        >
-          Using {getModelDisplayName(selectedModel)} for transcription
-        </motion.div>
-      )}
+      <SelectedModelNote
+        displayName={selectedModel ? getModelDisplayName(selectedModel) : undefined}
+        ready={models.some(model => model.name === selectedModel && model.status === 'Available')}
+      />
     </div>
-  );
-}
-
-// Model Card Component
-interface ModelCardProps {
-  model: ParakeetModelInfo;
-  isSelected: boolean;
-  isRecommended: boolean;
-  onSelect: () => void;
-  onDownload: () => void;
-  onCancel: () => void;
-  onDelete: () => void;
-  isDownloading: boolean;
-  isCancelling: boolean;
-}
-
-function ModelCard({
-  model,
-  isSelected,
-  isRecommended,
-  onSelect,
-  onDownload,
-  onCancel,
-  onDelete,
-  isDownloading,
-  isCancelling
-}: ModelCardProps) {
-  const [isHovered, setIsHovered] = useState(false);
-  const displayInfo = getModelDisplayInfo(model.name);
-  const displayName = displayInfo?.friendlyName || model.name;
-  const icon = displayInfo?.icon || '📦';
-  const tagline = displayInfo?.tagline || model.description || '';
-
-  const isAvailable = model.status === 'Available';
-  const isMissing = model.status === 'Missing';
-  const isError = typeof model.status === 'object' && 'Error' in model.status;
-  const isCorrupted = typeof model.status === 'object' && 'Corrupted' in model.status;
-  const downloadProgress =
-    typeof model.status === 'object' && 'Downloading' in model.status
-      ? model.status.Downloading.progress
-      : null;
-  const displayedProgress = downloadProgress ?? 0;
-
-  return (
-    <motion.div
-      initial={{ opacity: 0, y: 5 }}
-      animate={{ opacity: 1, y: 0 }}
-      transition={{ duration: 0.2 }}
-      onMouseEnter={() => setIsHovered(true)}
-      onMouseLeave={() => setIsHovered(false)}
-      className={`
-        relative rounded-lg border-2 transition-all cursor-pointer
-        ${isSelected && isAvailable
-          ? 'border-blue-500 bg-blue-50 dark:bg-blue-500/10'
-          : isAvailable
-            ? 'border-gray-200 dark:border-ink-800 hover:border-gray-300 dark:hover:border-ink-700 bg-white dark:bg-ink-900'
-            : 'border-gray-200 dark:border-ink-800 bg-gray-50 dark:bg-ink-800/50'
-        }
-        ${isAvailable ? '' : 'cursor-default'}
-      `}
-      onClick={() => {
-        if (isAvailable) onSelect();
-      }}
-    >
-      {/* Recommended Badge */}
-      {isRecommended && (
-        <div className="absolute -top-2 -right-2 bg-blue-600 text-white text-xs px-2 py-0.5 rounded-full font-medium">
-          Recommended
-        </div>
-      )}
-
-      <div className="p-4">
-        <div className="flex items-start justify-between mb-3">
-          <div className="flex-1">
-            {/* Model Name */}
-            <div className="flex items-center gap-2 mb-1">
-              <span className="text-2xl">{icon}</span>
-              <h3 className="font-semibold text-gray-900 dark:text-ink-100">{displayName}</h3>
-              {isSelected && isAvailable && (
-                <motion.span
-                  initial={{ scale: 0 }}
-                  animate={{ scale: 1 }}
-                  className="bg-blue-600 text-white px-2 py-0.5 rounded-full text-xs font-medium flex items-center gap-1"
-                >
-                  ✓
-                </motion.span>
-              )}
-            </div>
-
-            {/* Tagline */}
-            <p className="text-sm text-gray-600 dark:text-ink-300 ml-9">{tagline}</p>
-          </div>
-
-          {/* Status/Action */}
-          <div className="ml-4 flex items-center gap-2">
-            {isAvailable && !isCancelling && (
-              <>
-                <div className="flex items-center gap-1.5 text-green-600 dark:text-green-400">
-                  <div className="w-2 h-2 bg-green-500 rounded-full"></div>
-                  <span className="text-xs font-medium">Ready</span>
-                </div>
-                <AnimatePresence>
-                  {isHovered && (
-                    <motion.button
-                      initial={{ opacity: 0, scale: 0.8 }}
-                      animate={{ opacity: 1, scale: 1 }}
-                      exit={{ opacity: 0, scale: 0.8 }}
-                      transition={{ duration: 0.15 }}
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        onDelete();
-                      }}
-                      className="text-gray-400 hover:text-red-600 dark:hover:text-red-400 transition-colors p-1"
-                      title="Delete model to free up space"
-                    >
-                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-                      </svg>
-                    </motion.button>
-                  )}
-                </AnimatePresence>
-              </>
-            )}
-
-            {isMissing && !isCancelling && (
-              <button
-                onClick={(e) => {
-                  e.stopPropagation();
-                  onDownload();
-                }}
-                className="bg-blue-600 text-white px-3 py-1.5 rounded-md text-sm font-medium hover:bg-blue-700 transition-colors"
-              >
-                Download
-              </button>
-            )}
-
-            {downloadProgress === null && isError && !isCancelling && (
-              <button
-                onClick={(e) => {
-                  e.stopPropagation();
-                  onDownload();
-                }}
-                className="bg-red-600 text-white px-3 py-1.5 rounded-md text-sm font-medium hover:bg-red-700 transition-colors"
-              >
-                Retry
-              </button>
-            )}
-
-            {isCorrupted && !isCancelling && (
-              <div className="flex gap-2">
-                <button
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    onDelete();
-                  }}
-                  className="bg-orange-600 text-white px-3 py-1.5 rounded-md text-sm font-medium hover:bg-orange-700 transition-colors"
-                >
-                  Delete
-                </button>
-                <button
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    onDownload();
-                  }}
-                  className="bg-blue-600 text-white px-3 py-1.5 rounded-md text-sm font-medium hover:bg-blue-700 transition-colors"
-                >
-                  Re-download
-                </button>
-              </div>
-            )}
-          </div>
-        </div>
-
-        {/* Full-width Download Progress Bar - PROMINENT */}
-        {(downloadProgress !== null || isCancelling) && (
-          <motion.div
-            initial={{ opacity: 0, height: 0 }}
-            animate={{ opacity: 1, height: 'auto' }}
-            exit={{ opacity: 0, height: 0 }}
-            className="mt-3 pt-3 border-t border-gray-200 dark:border-ink-800"
-          >
-            <div className="flex items-center justify-between mb-2">
-              <div className="flex items-center gap-2">
-                <span className="text-sm font-medium text-blue-600 dark:text-blue-400">
-                  {isCancelling ? 'Cancelling…' : 'Downloading...'}
-                </span>
-                {!isCancelling && (
-                  <span className="text-sm font-semibold text-blue-600 dark:text-blue-400">
-                    {Math.round(displayedProgress)}%
-                  </span>
-                )}
-              </div>
-              {isCancelling ? (
-                <span className="text-xs text-gray-500 dark:text-ink-400 font-medium px-2 py-1">
-                  Cancellation requested
-                </span>
-              ) : (
-                <button
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    onCancel();
-                  }}
-                  className="text-xs text-gray-600 dark:text-ink-300 hover:text-red-600 dark:hover:text-red-400 font-medium transition-colors px-2 py-1 rounded hover:bg-red-50 dark:hover:bg-red-500/10"
-                  title="Cancel download"
-                >
-                  Cancel
-                </button>
-              )}
-            </div>
-            <div className="w-full h-2 bg-gray-200 dark:bg-ink-800 rounded-full overflow-hidden">
-              <motion.div
-                className="h-full bg-gradient-to-r from-blue-500 to-blue-600 rounded-full"
-                initial={{ width: 0 }}
-                animate={{ width: `${displayedProgress}%` }}
-                transition={{ duration: 0.3, ease: 'easeOut' }}
-              />
-            </div>
-            <p className="text-xs text-gray-500 dark:text-ink-400 mt-1">
-              {model.size_mb ? (
-                <>
-                  {formatFileSize(model.size_mb * displayedProgress / 100)} / {formatFileSize(model.size_mb)}
-                </>
-              ) : (
-                'Downloading...'
-              )}
-            </p>
-          </motion.div>
-        )}
-      </div>
-    </motion.div>
   );
 }

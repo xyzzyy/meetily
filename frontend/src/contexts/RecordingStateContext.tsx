@@ -177,8 +177,8 @@ export function RecordingStateProvider({ children }: { children: React.ReactNode
 
             return {
               ...prev,
-              status: newStatus,
-              statusMessage: newStatus === RecordingStatus.STOPPING ? 'Stopping recording...' : prev.statusMessage,
+              status: payload.save_error ? RecordingStatus.ERROR : newStatus,
+              statusMessage: payload.save_error || (newStatus === RecordingStatus.STOPPING ? 'Stopping recording...' : prev.statusMessage),
               isRecording: false,
               isPaused: false,
               isActive: false,

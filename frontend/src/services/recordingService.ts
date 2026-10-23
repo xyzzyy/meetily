@@ -20,6 +20,7 @@ export interface RecordingStoppedPayload {
   message: string;
   folder_path?: string;
   meeting_name?: string;
+  save_error?: string | null;
 }
 
 // Bound the start invoke: > ~40s Bluetooth mic cold-start and ~90s worst-case
@@ -102,9 +103,9 @@ export class RecordingService {
   /**
    * Stop recording and save to file
    * @param savePath - Path to save audio file
-   * @returns Promise<void>
+   * @returns True when this call stopped the recording; false for a duplicate or inactive stop.
    */
-  async stopRecording(savePath: string): Promise<void> {
+  async stopRecording(savePath: string): Promise<boolean> {
     return invoke('stop_recording', {
       args: { save_path: savePath }
     });

@@ -11,10 +11,11 @@ import { test } from 'node:test';
 const require = createRequire(import.meta.url);
 const ts = require(process.env.TYPESCRIPT_PATH || 'typescript');
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
+// Transcription managers keep the selected model: it must be changed before deletion.
 const cases = [
-  ['BuiltInModelManager', 'BuiltInModelManager', 'summary', 'builtin_ai_delete_model'],
-  ['WhisperModelManager', 'ModelManager', 'small', 'whisper'],
-  ['ParakeetModelManager', 'ParakeetModelManager', 'parakeet-tdt-0.6b-v3-int8', 'parakeet'],
+  ['BuiltInModelManager', 'BuiltInModelManager', 'summary', 'builtin_ai_delete_model', false],
+  ['WhisperModelManager', 'ModelManager', 'small', 'whisper', true],
+  ['ParakeetModelManager', 'ParakeetModelManager', 'parakeet-tdt-0.6b-v3-int8', 'parakeet', true],
 ];
 
 function manager([file, component, name, command], options = {}) {
@@ -109,15 +110,29 @@ function manager([file, component, name, command], options = {}) {
 const settle = async () => { for (let i = 0; i < 20; i++) await Promise.resolve(); };
 
 for (const fixture of cases) {
+  const protectsSelection = fixture[4];
+  // Deleting the selected model clears it only where that is allowed.
+  const cleared = protectsSelection ? [] : [''];
+  const target = protectsSelection ? { unselected: true } : {};
+  if (protectsSelection) {
+    test(`${fixture[0]}: the selected model cannot be deleted`, async () => {
+      const app = manager(fixture);
+      app.click(); await settle();
+      assert.equal(app.dialogs.length, 0);
+      assert.equal(app.calls.length, 0);
+      assert.deepEqual(app.selections, []);
+      assert.equal(app.notices.filter(n => n.kind === 'error').length, 1);
+    });
+  }
   test(`${fixture[0]}: cancel keeps the model and selection`, async () => {
-    const app = manager(fixture, { confirm: async () => false });
+    const app = manager(fixture, { ...target, confirm: async () => false });
     app.click(); await settle();
     assert.equal(app.calls.length, 0);
     assert.deepEqual(app.selections, []);
     assert.equal(app.dialogs[0][1].okLabel, 'Delete');
   });
   test(`${fixture[0]}: confirm deletes once and clears only the selected model`, async () => {
-    for (const unselected of [false, true]) {
+    for (const unselected of protectsSelection ? [true] : [false, true]) {
       const app = manager(fixture, { unselected });
       app.click(); await settle();
       assert.deepEqual(app.calls, [{ command: fixture[3], modelName: fixture[2] }]);
@@ -127,7 +142,7 @@ for (const fixture of cases) {
   test(`${fixture[0]}: dialog and delete failures show an error and allow retry`, async () => {
     for (const phase of ['confirm', 'remove']) {
       let fail = true;
-      const app = manager(fixture, { [phase]: async () => {
+      const app = manager(fixture, { ...target, [phase]: async () => {
         if (fail) throw new Error('Test failure');
         return true;
       } });
@@ -137,12 +152,14 @@ for (const fixture of cases) {
       if (phase === 'confirm') assert.equal(app.calls.length, 0);
       fail = false;
       app.click(); await settle();
-      assert.deepEqual(app.selections, ['']);
+      assert.equal(app.calls.length, phase === 'confirm' ? 1 : 2);
+      assert.deepEqual(app.selections, cleared);
     }
   });
   test(`${fixture[0]}: repeated clicks cannot queue dialogs or deletes`, async () => {
     let confirm, remove;
     const app = manager(fixture, {
+      ...target,
       confirm: () => new Promise(resolve => { confirm = resolve; }),
       remove: () => new Promise(resolve => { remove = resolve; }),
     });
@@ -153,6 +170,6 @@ for (const fixture of cases) {
     assert.equal(app.dialogs.length, 1);
     assert.equal(app.calls.length, 1);
     remove(); await settle();
-    assert.deepEqual(app.selections, ['']);
+    assert.deepEqual(app.selections, cleared);
   });
 }

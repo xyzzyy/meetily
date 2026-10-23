@@ -401,13 +401,21 @@ impl ParakeetEngine {
             validation_errors.retain(|(model_name, _)| {
                 !active_downloads.downloads.contains_key(*model_name)
             });
+            let mut available_models = self.available_models.write().await;
             for model in &mut models {
                 if active_downloads.downloads.contains_key(&model.name) {
-                    model.status = ModelStatus::Downloading { progress: 0 };
+                    // Keep the reported progress so a reopened manager does not restart at 0%.
+                    let progress = available_models
+                        .get(&model.name)
+                        .and_then(|cached| match cached.status {
+                            ModelStatus::Downloading { progress } => Some(progress),
+                            _ => None,
+                        })
+                        .unwrap_or(0);
+                    model.status = ModelStatus::Downloading { progress };
                 }
             }
 
-            let mut available_models = self.available_models.write().await;
             available_models.clear();
             for model in &models {
                 available_models.insert(model.name.clone(), model.clone());
@@ -2073,5 +2081,33 @@ mod tests {
         assert!(matches!(discovered_model.status, ModelStatus::Available));
         assert!(matches!(test_model_status(&engine).await, ModelStatus::Available));
         assert!(!engine.active_downloads.lock().await.downloads.contains_key(TEST_MODEL_NAME));
+    }
+
+    #[tokio::test]
+    async fn discovery_keeps_progress_of_an_active_download() {
+        let (_temp_dir, engine, _model_dir) = test_engine().await;
+        let _owner = engine
+            .reserve_active_download(TEST_MODEL_NAME)
+            .await
+            .expect("reserve download owner");
+        engine.set_downloading_status(TEST_MODEL_NAME, 42).await;
+
+        let discovered = engine
+            .discover_models_from_specs(SMALL_MODEL_SPECS)
+            .await
+            .expect("discovery must succeed");
+
+        let discovered_model = discovered
+            .iter()
+            .find(|model| model.name == TEST_MODEL_NAME)
+            .expect("test model must be discovered");
+        assert!(matches!(
+            discovered_model.status,
+            ModelStatus::Downloading { progress: 42 }
+        ));
+        assert!(matches!(
+            test_model_status(&engine).await,
+            ModelStatus::Downloading { progress: 42 }
+        ));
     }
 }

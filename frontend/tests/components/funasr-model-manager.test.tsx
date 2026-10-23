@@ -210,3 +210,35 @@ test('an actual failure after requesting Cancel is still reported', async () => 
   await act(async () => { rejectDownload('Checksum mismatch'); await download!; });
   expect(errorToast.mock.calls.length).toBe(1);
 });
+
+test('a cancelled event that arrives before the cancel response leaves Cancel available on retry', async () => {
+  available = [{ ...model, status: { Downloading: { progress: 30 } } }];
+  let answer: (requested: boolean) => void = () => {};
+  reply = command => command === 'funasr_cancel_download' ? new Promise<boolean>(resolve => { answer = resolve; })
+    : command === 'funasr_download_model' ? new Promise<void>(() => {})
+      : command === 'funasr_get_available_models' ? available : undefined;
+  await show();
+  let cancel: Promise<void>;
+  await act(async () => { cancel = renderer!.root.findAllByProps({ title: 'Cancel download' })
+    .find(node => node.type === 'button')!.props.onClick(); });
+  expect(JSON.stringify(renderer!.toJSON())).toContain('Cancellation requested');
+  available = [{ ...model, status: 'Missing', has_partial_download: true }];
+  await act(async () => {
+    await handlers.get('funasr-model-download-error')!({ payload: {
+      modelName: model.name, error: 'FUN-ASR model download cancelled', status: 'cancelled',
+    } });
+  });
+  await act(async () => { answer(true); await cancel!; });
+  const resume = renderer!.root.findAllByType('button').find(button => button.props.children?.[1] === 'Resume')!;
+  await act(async () => { resume.props.onClick(); });
+  expect(renderer!.root.findAllByProps({ title: 'Cancel download' }).length).toBeGreaterThan(0);
+  expect(JSON.stringify(renderer!.toJSON())).not.toContain('Cancellation requested');
+});
+
+test('the note says a selected model that is not installed is not ready', async () => {
+  available = [{ ...model, status: 'Missing', has_partial_download: true }];
+  await act(async () => { renderer = create(<FunAsrModelManager selectedModel="nano-q4" onModelSelect={selected} autoSave />); });
+  const text = JSON.stringify(renderer!.toJSON());
+  expect(text).toContain('is selected but not ready');
+  expect(text).not.toContain('for transcription');
+});
