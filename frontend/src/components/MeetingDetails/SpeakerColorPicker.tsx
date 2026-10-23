@@ -34,7 +34,7 @@ export function SpeakerColorPicker({ name, color, disabled, usedColors, onChange
                 aria-label={choice.name} aria-pressed={selected}
                 title={owner ? `${choice.name} — used by ${owner}` : choice.name}
                 disabled={disabled || !!owner}
-                className="flex h-7 w-7 items-center justify-center rounded-full border border-black/10 text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:opacity-25"
+                className="flex h-7 w-7 items-center justify-center rounded-full border border-black/10 dark:border-white/10 text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:opacity-25"
                 style={{ backgroundColor: choice.value }}
                 onClick={async () => { if (await onChange(choice.value)) setOpen(false); }}>
                 {selected && <svg viewBox="0 0 16 16" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true"><path d="m3 8 3 3 7-7" /></svg>}

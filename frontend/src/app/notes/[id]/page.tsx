@@ -137,7 +137,7 @@ Quarterly product review session with stakeholders.
       <div className="mb-8">
         <h1 className="text-3xl font-bold mb-4">{note.title}</h1>
         
-        <div className="flex flex-wrap gap-4 text-gray-600">
+        <div className="flex flex-wrap gap-4 text-gray-600 dark:text-gray-300">
           {note.date && (
             <div className="flex items-center gap-1">
               <Calendar className="w-4 h-4" />
@@ -162,7 +162,7 @@ Quarterly product review session with stakeholders.
 
         <div className="flex gap-2 mt-4">
           {note.tags.map((tag) => (
-            <div key={tag} className="flex items-center gap-1 bg-blue-100 text-blue-800 px-2 py-1 rounded-full text-sm">
+            <div key={tag} className="flex items-center gap-1 bg-blue-100 dark:bg-blue-900/50 text-blue-800 dark:text-blue-200 px-2 py-1 rounded-full text-sm">
               <Tag className="w-3 h-3" />
               {tag}
             </div>
@@ -170,7 +170,7 @@ Quarterly product review session with stakeholders.
         </div>
       </div>
 
-      <div className="prose prose-blue max-w-none">
+      <div className="prose prose-blue dark:prose-invert max-w-none">
         <div dangerouslySetInnerHTML={{ __html: note.content.split('\n').map(line => {
           if (line.startsWith('# ')) {
             return `<h1>${line.slice(2)}</h1>`;

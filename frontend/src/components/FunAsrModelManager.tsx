@@ -246,7 +246,7 @@ export function FunAsrModelManager({
 
   if (loading) {
     return (
-      <div className="flex items-center gap-2 py-6 text-sm text-gray-500">
+      <div className="flex items-center gap-2 py-6 text-sm text-gray-500 dark:text-gray-400">
         <Loader2 className="h-4 w-4 animate-spin" />
         Loading FUN-ASR models…
       </div>
@@ -255,7 +255,7 @@ export function FunAsrModelManager({
 
   return (
     <div className="space-y-3">
-      <div className="rounded-md border border-blue-100 bg-blue-50 p-3 text-xs text-blue-900">
+      <div className="rounded-md border border-blue-100 dark:border-blue-800 bg-blue-50 dark:bg-blue-950/50 p-3 text-xs text-blue-900 dark:text-blue-200">
         <div className="flex items-center justify-between gap-2">
           <span>Shared FUN-ASR encoder · 469 MB</span>
           <span className="font-medium">
@@ -271,7 +271,7 @@ export function FunAsrModelManager({
           <div className="mt-2 flex items-center justify-between gap-2">
             <span>No model uses this encoder. You can delete it to free disk space.</span>
             <Button variant="outline" size="sm" title="Delete unused encoder"
-              className="hover:text-red-600 transition-colors"
+              className="hover:text-red-600 dark:hover:text-red-400 transition-colors"
               onClick={() => deleteModel(models.find(model => model.has_orphaned_encoder)!)}>
               <Trash2 className="mr-1 h-4 w-4" />
               Delete unused encoder
@@ -293,8 +293,8 @@ export function FunAsrModelManager({
             key={model.name}
             className={`rounded-lg border p-4 ${
               selectedModel === model.name
-                ? 'border-blue-500 bg-blue-50/40'
-                : 'border-gray-200'
+                ? 'border-blue-500 bg-blue-50/40 dark:bg-blue-950/40'
+                : 'border-gray-200 dark:border-gray-700'
             }`}
           >
             <div className="flex items-start justify-between gap-3">
@@ -305,26 +305,26 @@ export function FunAsrModelManager({
                 onClick={() => selectModel(model.name)}
               >
                 <div className="flex items-center gap-2">
-                  <span className="font-medium text-gray-900">
+                  <span className="font-medium text-gray-900 dark:text-gray-100">
                     {model.display_name}
                   </span>
                   {model.recommended && (
-                    <span className="rounded-full bg-blue-100 px-2 py-0.5 text-[10px] font-medium text-blue-700">
+                    <span className="rounded-full bg-blue-100 dark:bg-blue-900/50 px-2 py-0.5 text-[10px] font-medium text-blue-700 dark:text-blue-300">
                       Default
                     </span>
                   )}
                   {savingModel === model.name && <Loader2 className="h-4 w-4 animate-spin" />}
                   {selectedModel === model.name && available && (
-                    <Check className="h-4 w-4 text-blue-600" />
+                    <Check className="h-4 w-4 text-blue-600 dark:text-blue-400" />
                   )}
                 </div>
-                <p className="mt-1 text-xs text-gray-500">{model.description}</p>
-                <p className="mt-1 flex items-center gap-1 text-xs text-gray-500">
+                <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">{model.description}</p>
+                <p className="mt-1 flex items-center gap-1 text-xs text-gray-500 dark:text-gray-400">
                   <HardDrive className="h-3 w-3" />
                   {model.decoder_size_mb} MB decoder · {model.size_mb} MB first install
                 </p>
                 {selectedModel === model.name && available && (
-                  <p className="mt-1 text-xs text-gray-500">
+                  <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">
                     The selected model can't be deleted. Choose another model first.
                   </p>
                 )}
@@ -334,7 +334,7 @@ export function FunAsrModelManager({
                   variant="ghost"
                   size="icon"
                   onClick={() => deleteModel(model)}
-                  className="text-gray-400 hover:text-red-600 transition-colors"
+                  className="text-gray-400 hover:text-red-600 dark:hover:text-red-400 transition-colors"
                   disabled={selectedModel === model.name || savingModel !== null}
                   title={
                     selectedModel === model.name
@@ -361,7 +361,7 @@ export function FunAsrModelManager({
                   </Button>
                   {model.has_partial_download && (
                     <Button variant="ghost" size="icon" onClick={() => deleteModel(model)} title="Delete partial download"
-                      className="text-gray-400 hover:text-red-600 transition-colors">
+                      className="text-gray-400 hover:text-red-600 dark:hover:text-red-400 transition-colors">
                       <Trash2 className="h-4 w-4" />
                     </Button>
                   )}
@@ -371,7 +371,7 @@ export function FunAsrModelManager({
             {progress !== null && (
               <div className="mt-3 space-y-1">
                 <Progress value={progress} />
-                <div className="flex justify-between text-xs text-gray-500">
+                <div className="flex justify-between text-xs text-gray-500 dark:text-gray-400">
                   <span>
                     {detail?.phase === 'encoder'
                       ? 'Downloading shared encoder'
@@ -390,7 +390,7 @@ export function FunAsrModelManager({
               </div>
             )}
             {statusError && (
-              <p className="mt-2 text-xs text-red-600">{statusError}</p>
+              <p className="mt-2 text-xs text-red-600 dark:text-red-400">{statusError}</p>
             )}
           </div>
         );

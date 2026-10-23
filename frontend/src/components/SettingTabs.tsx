@@ -3,6 +3,7 @@ import { ModelConfig, ModelSettingsModal } from "./ModelSettingsModal"
 import { TranscriptModelProps, TranscriptSettings } from "./TranscriptSettings"
 import { RecordingSettings, RecordingPreferences } from "./RecordingSettings"
 import { About } from "./About";
+import { ThemeSettings } from "./ThemeSettings";
 
 interface SettingTabsProps {
     modelConfig: ModelConfig;
@@ -54,6 +55,7 @@ onSave={onSave}
   />
   </TabsContent>
   <TabsContent value="recordingSettings">
+    <ThemeSettings />
     <RecordingSettings />
   </TabsContent>
   <TabsContent value="about">
