@@ -399,9 +399,9 @@ export function TranscriptPanel({
   };
 
   return (
-    <div className="flex h-full min-w-0 w-full bg-white dark:bg-gray-900 flex-col relative @container">
+    <div className="flex h-full min-w-0 w-full bg-white dark:bg-ink-900 flex-col relative @container">
       {/* Title area */}
-      <div className="p-4 border-b border-gray-200 dark:border-gray-800">
+      <div className="p-4 border-b border-gray-200 dark:border-ink-800">
         <TranscriptButtonGroup
           transcriptCount={usePagination ? (totalCount ?? convertedSegments.length) : (transcripts?.length || 0)}
           onCopyTranscript={onCopyTranscript}
@@ -415,8 +415,8 @@ export function TranscriptPanel({
       {!isRecording && diarizationStatus && !['none', 'completed'].includes(diarizationStatus.currentStatus) && (
         <div className={`border-b px-4 py-2 text-sm ${
           ['fallback_to_live', 'needs_review', 'failed', 'cancelled', 'recovery_required'].includes(diarizationStatus.currentStatus)
-            ? 'border-amber-200 dark:border-amber-800 bg-amber-50 dark:bg-amber-950/50 text-amber-950 dark:text-amber-200'
-            : 'border-blue-200 dark:border-blue-800 bg-blue-50 dark:bg-blue-950/50 text-blue-950 dark:text-blue-200'
+            ? 'border-amber-200 dark:border-amber-500/30 bg-amber-50 dark:bg-amber-500/10 text-amber-950 dark:text-amber-200'
+            : 'border-blue-200 dark:border-blue-500/30 bg-blue-50 dark:bg-blue-500/10 text-blue-950 dark:text-blue-200'
         }`}>
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div className="min-w-0">
@@ -690,10 +690,10 @@ export function TranscriptPanel({
 
       {/* Custom prompt input at bottom of transcript section */}
       {!isRecording && convertedSegments.length > 0 && (
-        <div className="p-1 border-t border-gray-200 dark:border-gray-800">
+        <div className="p-1 border-t border-gray-200 dark:border-ink-800">
           <textarea
             placeholder="Add context for AI summary. For example people involved, meeting overview, objective etc..."
-            className="w-full px-3 py-2 border border-gray-200 dark:border-gray-800 rounded-md text-sm focus:outline-none focus:ring-1 focus:ring-blue-500 focus:border-blue-500 bg-white dark:bg-gray-900 shadow-sm min-h-[80px] resize-y"
+            className="w-full px-3 py-2 border border-gray-200 dark:border-ink-800 rounded-md text-sm focus:outline-none focus:ring-1 focus:ring-blue-500 focus:border-blue-500 bg-white dark:bg-ink-900 shadow-sm min-h-[80px] resize-y"
             value={customPrompt}
             onChange={(e) => onPromptChange(e.target.value)}
           />

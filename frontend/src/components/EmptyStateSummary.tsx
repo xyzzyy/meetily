@@ -31,15 +31,15 @@ export function EmptyStateSummary({
       className="flex flex-col items-center justify-center h-full p-8 text-center"
     >
       <FileQuestion className="w-16 h-16 text-gray-300 mb-4" />
-      <h3 className="text-lg font-semibold text-gray-900 dark:text-gray-100 mb-2">
+      <h3 className="text-lg font-semibold text-gray-900 dark:text-ink-100 mb-2">
         No Summary Generated Yet
       </h3>
-      <p className="text-sm text-gray-500 dark:text-gray-400 mb-6 max-w-md">
+      <p className="text-sm text-gray-500 dark:text-ink-400 mb-6 max-w-md">
         Generate an AI-powered summary of your meeting transcript to get key points, action items, and decisions.
       </p>
 
       {error && (
-        <p role="alert" className="mb-4 max-w-md rounded-md bg-red-50 dark:bg-red-950/50 px-3 py-2 text-sm text-red-700 dark:text-red-300">
+        <p role="alert" className="mb-4 max-w-md rounded-md bg-red-50 dark:bg-red-500/10 px-3 py-2 text-sm text-red-700 dark:text-red-300">
           {error}
         </p>
       )}

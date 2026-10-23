@@ -406,26 +406,26 @@ export function DownloadProgressStep() {
     modelSize: string,
     sizeUnit = 'MB'
   ) => (
-    <div className="bg-white dark:bg-gray-900 rounded-xl border border-gray-200 dark:border-gray-800 p-5">
+    <div className="bg-white dark:bg-ink-900 rounded-xl border border-gray-200 dark:border-ink-800 p-5">
       <div className="flex items-center justify-between mb-4">
         <div className="flex items-center gap-3">
-          <div className="w-10 h-10 rounded-full bg-gray-100 dark:bg-gray-800 flex items-center justify-center">
+          <div className="w-10 h-10 rounded-full bg-gray-100 dark:bg-ink-800 flex items-center justify-center">
             {icon}
           </div>
           <div>
-            <h3 className="font-medium text-gray-900 dark:text-gray-100">{title}</h3>
-            <p className="text-sm text-gray-500 dark:text-gray-400">{modelSize}</p>
+            <h3 className="font-medium text-gray-900 dark:text-ink-100">{title}</h3>
+            <p className="text-sm text-gray-500 dark:text-ink-400">{modelSize}</p>
           </div>
         </div>
         <div>
           {state.status === 'waiting' && (
-            <span className="text-sm text-gray-500 dark:text-gray-400">Waiting...</span>
+            <span className="text-sm text-gray-500 dark:text-ink-400">Waiting...</span>
           )}
           {state.status === 'downloading' && (
-            <Loader2 className="w-5 h-5 text-gray-700 dark:text-gray-200 animate-spin" />
+            <Loader2 className="w-5 h-5 text-gray-700 dark:text-ink-200 animate-spin" />
           )}
           {state.status === 'completed' && (
-            <div className="w-6 h-6 rounded-full bg-green-100 dark:bg-green-900/50 flex items-center justify-center">
+            <div className="w-6 h-6 rounded-full bg-green-100 dark:bg-green-500/15 flex items-center justify-center">
               <Check className="w-4 h-4 text-green-600 dark:text-green-400" />
             </div>
           )}
@@ -433,7 +433,7 @@ export function DownloadProgressStep() {
             <span className="text-sm text-red-500 dark:text-red-400">Failed</span>
           )}
           {state.status === 'cancelled' && (
-            <span className="text-sm text-gray-500 dark:text-gray-400">Cancelled</span>
+            <span className="text-sm text-gray-500 dark:text-ink-400">Cancelled</span>
           )}
         </div>
       </div>
@@ -441,23 +441,23 @@ export function DownloadProgressStep() {
       {/* Progress Bar */}
       {(state.status === 'downloading' || state.status === 'completed') && (
         <div className="space-y-2">
-          <div className="w-full h-2 bg-gray-200 dark:bg-gray-700 rounded-full overflow-hidden">
+          <div className="w-full h-2 bg-gray-200 dark:bg-ink-800 rounded-full overflow-hidden">
             <div
-              className="h-full bg-gradient-to-r from-gray-700 to-gray-900 dark:from-gray-300 dark:to-gray-100 rounded-full transition-all duration-300"
+              className="h-full bg-gradient-to-r from-gray-700 to-gray-900 dark:from-ink-300 dark:to-ink-100 rounded-full transition-all duration-300"
               style={{ width: `${state.progress}%` }}
             />
           </div>
           <div className="flex items-center justify-between text-sm">
-            <span className="text-gray-600 dark:text-gray-300">
+            <span className="text-gray-600 dark:text-ink-300">
               {state.downloadedMb.toFixed(1)} {sizeUnit} / {state.totalMb.toFixed(1)} {sizeUnit}
             </span>
             <div className="flex items-center gap-2">
               {state.speedMbps > 0 && (
-                <span className="text-gray-500 dark:text-gray-400">
+                <span className="text-gray-500 dark:text-ink-400">
                   {state.speedMbps.toFixed(1)} {sizeUnit}/s
                 </span>
               )}
-              <span className="font-semibold text-gray-900 dark:text-gray-100">
+              <span className="font-semibold text-gray-900 dark:text-ink-100">
                 {Math.round(state.progress)}%
               </span>
             </div>
@@ -466,7 +466,7 @@ export function DownloadProgressStep() {
       )}
 
       {(state.status === 'error' || state.status === 'cancelled') && (
-        <div className="mt-2 p-3 bg-red-50 dark:bg-red-950/50 border border-red-200 dark:border-red-800 rounded-md">
+        <div className="mt-2 p-3 bg-red-50 dark:bg-red-500/10 border border-red-200 dark:border-red-500/30 rounded-md">
           <p className="text-sm text-red-600 dark:text-red-400 font-medium">
             {state.status === 'cancelled' ? 'Download cancelled' : 'Download Error'}
           </p>
@@ -500,14 +500,14 @@ export function DownloadProgressStep() {
         <div className="w-full max-w-lg space-y-4">
           {renderDownloadCard(
             'Transcription Engine',
-            <Mic className="w-5 h-5 text-gray-600 dark:text-gray-300" />,
+            <Mic className="w-5 h-5 text-gray-600 dark:text-ink-300" />,
             parakeetState,
             '~670 MB'
           )}
 
           {renderDownloadCard(
             'Summary Engine',
-            <Sparkles className="w-5 h-5 text-gray-600 dark:text-gray-300" />,
+            <Sparkles className="w-5 h-5 text-gray-600 dark:text-ink-300" />,
             summaryState,
             getSummaryModelSizeLabel(selectedSummaryModel || recommendedSummaryModel),
             'MiB'
@@ -522,13 +522,13 @@ export function DownloadProgressStep() {
               animate={{ opacity: 1, y: 0 }}
               exit={{ opacity: 0, y: -10 }}
               transition={{ duration: 0.3, ease: 'easeOut' }}
-              className="w-full max-w-lg bg-gray-100 dark:bg-gray-800 rounded-lg p-4 text-sm text-gray-800 dark:text-gray-100"
+              className="w-full max-w-lg bg-gray-100 dark:bg-ink-800 rounded-lg p-4 text-sm text-gray-800 dark:text-ink-100"
             >
               <div className="flex items-start gap-3">
-                <Download className="w-5 h-5 text-gray-600 dark:text-gray-300 flex-shrink-0 mt-0.5" />
+                <Download className="w-5 h-5 text-gray-600 dark:text-ink-300 flex-shrink-0 mt-0.5" />
                 <div>
                   <p className="font-medium">You can continue while this finishes</p>
-                  <p className="text-gray-700 dark:text-gray-200 mt-1">
+                  <p className="text-gray-700 dark:text-ink-200 mt-1">
                     Download will continue in the background.
                   </p>
                 </div>

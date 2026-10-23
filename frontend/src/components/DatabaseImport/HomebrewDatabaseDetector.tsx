@@ -90,7 +90,7 @@ export function HomebrewDatabaseDetector({ onImportSuccess, onDecline }: Homebre
   };
 
   return (
-    <div className="mb-4 p-4 bg-blue-50 dark:bg-blue-950/50 border-2 border-blue-300 dark:border-blue-800 rounded-lg">
+    <div className="mb-4 p-4 bg-blue-50 dark:bg-blue-500/10 border-2 border-blue-300 dark:border-blue-500/30 rounded-lg">
       <div className="flex items-start gap-3">
         <Database className="h-6 w-6 text-blue-600 dark:text-blue-400 mt-0.5 flex-shrink-0" />
         <div className="flex-1">
@@ -103,7 +103,7 @@ export function HomebrewDatabaseDetector({ onImportSuccess, onDecline }: Homebre
           <p className="text-sm text-blue-800 dark:text-blue-200 mb-2">
             We found an existing database from your previous Meetily installation (Python backend version).
           </p>
-          <div className="bg-white/50 dark:bg-gray-900/50 rounded p-2 mb-3">
+          <div className="bg-white/50 dark:bg-ink-900/50 rounded p-2 mb-3">
             <p className="text-xs text-blue-700 dark:text-blue-300 font-mono break-all">
               {detectedPath}
             </p>
@@ -120,7 +120,7 @@ export function HomebrewDatabaseDetector({ onImportSuccess, onDecline }: Homebre
             <button
               onClick={handleYes}
               disabled={isImporting}
-              className="flex-1 flex items-center justify-center gap-2 px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:bg-gray-400 dark:disabled:bg-gray-500 disabled:cursor-not-allowed transition-colors"
+              className="flex-1 flex items-center justify-center gap-2 px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:bg-gray-400 dark:disabled:bg-ink-600 disabled:cursor-not-allowed transition-colors"
             >
               {isImporting ? (
                 <>
@@ -138,7 +138,7 @@ export function HomebrewDatabaseDetector({ onImportSuccess, onDecline }: Homebre
             <button
               onClick={handleNo}
               disabled={isImporting}
-              className="flex-1 px-4 py-2 border-2 border-blue-400 text-blue-700 dark:text-blue-300 rounded-lg hover:bg-blue-100 dark:hover:bg-blue-900/50 disabled:bg-gray-100 dark:disabled:bg-gray-800 disabled:cursor-not-allowed transition-colors"
+              className="flex-1 px-4 py-2 border-2 border-blue-400 text-blue-700 dark:text-blue-300 rounded-lg hover:bg-blue-100 dark:hover:bg-blue-500/15 disabled:bg-gray-100 dark:disabled:bg-ink-800 disabled:cursor-not-allowed transition-colors"
             >
               No, Browse Manually
             </button>

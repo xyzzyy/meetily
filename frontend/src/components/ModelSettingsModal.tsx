@@ -1181,7 +1181,7 @@ export function ModelSettingsModal({
                   </Button>
                 </div>
                 {ollamaEndpointChanged && !error && (
-                  <Alert className="mt-3 border-yellow-500 bg-yellow-50 dark:bg-yellow-950/50">
+                  <Alert className="mt-3 border-yellow-500 bg-yellow-50 dark:bg-yellow-500/10">
                     <AlertDescription className="text-yellow-800 dark:text-yellow-200">
                       Endpoint changed. Please click "Fetch Models" to load models from the new endpoint before saving.
                     </AlertDescription>
@@ -1225,7 +1225,7 @@ export function ModelSettingsModal({
                 {ollamaNotInstalled ? (
                   /* Show Ollama download link when not installed */
                   <div className="space-y-4">
-                    <Alert className="border-orange-500 bg-orange-50 dark:bg-orange-950/50">
+                    <Alert className="border-orange-500 bg-orange-50 dark:bg-orange-500/10">
                       <AlertDescription className="text-orange-800 dark:text-orange-200">
                         Ollama is not installed or not running. Please download and install Ollama to use local models.
                       </AlertDescription>
@@ -1277,14 +1277,14 @@ export function ModelSettingsModal({
 
                         {/* Show progress for gemma3:1b download */}
                         {isDownloading('gemma3:1b') && getProgress('gemma3:1b') !== undefined && (
-                          <div className="bg-white dark:bg-gray-900 rounded-md border p-3">
+                          <div className="bg-white dark:bg-ink-900 rounded-md border p-3">
                             <div className="flex items-center justify-between mb-2">
                               <span className="text-sm font-medium text-blue-600 dark:text-blue-400">Downloading gemma3:1b</span>
                               <span className="text-sm font-semibold text-blue-600 dark:text-blue-400">
                                 {Math.round(getProgress('gemma3:1b')!)}%
                               </span>
                             </div>
-                            <div className="w-full h-2 bg-gray-200 dark:bg-gray-700 rounded-full overflow-hidden">
+                            <div className="w-full h-2 bg-gray-200 dark:bg-ink-800 rounded-full overflow-hidden">
                               <div
                                 className="h-full bg-gradient-to-r from-blue-500 to-blue-600 rounded-full transition-all duration-300"
                                 style={{ width: `${getProgress('gemma3:1b')}%` }}
@@ -1335,12 +1335,12 @@ export function ModelSettingsModal({
 
                           {/* Progress bar for downloading models */}
                           {modelIsDownloading && progress !== undefined && (
-                            <div className="mt-3 pt-3 border-t border-gray-200 dark:border-gray-800">
+                            <div className="mt-3 pt-3 border-t border-gray-200 dark:border-ink-800">
                               <div className="flex items-center justify-between mb-2">
                                 <span className="text-sm font-medium text-blue-600 dark:text-blue-400">Downloading...</span>
                                 <span className="text-sm font-semibold text-blue-600 dark:text-blue-400">{Math.round(progress)}%</span>
                               </div>
-                              <div className="w-full h-2 bg-gray-200 dark:bg-gray-700 rounded-full overflow-hidden">
+                              <div className="w-full h-2 bg-gray-200 dark:bg-ink-800 rounded-full overflow-hidden">
                                 <div
                                   className="h-full bg-gradient-to-r from-blue-500 to-blue-600 rounded-full transition-all duration-300"
                                   style={{ width: `${progress}%` }}
@@ -1395,7 +1395,7 @@ export function ModelSettingsModal({
         <Button
           className={cn(
             'px-4 text-sm font-medium text-white rounded-md focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500',
-            isDoneDisabled ? 'bg-gray-400 dark:bg-gray-500 cursor-not-allowed' : 'bg-blue-600 hover:bg-blue-700'
+            isDoneDisabled ? 'bg-gray-400 dark:bg-ink-600 cursor-not-allowed' : 'bg-blue-600 hover:bg-blue-700'
           )}
           onClick={handleSave}
           disabled={isDoneDisabled}

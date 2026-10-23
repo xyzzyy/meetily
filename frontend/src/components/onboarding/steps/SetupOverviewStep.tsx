@@ -52,7 +52,7 @@ export function SetupOverviewStep() {
     >
       <div className="flex flex-col items-center space-y-10">
         {/* Steps Card */}
-        <div className="w-full max-w-md bg-white dark:bg-gray-900 rounded-lg border border-gray-200 dark:border-gray-800 p-4">
+        <div className="w-full max-w-md bg-white dark:bg-ink-900 rounded-lg border border-gray-200 dark:border-ink-800 p-4">
           <div className="space-y-4">
             {steps.map((step, idx) => {
               return (
@@ -61,14 +61,14 @@ export function SetupOverviewStep() {
                   className={`flex items-start gap-4 p-1`}
                 >
                   <div className="flex-1 ml-1">
-                    <h3 className="font-medium text-gray-900 dark:text-gray-100 flex items-center gap-2">
+                    <h3 className="font-medium text-gray-900 dark:text-ink-100 flex items-center gap-2">
                         Step {step.number} :  {step.title}
 
                         {step.type === "summarization" && (
                             <TooltipProvider>
                             <Tooltip>
                                 <TooltipTrigger asChild>
-                                <button className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-300">
+                                <button className="text-gray-400 hover:text-gray-600 dark:hover:text-ink-300">
                                     <Info className="w-4 h-4" />
                                 </button>
                                 </TooltipTrigger>
@@ -101,7 +101,7 @@ export function SetupOverviewStep() {
               href="https://github.com/Zackriya-Solutions/meeting-minutes"
               target="_blank"
               rel="noopener noreferrer"
-              className="text-xs text-gray-600 dark:text-gray-300 hover:underline"
+              className="text-xs text-gray-600 dark:text-ink-300 hover:underline"
             >
               Report issues on GitHub
             </a>

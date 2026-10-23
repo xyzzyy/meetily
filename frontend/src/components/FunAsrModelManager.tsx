@@ -246,7 +246,7 @@ export function FunAsrModelManager({
 
   if (loading) {
     return (
-      <div className="flex items-center gap-2 py-6 text-sm text-gray-500 dark:text-gray-400">
+      <div className="flex items-center gap-2 py-6 text-sm text-gray-500 dark:text-ink-400">
         <Loader2 className="h-4 w-4 animate-spin" />
         Loading FUN-ASR models…
       </div>
@@ -255,7 +255,7 @@ export function FunAsrModelManager({
 
   return (
     <div className="space-y-3">
-      <div className="rounded-md border border-blue-100 dark:border-blue-800 bg-blue-50 dark:bg-blue-950/50 p-3 text-xs text-blue-900 dark:text-blue-200">
+      <div className="rounded-md border border-blue-100 dark:border-blue-500/30 bg-blue-50 dark:bg-blue-500/10 p-3 text-xs text-blue-900 dark:text-blue-200">
         <div className="flex items-center justify-between gap-2">
           <span>Shared FUN-ASR encoder · 469 MB</span>
           <span className="font-medium">
@@ -293,8 +293,8 @@ export function FunAsrModelManager({
             key={model.name}
             className={`rounded-lg border p-4 ${
               selectedModel === model.name
-                ? 'border-blue-500 bg-blue-50/40 dark:bg-blue-950/40'
-                : 'border-gray-200 dark:border-gray-800'
+                ? 'border-blue-500 bg-blue-50/40 dark:bg-blue-500/10'
+                : 'border-gray-200 dark:border-ink-800'
             }`}
           >
             <div className="flex items-start justify-between gap-3">
@@ -305,11 +305,11 @@ export function FunAsrModelManager({
                 onClick={() => selectModel(model.name)}
               >
                 <div className="flex items-center gap-2">
-                  <span className="font-medium text-gray-900 dark:text-gray-100">
+                  <span className="font-medium text-gray-900 dark:text-ink-100">
                     {model.display_name}
                   </span>
                   {model.recommended && (
-                    <span className="rounded-full bg-blue-100 dark:bg-blue-900/50 px-2 py-0.5 text-[10px] font-medium text-blue-700 dark:text-blue-300">
+                    <span className="rounded-full bg-blue-100 dark:bg-blue-500/15 px-2 py-0.5 text-[10px] font-medium text-blue-700 dark:text-blue-300">
                       Default
                     </span>
                   )}
@@ -318,13 +318,13 @@ export function FunAsrModelManager({
                     <Check className="h-4 w-4 text-blue-600 dark:text-blue-400" />
                   )}
                 </div>
-                <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">{model.description}</p>
-                <p className="mt-1 flex items-center gap-1 text-xs text-gray-500 dark:text-gray-400">
+                <p className="mt-1 text-xs text-gray-500 dark:text-ink-400">{model.description}</p>
+                <p className="mt-1 flex items-center gap-1 text-xs text-gray-500 dark:text-ink-400">
                   <HardDrive className="h-3 w-3" />
                   {model.decoder_size_mb} MB decoder · {model.size_mb} MB first install
                 </p>
                 {selectedModel === model.name && available && (
-                  <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                  <p className="mt-1 text-xs text-gray-500 dark:text-ink-400">
                     The selected model can't be deleted. Choose another model first.
                   </p>
                 )}
@@ -371,7 +371,7 @@ export function FunAsrModelManager({
             {progress !== null && (
               <div className="mt-3 space-y-1">
                 <Progress value={progress} />
-                <div className="flex justify-between text-xs text-gray-500 dark:text-gray-400">
+                <div className="flex justify-between text-xs text-gray-500 dark:text-ink-400">
                   <span>
                     {detail?.phase === 'encoder'
                       ? 'Downloading shared encoder'

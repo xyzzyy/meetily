@@ -17,7 +17,7 @@ export function ModelDownloadProgress({ status, modelName, onCancel }: ModelDown
   const isCompleted = progress >= 100;
 
   return (
-    <div className="bg-blue-50 dark:bg-blue-950/50 border border-blue-200 dark:border-blue-800 rounded-lg p-4">
+    <div className="bg-blue-50 dark:bg-blue-500/10 border border-blue-200 dark:border-blue-500/30 rounded-lg p-4">
       <div className="flex items-center justify-between mb-2">
         <div className="flex items-center space-x-2">
           <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-blue-600"></div>
@@ -28,7 +28,7 @@ export function ModelDownloadProgress({ status, modelName, onCancel }: ModelDown
       </div>
       
       <div className="relative">
-        <div className="w-full bg-blue-200 dark:bg-blue-800/50 rounded-full h-2">
+        <div className="w-full bg-blue-200 dark:bg-blue-500/20 rounded-full h-2">
           <div 
             className="bg-blue-600 h-2 rounded-full transition-all duration-300 ease-out"
             style={{ width: `${Math.min(progress, 100)}%` }}
@@ -111,12 +111,12 @@ export function DownloadSummary({ totalModels, downloadedModels, totalSizeMb }: 
   };
 
   return (
-    <div className="bg-gray-50 dark:bg-gray-800/50 rounded-lg p-3 text-sm">
+    <div className="bg-gray-50 dark:bg-ink-800/50 rounded-lg p-3 text-sm">
       <div className="flex items-center justify-between">
-        <span className="text-gray-700 dark:text-gray-200">
+        <span className="text-gray-700 dark:text-ink-200">
           📦 {downloadedModels} of {totalModels} models available
         </span>
-        <span className="text-gray-600 dark:text-gray-300">
+        <span className="text-gray-600 dark:text-ink-300">
           💾 {formatSize(totalSizeMb)} total
         </span>
       </div>

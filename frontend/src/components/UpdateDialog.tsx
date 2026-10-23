@@ -234,8 +234,8 @@ export function UpdateDialog({ open, onOpenChange, updateInfo }: UpdateDialogPro
               </div>
 
               {updateInfo.body && (
-                <div className="bg-gray-50 dark:bg-gray-800/50 rounded-lg p-3 max-h-40 overflow-y-auto">
-                  <p className="text-sm text-gray-700 dark:text-gray-200 whitespace-pre-wrap">
+                <div className="bg-gray-50 dark:bg-ink-800/50 rounded-lg p-3 max-h-40 overflow-y-auto">
+                  <p className="text-sm text-gray-700 dark:text-ink-200 whitespace-pre-wrap">
                     {updateInfo.body}
                   </p>
                 </div>
@@ -246,13 +246,13 @@ export function UpdateDialog({ open, onOpenChange, updateInfo }: UpdateDialogPro
           {isDownloading && progress && (
             <div className="space-y-2">
               <div className="relative">
-                <div className="w-full bg-gray-200 dark:bg-gray-700 rounded-full h-3">
+                <div className="w-full bg-gray-200 dark:bg-ink-800 rounded-full h-3">
                   <div
                     className="bg-blue-600 h-3 rounded-full transition-all duration-300 ease-out"
                     style={{ width: `${Math.min(progress.percentage, 100)}%` }}
                   />
                 </div>
-                <div className="flex justify-between text-xs text-gray-600 dark:text-gray-300 mt-1">
+                <div className="flex justify-between text-xs text-gray-600 dark:text-ink-300 mt-1">
                   <span>{Math.round(progress.percentage)}% complete</span>
                   {progress.total > 0 && (
                     <span>
@@ -268,7 +268,7 @@ export function UpdateDialog({ open, onOpenChange, updateInfo }: UpdateDialogPro
           )}
 
           {error && (
-            <div className="bg-red-50 dark:bg-red-950/50 border border-red-200 dark:border-red-800 rounded-lg p-3">
+            <div className="bg-red-50 dark:bg-red-500/10 border border-red-200 dark:border-red-500/30 rounded-lg p-3">
               <p className="text-sm text-red-800 dark:text-red-200">{error}</p>
             </div>
           )}

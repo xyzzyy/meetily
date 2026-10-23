@@ -606,7 +606,7 @@ export const AISummary = ({ summary, status, error, onSummaryChange, onRegenerat
   };
 
   const renderErrorState = () => (
-    <div className="w-full p-4 bg-red-50 dark:bg-red-950/50 border border-red-200 dark:border-red-800 rounded-lg">
+    <div className="w-full p-4 bg-red-50 dark:bg-red-500/10 border border-red-200 dark:border-red-500/30 rounded-lg">
       <div className="flex items-center mb-2">
         <ExclamationTriangleIcon className="h-5 w-5 text-red-500 dark:text-red-400 mr-2" />
         <h3 className="text-red-700 dark:text-red-300 font-medium">Error Generating Summary</h3>
@@ -617,7 +617,7 @@ export const AISummary = ({ summary, status, error, onSummaryChange, onRegenerat
   );
 
   const renderLoadingState = () => (
-    <div className="w-full p-4 bg-blue-50 dark:bg-blue-950/50 border border-blue-200 dark:border-blue-800 rounded-lg">
+    <div className="w-full p-4 bg-blue-50 dark:bg-blue-500/10 border border-blue-200 dark:border-blue-500/30 rounded-lg">
       <div className="flex items-center space-x-3">
         <div className="animate-spin rounded-full h-5 w-5 border-2 border-blue-500 border-t-transparent"></div>
         <div>
@@ -648,9 +648,9 @@ export const AISummary = ({ summary, status, error, onSummaryChange, onRegenerat
 
   if (!hasContent && status === 'completed') {
     return (
-      <div className="w-full p-4 bg-gray-50 dark:bg-gray-800/50 border border-gray-200 dark:border-gray-800 rounded-lg text-center">
-        <p className="text-gray-600 dark:text-gray-300">No summary content available.</p>
-        <p className="text-gray-500 dark:text-gray-400 text-sm mt-1">Try generating a new summary.</p>
+      <div className="w-full p-4 bg-gray-50 dark:bg-ink-800/50 border border-gray-200 dark:border-ink-800 rounded-lg text-center">
+        <p className="text-gray-600 dark:text-ink-300">No summary content available.</p>
+        <p className="text-gray-500 dark:text-ink-400 text-sm mt-1">Try generating a new summary.</p>
       </div>
     );
   }
@@ -672,7 +672,7 @@ export const AISummary = ({ summary, status, error, onSummaryChange, onRegenerat
       {/* Context Menu */}
       {contextMenu.visible && selectedBlocks.length > 0 && (
         <div
-          className="fixed z-50 bg-white dark:bg-gray-900 shadow-lg rounded-lg py-1 min-w-[160px] border border-gray-200 dark:border-gray-800
+          className="fixed z-50 bg-white dark:bg-ink-900 shadow-lg rounded-lg py-1 min-w-[160px] border border-gray-200 dark:border-ink-800
                      animate-in fade-in zoom-in-95 duration-150"
           style={{ 
             left: contextMenu.x, 
@@ -681,14 +681,14 @@ export const AISummary = ({ summary, status, error, onSummaryChange, onRegenerat
           onClick={e => e.stopPropagation()}
         >
           <button
-            className="w-full px-4 py-2 text-left hover:bg-gray-100 dark:hover:bg-gray-800 flex items-center space-x-2"
+            className="w-full px-4 py-2 text-left hover:bg-gray-100 dark:hover:bg-ink-800 flex items-center space-x-2"
             onClick={handleCopyBlocks}
           >
-            <span className="text-gray-600 dark:text-gray-300">📋</span>
+            <span className="text-gray-600 dark:text-ink-300">📋</span>
             <span>Copy {selectedBlocks.length > 1 ? `${selectedBlocks.length} blocks` : 'block'}</span>
           </button>
           <button
-            className="w-full px-4 py-2 text-left hover:bg-gray-100 dark:hover:bg-gray-800 text-red-600 dark:text-red-400 flex items-center space-x-2"
+            className="w-full px-4 py-2 text-left hover:bg-gray-100 dark:hover:bg-ink-800 text-red-600 dark:text-red-400 flex items-center space-x-2"
             onClick={handleDeleteBlocks}
           >
             <span>🗑️</span>

@@ -221,7 +221,7 @@ export const BlockComponent: React.FC<BlockProps> = ({
   return (
     <div 
       className={`group relative min-h-[24px] flex items-start rounded transition-all duration-150 ease-in-out
-        ${isSelected ? 'bg-blue-50 dark:bg-blue-950/50 ring-1 ring-blue-200 dark:ring-blue-800 shadow-sm' : 'hover:bg-gray-50 dark:hover:bg-gray-800/50'}`}
+        ${isSelected ? 'bg-blue-50 dark:bg-blue-500/10 ring-1 ring-blue-200 dark:ring-blue-500/30 shadow-sm' : 'hover:bg-gray-50 dark:hover:bg-ink-800/50'}`}
       onMouseDown={onMouseDown}
       onMouseEnter={onMouseEnter}
       onMouseUp={onMouseUp}
@@ -246,7 +246,7 @@ export const BlockComponent: React.FC<BlockProps> = ({
           className={`
             w-full resize-none overflow-hidden bg-transparent border-none p-0 focus:outline-none focus:ring-0
             transition-all duration-150 ease-in-out
-            ${block.color === 'gray' ? 'text-gray-500 dark:text-gray-400' : ''}
+            ${block.color === 'gray' ? 'text-gray-500 dark:text-ink-400' : ''}
             ${block.type === 'heading1' ? 'text-xl font-bold' : ''}
             ${block.type === 'heading2' ? 'text-lg font-semibold' : ''}
           `}
@@ -256,25 +256,25 @@ export const BlockComponent: React.FC<BlockProps> = ({
         {showCommands && (
           <div 
             ref={commandsRef}
-            className="absolute left-0 top-full mt-1 w-64 bg-white dark:bg-gray-900 rounded-lg shadow-lg border border-gray-200 dark:border-gray-800 py-2 z-50
+            className="absolute left-0 top-full mt-1 w-64 bg-white dark:bg-ink-900 rounded-lg shadow-lg border border-gray-200 dark:border-ink-800 py-2 z-50
                        animate-in fade-in slide-in-from-top-2 duration-150"
           >
             {filteredCommands.map((cmd, index) => (
               <button
                 key={cmd.id}
                 className={`
-                  w-full text-left px-3 py-2 flex items-center space-x-3 hover:bg-gray-50 dark:hover:bg-gray-800/50
-                  ${index === selectedCommandIndex ? 'bg-gray-50 dark:bg-gray-800/50' : ''}
+                  w-full text-left px-3 py-2 flex items-center space-x-3 hover:bg-gray-50 dark:hover:bg-ink-800/50
+                  ${index === selectedCommandIndex ? 'bg-gray-50 dark:bg-ink-800/50' : ''}
                 `}
                 onClick={() => handleCommandSelect(cmd)}
                 onMouseEnter={() => setSelectedCommandIndex(index)}
               >
-                <span className="flex-shrink-0 w-6 h-6 flex items-center justify-center bg-gray-100 dark:bg-gray-800 rounded text-gray-600 dark:text-gray-300">
+                <span className="flex-shrink-0 w-6 h-6 flex items-center justify-center bg-gray-100 dark:bg-ink-800 rounded text-gray-600 dark:text-ink-300">
                   {cmd.icon}
                 </span>
                 <div className="flex-1">
                   <div className="font-medium">{cmd.label}</div>
-                  <div className="text-sm text-gray-500 dark:text-gray-400">{cmd.description}</div>
+                  <div className="text-sm text-gray-500 dark:text-ink-400">{cmd.description}</div>
                 </div>
               </button>
             ))}

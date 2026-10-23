@@ -18,7 +18,7 @@ export function BetaSettings() {
   return (
     <div className="space-y-6">
       {/* Yellow Warning Banner */}
-      <div className="flex items-start gap-3 p-4 bg-yellow-50 dark:bg-yellow-950/50 border border-yellow-200 dark:border-yellow-800 rounded-lg">
+      <div className="flex items-start gap-3 p-4 bg-yellow-50 dark:bg-yellow-500/10 border border-yellow-200 dark:border-yellow-500/30 rounded-lg">
         <AlertCircle className="h-5 w-5 text-yellow-600 dark:text-yellow-400 flex-shrink-0 mt-0.5" />
         <div className="text-sm text-yellow-800 dark:text-yellow-200">
           <p className="font-medium">Beta Features</p>
@@ -32,20 +32,20 @@ export function BetaSettings() {
       {featureOrder.map((featureKey) => (
         <div
           key={featureKey}
-          className="bg-white dark:bg-gray-900 rounded-lg border border-gray-200 dark:border-gray-800 p-6 shadow-sm"
+          className="bg-white dark:bg-ink-900 rounded-lg border border-gray-200 dark:border-ink-800 p-6 shadow-sm"
         >
           <div className="flex items-center justify-between">
             <div className="flex-1">
               <div className="flex items-center gap-2 mb-2">
-                <FlaskConical className="h-5 w-5 text-gray-600 dark:text-gray-300" />
-                <h3 className="text-lg font-semibold text-gray-900 dark:text-gray-100">
+                <FlaskConical className="h-5 w-5 text-gray-600 dark:text-ink-300" />
+                <h3 className="text-lg font-semibold text-gray-900 dark:text-ink-100">
                   {BETA_FEATURE_NAMES[featureKey]}
                 </h3>
-                <span className="px-2 py-0.5 text-xs font-medium bg-yellow-100 dark:bg-yellow-900/50 text-yellow-800 dark:text-yellow-200 rounded-full">
+                <span className="px-2 py-0.5 text-xs font-medium bg-yellow-100 dark:bg-yellow-500/15 text-yellow-800 dark:text-yellow-200 rounded-full">
                   BETA
                 </span>
               </div>
-              <p className="text-sm text-gray-600 dark:text-gray-300">
+              <p className="text-sm text-gray-600 dark:text-ink-300">
                 {BETA_FEATURE_DESCRIPTIONS[featureKey]}
               </p>
             </div>
@@ -61,7 +61,7 @@ export function BetaSettings() {
       ))}
 
       {/* Info Box */}
-      <div className="p-4 bg-blue-50 dark:bg-blue-950/50 border border-blue-200 dark:border-blue-800 rounded-lg">
+      <div className="p-4 bg-blue-50 dark:bg-blue-500/10 border border-blue-200 dark:border-blue-500/30 rounded-lg">
         <p className="text-sm text-blue-800 dark:text-blue-200">
           <strong>Note:</strong> When disabled, beta features will be hidden. Your existing meetings remain unaffected.
         </p>

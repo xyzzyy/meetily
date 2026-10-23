@@ -242,9 +242,9 @@ export function SummaryPanel({
   );
 
   return (
-    <div className="flex-1 min-w-0 flex flex-col bg-white dark:bg-gray-900 overflow-hidden h-full w-full @container">
+    <div className="flex-1 min-w-0 flex flex-col bg-white dark:bg-ink-900 overflow-hidden h-full w-full @container">
       {/* Top-level actions — always visible, same pattern as TranscriptPanel */}
-      <div className="p-4 border-b border-gray-200 dark:border-gray-800">
+      <div className="p-4 border-b border-gray-200 dark:border-ink-800">
         <div className="flex items-center justify-center w-full min-w-0 gap-2 flex-wrap">
           <div className="flex-shrink-0 min-w-0">
             <SummaryGeneratorButtonGroup
@@ -283,7 +283,7 @@ export function SummaryPanel({
         <div className="flex items-center justify-center flex-1">
           <div className="text-center">
             <div className="inline-block animate-spin rounded-full h-12 w-12 border-t-2 border-b-2 border-blue-500 mb-4"></div>
-            <p className="text-gray-600 dark:text-gray-300">Generating AI Summary...</p>
+            <p className="text-gray-600 dark:text-ink-300">Generating AI Summary...</p>
           </div>
         </div>
       ) : !hasSummary ? (
@@ -316,9 +316,9 @@ export function SummaryPanel({
             />
           </div>
           {summaryStatus !== 'idle' && (
-            <div className={`mt-4 p-4 rounded-lg ${summaryStatus === 'error' ? 'bg-red-100 dark:bg-red-900/50 text-red-700 dark:text-red-300' :
-              summaryStatus === 'completed' ? 'bg-green-100 dark:bg-green-900/50 text-green-700 dark:text-green-300' :
-                'bg-blue-100 dark:bg-blue-900/50 text-blue-700 dark:text-blue-300'
+            <div className={`mt-4 p-4 rounded-lg ${summaryStatus === 'error' ? 'bg-red-100 dark:bg-red-500/15 text-red-700 dark:text-red-300' :
+              summaryStatus === 'completed' ? 'bg-green-100 dark:bg-green-500/15 text-green-700 dark:text-green-300' :
+                'bg-blue-100 dark:bg-blue-500/15 text-blue-700 dark:text-blue-300'
               }`}>
               <p className="text-sm font-medium">{getSummaryStatusMessage(summaryStatus)}</p>
             </div>

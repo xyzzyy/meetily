@@ -71,18 +71,18 @@ export const ComplianceNotification: React.FC<ComplianceNotificationProps> = ({
         width: `${position.width}px`,
       }}
     >
-      <div className="bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 rounded-lg shadow-lg p-3">
+      <div className="bg-white dark:bg-ink-900 border border-gray-200 dark:border-ink-800 rounded-lg shadow-lg p-3">
         {/* Header with close button */}
         <div className="flex items-start justify-between mb-2">
           <div className="flex items-center gap-1">
             <AlertTriangle className="h-3 w-3 text-amber-500 dark:text-amber-400 flex-shrink-0" />
-            <h3 className="text-xs font-semibold text-gray-900 dark:text-gray-100">
+            <h3 className="text-xs font-semibold text-gray-900 dark:text-ink-100">
               Recording Notice
             </h3>
           </div>
           <button
             onClick={handleClose}
-            className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 transition-colors p-0.5 rounded hover:bg-gray-100 dark:hover:bg-gray-800"
+            className="text-gray-400 hover:text-gray-600 dark:hover:text-ink-300 transition-colors p-0.5 rounded hover:bg-gray-100 dark:hover:bg-ink-800"
           >
             <X className="h-3 w-3" />
           </button>
@@ -90,10 +90,10 @@ export const ComplianceNotification: React.FC<ComplianceNotificationProps> = ({
 
         {/* Content */}
         <div className="mb-2">
-          <p className="text-xs text-gray-600 dark:text-gray-300 mb-1">
+          <p className="text-xs text-gray-600 dark:text-ink-300 mb-1">
             Inform participants about recording.
           </p>
-          <div className="bg-amber-50 dark:bg-amber-950/50 border border-amber-200 dark:border-amber-800 rounded p-1">
+          <div className="bg-amber-50 dark:bg-amber-500/10 border border-amber-200 dark:border-amber-500/30 rounded p-1">
             <p className="text-xs text-amber-800 dark:text-amber-200 font-medium">
               US compliance required
             </p>
