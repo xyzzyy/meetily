@@ -457,7 +457,7 @@ pub async fn start_recording_with_meeting_name<R: Runtime>(
     }
 
     // Emit success event
-    app.emit(
+    let start_event_result = app.emit(
         "recording-started",
         serde_json::json!({
             "message": "Recording started successfully with parallel processing",
@@ -465,14 +465,17 @@ pub async fn start_recording_with_meeting_name<R: Runtime>(
             "workers": 3
         }),
     )
-    .map_err(|e| e.to_string())?;
+    .map_err(|e| e.to_string());
 
     // Update tray menu to reflect recording state
     crate::tray::update_tray_menu(&app);
 
-    // Register startup events and listeners before the worker can fail.
-    start_managed_transcription(app, transcription_receiver, session);
+    // Keep every resource under shutdown control before returning a start error.
+    start_managed_transcription(app.clone(), transcription_receiver, session.clone());
     drop(engine_lifecycle_guard);
+    complete_recording_start(start_event_result, || {
+        stop_recording_session(app, Some(session), None)
+    }).await?;
 
     info!("✅ Recording started successfully with async-first approach");
 
@@ -640,7 +643,7 @@ pub async fn start_recording_with_devices_and_meeting<R: Runtime>(
     }
 
     // Emit success event
-    app.emit(
+    let start_event_result = app.emit(
         "recording-started",
         serde_json::json!({
             "message": "Recording started with custom devices and parallel processing",
@@ -651,14 +654,17 @@ pub async fn start_recording_with_devices_and_meeting<R: Runtime>(
             "workers": 3
         }),
     )
-    .map_err(|e| e.to_string())?;
+    .map_err(|e| e.to_string());
 
     // Update tray menu to reflect recording state
     crate::tray::update_tray_menu(&app);
 
-    // Register startup events and listeners before the worker can fail.
-    start_managed_transcription(app, transcription_receiver, session);
+    // Keep every resource under shutdown control before returning a start error.
+    start_managed_transcription(app.clone(), transcription_receiver, session.clone());
     drop(engine_lifecycle_guard);
+    complete_recording_start(start_event_result, || {
+        stop_recording_session(app, Some(session), None)
+    }).await?;
 
     info!("✅ Recording started with custom devices using async-first approach");
 
@@ -676,17 +682,51 @@ fn start_managed_transcription<R: Runtime>(
     *TRANSCRIPTION_TASK.lock().unwrap() = Some(worker);
     tokio::spawn(async move {
         if let Err(error) = wait_for_transcription_init(init_result).await {
-            let _ = app.emit("transcription-error", serde_json::json!({
-                "error": error,
-                "userMessage": "Speech recognition failed. Recording is stopping. Check your model settings.",
-                "actionable": true,
-                "phase": "active"
-            }));
-            if let Err(error) = stop_recording_session(app, Some(session)).await {
+            if let Err(error) = stop_recording_session(app, Some(session), Some(error)).await {
                 error!("Recording shutdown after a transcription failure failed: {error}");
             }
         }
     });
+}
+
+/// Roll back native capture before returning a failed startup notification.
+async fn complete_recording_start<F, S>(
+    result: Result<(), String>,
+    stop: F,
+) -> Result<(), String>
+where
+    F: FnOnce() -> S,
+    S: std::future::Future<Output = Result<bool, String>>,
+{
+    if let Err(start_error) = result {
+        return match stop().await {
+            Ok(_) => Err(format!("Could not report recording start: {start_error}")),
+            Err(stop_error) => Err(format!(
+                "Could not report recording start: {start_error}. {stop_error}"
+            )),
+        };
+    }
+    Ok(())
+}
+
+/// Claim shutdown and its manager before sending any failure event.
+fn claim_recording_stop<'a>(
+    recording: &AtomicBool,
+    stopping: &'a AtomicBool,
+    manager: &Mutex<Option<RecordingManager>>,
+    expected: Option<&Arc<super::RecordingState>>,
+) -> Option<(StoppingGuard<'a>, Option<RecordingManager>)> {
+    if !recording.load(Ordering::SeqCst) {
+        return None;
+    }
+    let guard = StoppingGuard::try_acquire(stopping)?;
+    let mut manager = manager.lock().unwrap();
+    if !recording.load(Ordering::SeqCst)
+        || !matches_stop_session(manager.as_ref().map(|manager| manager.get_state()), expected)
+    {
+        return None;
+    }
+    Some((guard, manager.take()))
 }
 
 /// Require a success signal. An unexpected worker exit must stop capture too.
@@ -738,12 +778,13 @@ pub async fn stop_recording<R: Runtime>(
     app: AppHandle<R>,
     _args: RecordingArgs,
 ) -> Result<bool, String> {
-    stop_recording_session(app, None).await
+    stop_recording_session(app, None, None).await
 }
 
 async fn stop_recording_session<R: Runtime>(
     app: AppHandle<R>,
     expected_session: Option<Arc<super::RecordingState>>,
+    fatal_error: Option<String>,
 ) -> Result<bool, String> {
     info!(
         "🛑 Starting optimized recording shutdown - ensuring ALL transcript chunks are preserved"
@@ -752,32 +793,25 @@ async fn stop_recording_session<R: Runtime>(
     // Wait for start to store the manager, worker, and listener together.
     let engine_lifecycle_guard = super::common::acquire_engine_lifecycle_lock().await;
 
-    // Check if recording is active
-    if !IS_RECORDING.load(Ordering::SeqCst) {
-        info!("Recording was not active");
-        return Ok(false);
-    }
-
-    // Claim the stop before taking the manager or emitting lifecycle events.
-    let Some(_stopping_guard) = StoppingGuard::try_acquire(&IS_RECORDING_STOPPING) else {
+    let Some((_stopping_guard, manager_for_cleanup)) = claim_recording_stop(
+        &IS_RECORDING,
+        &IS_RECORDING_STOPPING,
+        &RECORDING_MANAGER,
+        expected_session.as_ref(),
+    ) else {
         return Ok(false);
     };
-    if !IS_RECORDING.load(Ordering::SeqCst) {
-        return Ok(false);
-    }
 
-    // Validate the session while taking its manager. Stop ownership keeps a
-    // manual stop and a fatal worker failure from taking it twice.
-    let manager_for_cleanup = {
-        let mut manager = RECORDING_MANAGER.lock().unwrap();
-        if !matches_stop_session(
-            manager.as_ref().map(|manager| manager.get_state()),
-            expected_session.as_ref(),
-        ) {
-            return Ok(false);
-        }
-        manager.take()
-    };
+    // Only the owner may report this fatal error. A delayed failure must not
+    // open the model selector after its recording stopped or a new one started.
+    if let Some(error) = fatal_error {
+        let _ = app.emit("transcription-error", serde_json::json!({
+            "error": error,
+            "userMessage": "Speech recognition failed. Recording is stopping. Check your model settings.",
+            "actionable": true,
+            "phase": "active"
+        }));
+    }
     // Model unload below can acquire this lock. Release it before waiting for
     // worker completion or doing any engine cleanup.
     drop(engine_lifecycle_guard);
@@ -1842,11 +1876,81 @@ mod unload_tests {
 
 #[cfg(test)]
 mod stopping_tests {
-    use super::{matches_stop_session, wait_for_transcription_init, StoppingGuard};
+    use super::{
+        claim_recording_stop, complete_recording_start, matches_stop_session,
+        wait_for_transcription_init, RecordingManager, StoppingGuard,
+    };
     use std::sync::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
-        Barrier,
+        Barrier, Mutex,
     };
+
+    #[tokio::test]
+    async fn successful_start_notification_keeps_capture_running() {
+        assert!(complete_recording_start(Ok(()), || async {
+            panic!("A successful start must not stop capture");
+        }).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn failed_start_notification_waits_for_capture_to_stop() {
+        let recording = AtomicBool::new(true);
+        let error = complete_recording_start(Err("Event send failed".to_string()), || async {
+            tokio::task::yield_now().await;
+            recording.store(false, Ordering::SeqCst);
+            Ok(true)
+        }).await.unwrap_err();
+        assert!(!recording.load(Ordering::SeqCst));
+        assert!(error.contains("Event send failed"));
+    }
+
+    #[tokio::test]
+    async fn failed_start_keeps_both_notification_and_save_errors() {
+        let error = complete_recording_start(Err("Event send failed".to_string()), || async {
+            Err("Recording save failed".to_string())
+        }).await.unwrap_err();
+        assert!(error.contains("Event send failed"));
+        assert!(error.contains("Recording save failed"));
+    }
+
+    #[test]
+    fn stopped_worker_cannot_claim_shutdown_or_report_a_fatal_error() {
+        let recording = AtomicBool::new(false);
+        let stopping = AtomicBool::new(false);
+        let manager = Mutex::new(None);
+        let session = crate::audio::RecordingState::new();
+        assert!(claim_recording_stop(&recording, &stopping, &manager, Some(&session)).is_none());
+        assert!(!stopping.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn stale_worker_cannot_take_a_later_session_or_report_a_fatal_error() {
+        let recording = AtomicBool::new(true);
+        let stopping = AtomicBool::new(false);
+        let manager = Mutex::new(Some(RecordingManager::new()));
+        let current = manager.lock().unwrap().as_ref().unwrap().get_state().clone();
+        let old = crate::audio::RecordingState::new();
+        assert!(claim_recording_stop(&recording, &stopping, &manager, Some(&old)).is_none());
+        assert!(matches_stop_session(
+            manager.lock().unwrap().as_ref().map(|manager| manager.get_state()),
+            Some(&current),
+        ));
+        assert!(!stopping.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn current_worker_claims_its_manager_once_before_reporting_an_error() {
+        let recording = AtomicBool::new(true);
+        let stopping = AtomicBool::new(false);
+        let manager = Mutex::new(Some(RecordingManager::new()));
+        let current = manager.lock().unwrap().as_ref().unwrap().get_state().clone();
+        let owner = claim_recording_stop(&recording, &stopping, &manager, Some(&current));
+        assert!(owner.as_ref().unwrap().1.is_some());
+        assert!(manager.lock().unwrap().is_none());
+        assert!(claim_recording_stop(&recording, &stopping, &manager, Some(&current)).is_none());
+        drop(owner);
+        assert!(!stopping.load(Ordering::SeqCst));
+    }
 
     #[tokio::test]
     async fn successful_worker_init_does_not_request_shutdown() {
