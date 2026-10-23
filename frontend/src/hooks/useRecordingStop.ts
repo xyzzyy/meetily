@@ -72,20 +72,39 @@ export function useRecordingStop(
 
   // Guard to prevent duplicate/concurrent stop calls (e.g., from UI and tray simultaneously)
   const stopInProgressRef = useRef(false);
+  // Keep the error for this recording, including duplicate stop attempts.
+  // The recording-started event clears it for the next recording.
   const saveErrorRef = useRef<string | null>(null);
 
   // Promise to track recording-stopped event data (fixes race condition with recording-stop-complete)
   const recordingStoppedDataRef = useRef<Promise<void> | null>(null);
 
-  // Set up recording-stopped listener for meeting navigation
+  // Keep event subscriptions mounted while callbacks change between renders.
+  const eventHandlersRef = useRef({ flushBuffer, setIsRecording, setIsRecordingDisabled, setIsMeetingActive, setStatus });
   useEffect(() => {
-    let unlistenFn: (() => void) | undefined;
+    eventHandlersRef.current = { flushBuffer, setIsRecording, setIsRecordingDisabled, setIsMeetingActive, setStatus };
+  });
+
+  // Set up recording lifecycle listeners once per mount.
+  useEffect(() => {
+    const unlisteners: (() => void)[] = [];
     let cancelled = false;
+    const retainUnlistener = (unlisten: () => void) => {
+      if (cancelled) unlisten();
+      else unlisteners.push(unlisten);
+    };
+
+    void listen('recording-started', () => {
+      saveErrorRef.current = null;
+      recordingStoppedDataRef.current = null;
+    }).then(retainUnlistener).catch(error => {
+      console.error('Failed to setup recording started listener:', error);
+    });
 
     const setupRecordingStoppedListener = async () => {
       try {
         console.log('Setting up recording-stopped listener for navigation...');
-        unlistenFn = await listen<{
+        const unlisten = await listen<{
           message: string;
           folder_path?: string;
           meeting_name?: string;
@@ -96,6 +115,7 @@ export function useRecordingStop(
             const { folder_path, meeting_name, save_error } = event.payload;
             saveErrorRef.current = save_error ?? null;
             if (save_error) {
+              const { flushBuffer, setIsRecording, setIsRecordingDisabled, setIsMeetingActive, setStatus } = eventHandlersRef.current;
               flushBuffer();
               setIsRecording(false);
               setIsRecordingDisabled(false);
@@ -118,7 +138,7 @@ export function useRecordingStop(
           })();
 
         });
-        if (cancelled) unlistenFn();
+        retainUnlistener(unlisten);
         console.log('Recording stopped listener setup complete');
       } catch (error) {
         console.error('Failed to setup recording stopped listener:', error);
@@ -130,11 +150,9 @@ export function useRecordingStop(
     return () => {
       cancelled = true;
       console.log('Cleaning up recording stopped listener...');
-      if (unlistenFn) {
-        unlistenFn();
-      }
+      unlisteners.forEach(unlisten => unlisten());
     };
-  }, [router, flushBuffer, setIsRecording, setIsRecordingDisabled, setIsMeetingActive, setStatus]);
+  }, []);
 
   // Main recording stop handler
   const handleRecordingStop = useCallback(async (isCallApi: boolean) => {

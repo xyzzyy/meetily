@@ -65,24 +65,27 @@ fn session_live(s: &Arc<super::RecordingState>) -> bool {
             .map_or(false, |m| Arc::ptr_eq(m.get_state(), s))
 }
 
-/// RAII guard for the stop-tail flag. Sets `IS_RECORDING_STOPPING` true on
-/// construction and clears it on Drop — including during unwind — so a panic
-/// anywhere in the ~320-line stop tail can't leave the flag stuck true and
-/// silently kill the mic-disconnect fallback for every later recording.
+/// Guard for exclusive stop ownership. Sets the flag on acquisition and clears
+/// it on Drop, including during unwind. A failed stop cannot leave the flag
+/// set and disable microphone recovery for later recordings.
 ///
 /// This unwind-clears behaviour depends on `panic = "unwind"` (the default).
 /// If a release profile ever sets `panic = "abort"`, Drop won't run on panic
 /// and the stuck-flag failure mode returns — add a start-time reset then.
-struct StoppingGuard;
-impl StoppingGuard {
-    fn new() -> Self {
-        IS_RECORDING_STOPPING.store(true, Ordering::SeqCst);
-        StoppingGuard
+struct StoppingGuard<'a> {
+    flag: &'a AtomicBool,
+}
+impl<'a> StoppingGuard<'a> {
+    /// Acquire stop ownership only if another stop does not already own it.
+    fn try_acquire(flag: &'a AtomicBool) -> Option<Self> {
+        flag.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .ok()
+            .map(|_| Self { flag })
     }
 }
-impl Drop for StoppingGuard {
+impl Drop for StoppingGuard<'_> {
     fn drop(&mut self) {
-        IS_RECORDING_STOPPING.store(false, Ordering::SeqCst);
+        self.flag.store(false, Ordering::SeqCst);
     }
 }
 
@@ -694,11 +697,12 @@ fn model_to_unload(provider: Option<&str>) -> ModelUnload {
     }
 }
 
-/// Stop recording with optimized graceful shutdown ensuring NO transcript chunks are lost
+/// Stop and save one recording. Return false for an inactive recording or a
+/// duplicate stop. Only the owning call may trigger frontend post-processing.
 pub async fn stop_recording<R: Runtime>(
     app: AppHandle<R>,
     _args: RecordingArgs,
-) -> Result<(), String> {
+) -> Result<bool, String> {
     info!(
         "🛑 Starting optimized recording shutdown - ensuring ALL transcript chunks are preserved"
     );
@@ -706,7 +710,15 @@ pub async fn stop_recording<R: Runtime>(
     // Check if recording is active
     if !IS_RECORDING.load(Ordering::SeqCst) {
         info!("Recording was not active");
-        return Ok(());
+        return Ok(false);
+    }
+
+    // Claim the stop before taking the manager or emitting lifecycle events.
+    let Some(_stopping_guard) = StoppingGuard::try_acquire(&IS_RECORDING_STOPPING) else {
+        return Ok(false);
+    };
+    if !IS_RECORDING.load(Ordering::SeqCst) {
+        return Ok(false);
     }
 
     // Emit shutdown progress to frontend
@@ -724,13 +736,6 @@ pub async fn stop_recording<R: Runtime>(
         let mut global_manager = RECORDING_MANAGER.lock().unwrap();
         global_manager.take()
     };
-
-    // Mark the stop tail as in progress so a mic-disconnect fallback that was
-    // queued before Stop short-circuits instead of retrying against the taken
-    // manager. IS_RECORDING itself stays true until the tail completes — the
-    // frontend polls it to keep the stop UI up. RAII so a panic in the tail
-    // below can't leave the flag stuck true.
-    let _stopping_guard = StoppingGuard::new();
 
     let stop_result = if let Some(mut manager) = manager_for_cleanup {
         // Use FORCE FLUSH to immediately process all accumulated audio - eliminates 30s delay!
@@ -1145,7 +1150,7 @@ pub async fn stop_recording<R: Runtime>(
         return Err(error);
     }
     info!("Recording stopped and saved successfully");
-    Ok(())
+    Ok(true)
 }
 
 /// Check if recording is active
@@ -1769,5 +1774,49 @@ mod unload_tests {
     fn unknown_providers_do_not_fall_back_to_whisper() {
         assert_eq!(model_to_unload(Some("deepgram")), ModelUnload::None);
         assert_eq!(model_to_unload(Some("bogus")), ModelUnload::None);
+    }
+}
+
+#[cfg(test)]
+mod stopping_tests {
+    use super::StoppingGuard;
+    use std::sync::{
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+        Barrier,
+    };
+
+    #[test]
+    fn concurrent_stops_have_only_one_owner() {
+        let flag = AtomicBool::new(false);
+        let owners = AtomicUsize::new(0);
+        let start = Barrier::new(8);
+        let finish = Barrier::new(8);
+        std::thread::scope(|scope| {
+            for _ in 0..8 {
+                scope.spawn(|| {
+                    start.wait();
+                    let guard = StoppingGuard::try_acquire(&flag);
+                    if guard.is_some() {
+                        owners.fetch_add(1, Ordering::SeqCst);
+                    }
+                    finish.wait();
+                    drop(guard);
+                });
+            }
+        });
+        assert_eq!(owners.load(Ordering::SeqCst), 1);
+        assert!(!flag.load(Ordering::SeqCst));
+        assert!(StoppingGuard::try_acquire(&flag).is_some());
+    }
+
+    #[test]
+    fn unwind_releases_stop_ownership() {
+        let flag = AtomicBool::new(false);
+        let result = std::panic::catch_unwind(|| {
+            let _guard = StoppingGuard::try_acquire(&flag).unwrap();
+            panic!("stop failed");
+        });
+        assert!(result.is_err());
+        assert!(StoppingGuard::try_acquire(&flag).is_some());
     }
 }

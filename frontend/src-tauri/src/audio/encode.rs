@@ -16,6 +16,8 @@ pub struct AudioInput {
     pub device: Arc<AudioDevice>,
 }
 
+/// Encode mono or multichannel PCM samples as AAC in an MP4 file. Return
+/// process and write errors, and wait for the encoder before returning.
 pub fn encode_single_audio(
     data: &[u8],
     sample_rate: u32,

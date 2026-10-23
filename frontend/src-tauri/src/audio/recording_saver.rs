@@ -94,6 +94,7 @@ pub struct RecordingSaver {
 }
 
 impl RecordingSaver {
+    /// Create an idle saver with no recording folder or active worker.
     pub fn new() -> Self {
         Self {
             incremental_saver: None,
@@ -234,6 +235,7 @@ impl RecordingSaver {
         Ok(())
     }
 
+    /// Keep each chunk and retain the first checkpoint write error for stop.
     async fn accumulate_chunk(
         saver: &Option<Arc<AsyncMutex<IncrementalAudioSaver>>>,
         chunk: AudioChunk,
@@ -251,6 +253,7 @@ impl RecordingSaver {
         }
     }
 
+    /// Close the input queue and wait until all accepted chunks are processed.
     async fn stop_accumulation(&mut self) -> Result<()> {
         if let Some(stop) = self.accumulation_stop.take() {
             let _ = stop.send(());
@@ -277,6 +280,8 @@ impl RecordingSaver {
         self.initialize_meeting_folder_at(&base_folder, meeting_name, create_checkpoints)
     }
 
+    /// Prepare storage under the supplied base path. Publish saver state only
+    /// after the folder, audio saver, and initial metadata are ready.
     fn initialize_meeting_folder_at(
         &mut self,
         base_folder: &PathBuf,
@@ -432,6 +437,7 @@ impl RecordingSaver {
         }
     }
 
+    /// Save final files and mark metadata as an error if any step fails.
     async fn finish_save(
         &mut self,
         recording_duration: Option<f64>,
@@ -450,6 +456,7 @@ impl RecordingSaver {
         result
     }
 
+    /// Drain audio and save all final files before removing recovery checkpoints.
     async fn finalize_files(
         &mut self,
         recording_duration: Option<f64>,

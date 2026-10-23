@@ -3,10 +3,19 @@ import fs from 'node:fs';
 import test from 'node:test';
 import vm from 'node:vm';
 import ts from 'typescript';
+import React from 'react';
+import { act, create } from 'react-test-renderer';
 
-function loadHook({ poll = async () => ({ is_processing: false, chunks_in_queue: 0 }) } = {}) {
+/** Mount the real hook with test event, storage, and status services. */
+async function loadHook({
+  poll = async () => ({ is_processing: false, chunks_in_queue: 0 }),
+  deferRegistration = false,
+} = {}) {
   const listeners = new Map();
   const statuses = [];
+  const subscriptions = new Map();
+  const removals = new Map();
+  const pendingRegistrations = [];
   const toasts = [];
   const calls = { save: 0, clear: 0, markSaved: 0, flush: 0, poll: 0 };
   const storage = new Map();
@@ -18,13 +27,18 @@ function loadHook({ poll = async () => ({ is_processing: false, chunks_in_queue:
     setStatus: (status, message) => statuses.push({ status, message }),
   };
   const require = (name) => {
-    if (name === 'react') return {
-      useEffect: fn => fn(), useCallback: fn => fn, useRef: value => ({ current: value }),
-    };
+    if (name === 'react') return React;
     if (name === 'next/navigation') return { useRouter: () => ({ push() {} }) };
-    if (name === '@tauri-apps/api/event') return { listen: async (event, callback) => {
+    if (name === '@tauri-apps/api/event') return { listen: (event, callback) => {
+      subscriptions.set(event, (subscriptions.get(event) || 0) + 1);
       listeners.set(event, callback);
-      return () => listeners.delete(event);
+      const unlisten = () => {
+        removals.set(event, (removals.get(event) || 0) + 1);
+        listeners.delete(event);
+      };
+      return deferRegistration
+        ? new Promise(resolve => pendingRegistrations.push(() => resolve(unlisten)))
+        : Promise.resolve(unlisten);
     } };
     if (name === 'sonner') return { toast: {
       error: (...args) => toasts.push(args), success: () => assert.fail('False save success'),
@@ -52,15 +66,31 @@ function loadHook({ poll = async () => ({ is_processing: false, chunks_in_queue:
   const module = { exports: {} };
   vm.runInNewContext(compiled.outputText, {
     module, exports: module.exports, require, window: {}, console: { log() {}, warn() {}, error() {} },
-    sessionStorage: { setItem: (key, value) => storage.set(key, value) },
+    sessionStorage: {
+      setItem: (key, value) => storage.set(key, value),
+      getItem: key => storage.get(key), removeItem: key => storage.delete(key),
+    },
     setTimeout: fn => fn(),
   });
-  const hook = module.exports.useRecordingStop(() => {}, () => {});
-  return { hook, listeners, statuses, toasts, calls, storage };
+  let hook;
+  let renderer;
+  function View() {
+    // Match callers whose callback props change on every render.
+    hook = module.exports.useRecordingStop(() => {}, () => {});
+    return null;
+  }
+  await act(async () => { renderer = create(React.createElement(View)); });
+  return {
+    get hook() { return hook; },
+    listeners, statuses, toasts, calls, storage, context, subscriptions, removals, pendingRegistrations,
+    render: () => act(async () => { renderer.update(React.createElement(View)); }),
+    unmount: () => act(async () => { renderer.unmount(); }),
+  };
 }
 
-test('a save error shows the recovery folder and keeps the transcript recovery copy', async () => {
-  const state = loadHook();
+test('a save error shows the recovery folder and keeps the transcript recovery copy', async t => {
+  const state = await loadHook();
+  t.after(state.unmount);
   const message = 'Recording save failed. Files kept in: /recordings/Meeting. Audio may be incomplete.';
   await state.listeners.get('recording-stopped')({ payload: {
     folder_path: '/recordings/Meeting', meeting_name: 'Meeting', save_error: message,
@@ -80,8 +110,9 @@ test('a save error shows the recovery folder and keeps the transcript recovery c
   assert.ok(state.calls.flush > 0);
 });
 
-test('a later successful stop clears the prior save error', async () => {
-  const state = loadHook();
+test('a later successful stop clears the prior save error', async t => {
+  const state = await loadHook();
+  t.after(state.unmount);
   await state.listeners.get('recording-stopped')({ payload: { save_error: 'Write failed' } });
   await state.listeners.get('recording-stopped')({ payload: { save_error: null } });
   await state.hook.handleRecordingStop(false);
@@ -89,9 +120,10 @@ test('a later successful stop clears the prior save error', async () => {
   assert.equal(state.statuses.at(-1).status, 'IDLE');
 });
 
-test('a save error that arrives during post-processing prevents a success result', async () => {
+test('a save error that arrives during post-processing prevents a success result', async t => {
   let finishPoll;
-  const state = loadHook({ poll: () => new Promise(resolve => { finishPoll = resolve; }) });
+  const state = await loadHook({ poll: () => new Promise(resolve => { finishPoll = resolve; }) });
+  t.after(state.unmount);
   const stopping = state.hook.handleRecordingStop(true);
   await new Promise(setImmediate);
   assert.equal(typeof finishPoll, 'function');
@@ -102,4 +134,51 @@ test('a save error that arrives during post-processing prevents a success result
   assert.equal(state.calls.save, 0);
   assert.equal(state.calls.clear, 0);
   assert.equal(state.calls.markSaved, 0);
+});
+
+test('subscriptions stay active across renders and use the latest callbacks', async t => {
+  const state = await loadHook();
+  t.after(state.unmount);
+  const latestStatuses = [];
+  for (let i = 0; i < 20; i++) {
+    state.context.setStatus = (status, message) => latestStatuses.push({ status, message });
+    await state.render();
+    assert.equal(state.subscriptions.get('recording-stopped'), 1);
+    assert.equal(state.subscriptions.get('recording-started'), 1);
+    assert.equal(state.removals.size, 0);
+  }
+  await state.listeners.get('recording-stopped')({ payload: { save_error: 'Current write failed' } });
+  assert.equal(latestStatuses.at(-1).status, 'ERROR');
+  assert.equal(state.statuses.length, 0);
+});
+
+test('a new recording clears the prior error before its stop event arrives', async t => {
+  const state = await loadHook();
+  t.after(state.unmount);
+  await state.listeners.get('recording-stopped')({ payload: { save_error: 'Previous write failed' } });
+  state.listeners.get('recording-started')({ payload: {} });
+  // A transcription error can call this before the next recording-stopped event.
+  await state.hook.handleRecordingStop(false);
+  assert.equal(state.calls.poll, 1);
+  assert.equal(state.statuses.at(-1).status, 'IDLE');
+});
+
+test('duplicate post-processing cannot erase a failed save in the same recording', async t => {
+  const state = await loadHook();
+  t.after(state.unmount);
+  await state.listeners.get('recording-stopped')({ payload: { save_error: 'Current write failed' } });
+  await state.hook.handleRecordingStop(false);
+  await state.hook.handleRecordingStop(true);
+  assert.equal(state.statuses.at(-1).status, 'ERROR');
+  assert.equal(state.calls.save, 0);
+  assert.equal(state.calls.markSaved, 0);
+});
+
+test('late listener registration is removed after unmount', async () => {
+  const state = await loadHook({ deferRegistration: true });
+  await state.unmount();
+  await act(async () => { state.pendingRegistrations.forEach(complete => complete()); });
+  assert.equal(state.listeners.size, 0);
+  assert.equal(state.removals.get('recording-stopped'), 1);
+  assert.equal(state.removals.get('recording-started'), 1);
 });

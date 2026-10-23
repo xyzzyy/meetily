@@ -1,6 +1,6 @@
 use super::encode::encode_single_audio;
 use super::recording_state::AudioChunk;
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 use log::{error, info, warn};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -19,6 +19,7 @@ struct AudioData {
 pub struct IncrementalAudioSaver {
     checkpoint_buffer: Vec<AudioData>,
     checkpoint_interval_samples: usize, // 30s at 48kHz = 1,440,000 samples
+    samples_since_checkpoint_attempt: usize,
     checkpoint_count: u32,
     checkpoints_dir: PathBuf,
     meeting_folder: PathBuf,
@@ -45,6 +46,7 @@ impl IncrementalAudioSaver {
         Ok(Self {
             checkpoint_buffer: Vec::new(),
             checkpoint_interval_samples: sample_rate as usize * 30, // 30 seconds
+            samples_since_checkpoint_attempt: 0,
             checkpoint_count: 0,
             checkpoints_dir,
             meeting_folder,
@@ -53,8 +55,10 @@ impl IncrementalAudioSaver {
     }
 
     /// Add an audio chunk to the buffer
-    /// Automatically saves a checkpoint when buffer reaches 30 seconds
+    /// Attempt a checkpoint after each 30 seconds of new audio. Keep buffered
+    /// samples after a failed write, and wait for another interval before retry.
     pub fn add_chunk(&mut self, chunk: AudioChunk) -> Result<()> {
+        self.samples_since_checkpoint_attempt += chunk.data.len();
         let audio_data = AudioData {
             data: chunk.data,
             // sample_rate: chunk.sample_rate,
@@ -62,11 +66,9 @@ impl IncrementalAudioSaver {
 
         self.checkpoint_buffer.push(audio_data);
 
-        // Calculate total samples in buffer
-        let total_samples: usize = self.checkpoint_buffer.iter().map(|c| c.data.len()).sum();
-
-        // Save checkpoint when buffer reaches threshold (30 seconds)
-        if total_samples >= self.checkpoint_interval_samples {
+        if self.samples_since_checkpoint_attempt >= self.checkpoint_interval_samples {
+            // Reset before writing so a failure cannot cause a retry on every chunk.
+            self.samples_since_checkpoint_attempt = 0;
             self.save_checkpoint()?;
             self.checkpoint_buffer.clear();
         }
@@ -94,13 +96,23 @@ impl IncrementalAudioSaver {
             .checkpoints_dir
             .join(format!("audio_chunk_{:03}.mp4", self.checkpoint_count));
 
-        // Encode and save checkpoint
+        // Encode to a new path. A failed attempt must not leave a partial
+        // checkpoint that prevents the next retry or replaces a complete file.
+        let temporary_path = tempfile::Builder::new()
+            .prefix(".audio_chunk_")
+            .suffix(".mp4")
+            .tempfile_in(&self.checkpoints_dir)?
+            .into_temp_path();
+        // FFmpeg expects an unused output path. TempPath still owns cleanup.
+        std::fs::remove_file(&temporary_path)?;
         encode_single_audio(
             bytemuck::cast_slice(&audio_data),
             self.sample_rate,
             1, // mono
-            &checkpoint_path,
+            &temporary_path.to_path_buf(),
         )?;
+        temporary_path.persist(&checkpoint_path)
+            .with_context(|| format!("Failed to save checkpoint at {}", checkpoint_path.display()))?;
 
         let duration_seconds = audio_data.len() as f32 / self.sample_rate as f32;
         self.checkpoint_count += 1;
@@ -130,6 +142,7 @@ impl IncrementalAudioSaver {
             );
             self.save_checkpoint()?;
             self.checkpoint_buffer.clear();
+            self.samples_since_checkpoint_attempt = 0;
         }
 
         if self.checkpoint_count == 0 {
@@ -241,6 +254,7 @@ impl IncrementalAudioSaver {
         Ok(())
     }
 
+    /// Return buffered samples in order for loss and retry tests.
     #[cfg(test)]
     pub(super) fn buffered_audio(&self) -> Vec<f32> {
         self.checkpoint_buffer.iter().flat_map(|chunk| chunk.data.iter().copied()).collect()
@@ -499,6 +513,51 @@ mod tests {
         assert!(meeting_folder.join(".checkpoints").exists());
         saver.cleanup_checkpoints();
         assert!(!meeting_folder.join(".checkpoints").exists());
+    }
+
+    #[tokio::test]
+    async fn failed_checkpoints_wait_for_new_audio_before_retry_and_keep_all_samples() {
+        let directory = tempdir().unwrap();
+        let folder = directory.path().to_path_buf();
+        let checkpoints = folder.join(".checkpoints");
+        std::fs::create_dir(&checkpoints).unwrap();
+        let mut saver = IncrementalAudioSaver::new(folder, 48000).unwrap();
+        // A short interval keeps this test small. Production uses 30 seconds.
+        saver.checkpoint_interval_samples = 4800;
+        let chunk = |id, count| AudioChunk {
+            data: vec![id as f32 / 10.0; count],
+            sample_rate: 48000,
+            timestamp: 0.0,
+            end_timestamp: None,
+            chunk_id: id,
+            device_type: DeviceType::Microphone,
+            source_activity: None,
+        };
+        let blocked = checkpoints.join("audio_chunk_000.mp4");
+        std::fs::create_dir(&blocked).unwrap();
+        let mut expected = chunk(1, 4800).data;
+        assert!(saver.add_chunk(chunk(1, 4800)).is_err());
+        for id in 2..10 {
+            let audio = chunk(id, 500);
+            expected.extend_from_slice(&audio.data);
+            // An error here would mean an early retry against the blocked path.
+            assert!(saver.add_chunk(audio).is_ok());
+        }
+        let audio = chunk(1, 800);
+        expected.extend_from_slice(&audio.data);
+        assert!(saver.add_chunk(audio).is_err());
+        assert_eq!(saver.buffered_audio(), expected);
+        assert_eq!(saver.checkpoint_count, 0);
+        std::fs::remove_dir(blocked).unwrap();
+        assert!(saver.add_chunk(chunk(1, 4800)).is_ok());
+        assert_eq!(saver.checkpoint_count, 1);
+        assert!(saver.checkpoint_buffer.is_empty());
+        assert_eq!(saver.samples_since_checkpoint_attempt, 0);
+        assert!(saver.add_chunk(chunk(2, 1)).is_ok());
+        assert_eq!(saver.checkpoint_count, 1);
+        // Finalization must save even less than one interval of new audio.
+        assert!(saver.finalize().await.unwrap().is_file());
+        assert_eq!(saver.checkpoint_count, 2);
     }
 
     #[tokio::test]
