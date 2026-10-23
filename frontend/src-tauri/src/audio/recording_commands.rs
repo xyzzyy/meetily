@@ -143,7 +143,7 @@ fn map_recording_start_error<R: Runtime>(
             }
             TRANSCRIPTION_RUNTIME_START_ERROR_CODE.to_string()
         }
-        RecordingStartError::Other(error) => format!("Failed to start recording: {error}"),
+        RecordingStartError::Other(error) => format!("Failed to start recording: {error:#}"),
     }
 }
 
@@ -1069,39 +1069,30 @@ pub async fn stop_recording<R: Runtime>(
     );
 
     // Perform final cleanup with the manager if available
-    let (meeting_folder, meeting_name) = if let Some(mut manager) = manager_for_cleanup {
+    let (meeting_folder, meeting_name, save_error) = if let Some(mut manager) = manager_for_cleanup {
         info!("🧹 Performing final cleanup and saving recording data");
 
         // Extract meeting info BEFORE async operations
         let meeting_folder = manager.get_meeting_folder();
         let meeting_name = manager.get_meeting_name();
 
-        match tokio::time::timeout(
-            tokio::time::Duration::from_secs(300), // 5 minutes max for file I/O
+        let save_error = match tokio::time::timeout(
+            tokio::time::Duration::from_secs(300),
             manager.save_recording_only(&app),
-        )
-        .await
-        {
-            Ok(Ok(_)) => {
-                info!("✅ Recording data saved successfully during cleanup");
-            }
-            Ok(Err(e)) => {
-                warn!(
-                    "⚠️ Error during recording cleanup (transcripts preserved): {}",
-                    e
-                );
-                // Don't fail shutdown - transcripts are already preserved
-            }
-            Err(_) => {
-                warn!("⏱️ File I/O timeout (5 minutes) reached during save, continuing shutdown");
-                // Don't fail shutdown - transcripts are already preserved
-            }
-        }
-
-        (meeting_folder, meeting_name)
+        ).await {
+            Ok(Ok(())) => None,
+            Ok(Err(error)) => Some(format!("{error:#}")),
+            Err(_) => Some("Recording save timed out after 5 minutes".to_string()),
+        };
+        let save_error = save_error.map(|error| {
+            let location = meeting_folder.as_ref()
+                .map(|folder| format!(" Files kept in: {}.", folder.display()))
+                .unwrap_or_default();
+            format!("Recording save failed: {error}.{location} Audio may be incomplete.")
+        });
+        (meeting_folder, meeting_name, save_error)
     } else {
-        info!("ℹ️ No recording manager available for cleanup");
-        (None, None)
+        (None, None, Some("Recording save failed: recording manager is missing".to_string()))
     };
 
     // Set recording flag to false
@@ -1128,8 +1119,8 @@ pub async fn stop_recording<R: Runtime>(
     let _ = app.emit(
         "recording-shutdown-progress",
         serde_json::json!({
-            "stage": "complete",
-            "message": "Recording stopped successfully",
+            "stage": if save_error.is_some() { "error" } else { "complete" },
+            "message": save_error.as_deref().unwrap_or("Recording stopped successfully"),
             "progress": 100
         }),
     );
@@ -1140,7 +1131,8 @@ pub async fn stop_recording<R: Runtime>(
         serde_json::json!({
             "message": "Recording stopped - frontend will save after all transcripts received",
             "folder_path": folder_path_str,
-            "meeting_name": meeting_name_str
+            "meeting_name": meeting_name_str,
+            "save_error": save_error
         }),
     )
     .map_err(|e| e.to_string())?;
@@ -1148,7 +1140,11 @@ pub async fn stop_recording<R: Runtime>(
     // Update tray menu to reflect stopped state
     crate::tray::update_tray_menu(&app);
 
-    info!("🎉 Recording stopped successfully with ZERO transcript chunks lost");
+    if let Some(error) = save_error {
+        error!("{error}");
+        return Err(error);
+    }
+    info!("Recording stopped and saved successfully");
     Ok(())
 }
 

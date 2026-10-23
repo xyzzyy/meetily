@@ -72,6 +72,7 @@ export function useRecordingStop(
 
   // Guard to prevent duplicate/concurrent stop calls (e.g., from UI and tray simultaneously)
   const stopInProgressRef = useRef(false);
+  const saveErrorRef = useRef<string | null>(null);
 
   // Promise to track recording-stopped event data (fixes race condition with recording-stop-complete)
   const recordingStoppedDataRef = useRef<Promise<void> | null>(null);
@@ -79,6 +80,7 @@ export function useRecordingStop(
   // Set up recording-stopped listener for meeting navigation
   useEffect(() => {
     let unlistenFn: (() => void) | undefined;
+    let cancelled = false;
 
     const setupRecordingStoppedListener = async () => {
       try {
@@ -87,10 +89,24 @@ export function useRecordingStop(
           message: string;
           folder_path?: string;
           meeting_name?: string;
+          save_error?: string | null;
         }>('recording-stopped', async (event) => {
           // Create promise that resolves when sessionStorage is set (prevents race condition)
           recordingStoppedDataRef.current = (async () => {
-            const { folder_path, meeting_name } = event.payload;
+            const { folder_path, meeting_name, save_error } = event.payload;
+            saveErrorRef.current = save_error ?? null;
+            if (save_error) {
+              flushBuffer();
+              setIsRecording(false);
+              setIsRecordingDisabled(false);
+              setIsMeetingActive(false);
+              setStatus(RecordingStatus.ERROR, save_error);
+              toast.error('Recording save failed', {
+                id: 'recording-save-failed',
+                description: save_error,
+                duration: 20000,
+              });
+            }
 
             // Store folder_path and meeting_name for later use in handleRecordingStop
             if (folder_path) {
@@ -102,6 +118,7 @@ export function useRecordingStop(
           })();
 
         });
+        if (cancelled) unlistenFn();
         console.log('Recording stopped listener setup complete');
       } catch (error) {
         console.error('Failed to setup recording stopped listener:', error);
@@ -111,12 +128,13 @@ export function useRecordingStop(
     setupRecordingStoppedListener();
 
     return () => {
+      cancelled = true;
       console.log('Cleaning up recording stopped listener...');
       if (unlistenFn) {
         unlistenFn();
       }
     };
-  }, [router]);
+  }, [router, flushBuffer, setIsRecording, setIsRecordingDisabled, setIsMeetingActive, setStatus]);
 
   // Main recording stop handler
   const handleRecordingStop = useCallback(async (isCallApi: boolean) => {
@@ -137,6 +155,12 @@ export function useRecordingStop(
     const stopStartTime = Date.now();
 
     try {
+      // Keep the transcript recovery copy after a failed file save.
+      if (saveErrorRef.current) {
+        flushBuffer();
+        setIsMeetingActive(false);
+        throw new Error(saveErrorRef.current);
+      }
       console.log('Post-stop processing (new implementation)...', {
         stop_initiated_at: new Date(stopStartTime).toISOString(),
         current_transcript_count: transcriptsRef.current.length
@@ -230,6 +254,10 @@ export function useRecordingStop(
       // Wait a bit more to ensure all transcript state updates have been processed
       console.log('Waiting for transcript state updates to complete...');
       await new Promise(resolve => setTimeout(resolve, 500));
+
+      if (saveErrorRef.current) {
+        throw new Error(saveErrorRef.current);
+      }
 
       // Save to SQLite
       // NOTE: enabled to save COMPLETE transcripts after frontend receives all updates

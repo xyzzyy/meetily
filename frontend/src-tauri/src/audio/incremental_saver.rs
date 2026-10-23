@@ -115,7 +115,8 @@ impl IncrementalAudioSaver {
         Ok(())
     }
 
-    /// Finalize the recording: save final checkpoint, merge all checkpoints, cleanup
+    /// Save the final checkpoint and merge the audio. Keep checkpoints until
+    /// the caller finishes saving all recording files.
     ///
     /// Returns the path to the final merged audio.mp4 file
     pub async fn finalize(&mut self) -> Result<PathBuf> {
@@ -141,16 +142,15 @@ impl IncrementalAudioSaver {
         let final_audio_path = self.meeting_folder.join("audio.mp4");
         self.merge_checkpoints(&final_audio_path).await?;
 
-        // Clean up checkpoints directory
-        info!("Cleaning up {} checkpoint files", self.checkpoint_count);
-        if let Err(e) = std::fs::remove_dir_all(&self.checkpoints_dir) {
-            warn!("Failed to clean up checkpoints directory: {}", e);
-            // Non-fatal - user can manually delete
-        }
-
         info!("Finalized recording: {}", final_audio_path.display());
-
         Ok(final_audio_path)
+    }
+
+    /// Remove checkpoints after all recording files have been saved.
+    pub fn cleanup_checkpoints(&self) {
+        if let Err(error) = std::fs::remove_dir_all(&self.checkpoints_dir) {
+            warn!("Failed to clean up checkpoints directory: {error}");
+        }
     }
 
     /// Merge all checkpoint files into final audio.mp4 using FFmpeg concat
@@ -239,6 +239,11 @@ impl IncrementalAudioSaver {
         );
 
         Ok(())
+    }
+
+    #[cfg(test)]
+    pub(super) fn buffered_audio(&self) -> Vec<f32> {
+        self.checkpoint_buffer.iter().flat_map(|chunk| chunk.data.iter().copied()).collect()
     }
 
     /// Get the meeting folder path
@@ -490,7 +495,9 @@ mod tests {
         let final_path = saver.finalize().await.unwrap();
         assert!(final_path.exists());
 
-        // Verify checkpoints directory deleted
+        // Finalization keeps recovery files until the caller commits all files.
+        assert!(meeting_folder.join(".checkpoints").exists());
+        saver.cleanup_checkpoints();
         assert!(!meeting_folder.join(".checkpoints").exists());
     }
 
