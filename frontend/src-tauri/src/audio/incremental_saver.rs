@@ -100,7 +100,7 @@ impl IncrementalAudioSaver {
         // checkpoint that prevents the next retry or replaces a complete file.
         let temporary_path = tempfile::Builder::new()
             .prefix(".audio_chunk_")
-            .suffix(".mp4")
+            .suffix(".tmp")
             .tempfile_in(&self.checkpoints_dir)?
             .into_temp_path();
         // FFmpeg expects an unused output path. TempPath still owns cleanup.
@@ -281,6 +281,29 @@ pub struct AudioRecoveryStatus {
     pub message: String,
 }
 
+/// List published checkpoint files in recording order. Ignore scratch files
+/// and directories left by an interrupted write.
+fn audio_checkpoint_files(directory: &PathBuf) -> Result<Vec<PathBuf>> {
+    let mut checkpoints = Vec::new();
+    for entry in std::fs::read_dir(directory)?.filter_map(|entry| entry.ok()) {
+        if !entry.file_type()?.is_file() {
+            continue;
+        }
+        let name = entry.file_name();
+        let Some(index) = name.to_str()
+            .and_then(|name| name.strip_prefix("audio_chunk_"))
+            .and_then(|name| name.strip_suffix(".mp4"))
+            .filter(|index| !index.is_empty() && index.bytes().all(|byte| byte.is_ascii_digit()))
+            .and_then(|index| index.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        checkpoints.push((index, entry.path()));
+    }
+    checkpoints.sort_by_key(|(index, _)| *index);
+    Ok(checkpoints.into_iter().map(|(_, path)| path).collect())
+}
+
 /// Recover audio from checkpoint files
 /// This is called by the transcript recovery system to merge audio chunks after a crash
 #[tauri::command]
@@ -309,11 +332,8 @@ pub async fn recover_audio_from_checkpoints(
     }
 
     // Scan for checkpoint files
-    let mut checkpoint_files: Vec<_> = std::fs::read_dir(&checkpoints_dir)
-        .map_err(|e| format!("Failed to read checkpoints directory: {}", e))?
-        .filter_map(|entry| entry.ok())
-        .filter(|entry| entry.path().extension().and_then(|s| s.to_str()) == Some("mp4"))
-        .collect();
+    let checkpoint_files = audio_checkpoint_files(&checkpoints_dir)
+        .map_err(|e| format!("Failed to read checkpoints directory: {}", e))?;
 
     if checkpoint_files.is_empty() {
         info!(
@@ -329,9 +349,6 @@ pub async fn recover_audio_from_checkpoints(
         });
     }
 
-    // Sort by filename (audio_chunk_000.mp4, audio_chunk_001.mp4, etc.)
-    checkpoint_files.sort_by_key(|entry| entry.path());
-
     let chunk_count = checkpoint_files.len() as u32;
     let estimated_duration = (chunk_count as f64) * 30.0; // 30 seconds per chunk
 
@@ -344,9 +361,8 @@ pub async fn recover_audio_from_checkpoints(
     let concat_file_path = checkpoints_dir.join("concat_list.txt");
     let mut concat_content = String::new();
 
-    for entry in &checkpoint_files {
-        let path = entry
-            .path()
+    for checkpoint in &checkpoint_files {
+        let path = checkpoint
             .canonicalize()
             .map_err(|e| format!("Failed to canonicalize path: {}", e))?;
         concat_content.push_str(&format!("file '{}'\n", path.display()));
@@ -451,7 +467,7 @@ pub async fn cleanup_checkpoints(meeting_folder: String) -> Result<(), String> {
 }
 
 /// Check if a meeting folder has audio checkpoint files
-/// Returns true if .checkpoints/ directory exists and contains .mp4 files
+/// Return true if the checkpoint directory contains published audio chunks.
 #[tauri::command]
 pub async fn has_audio_checkpoints(meeting_folder: String) -> Result<bool, String> {
     let folder_path = PathBuf::from(&meeting_folder);
@@ -462,13 +478,9 @@ pub async fn has_audio_checkpoints(meeting_folder: String) -> Result<bool, Strin
         return Ok(false);
     }
 
-    // Scan for .mp4 checkpoint files
-    let has_mp4_files = std::fs::read_dir(&checkpoints_dir)
-        .map_err(|e| format!("Failed to read checkpoints directory: {}", e))?
-        .filter_map(|entry| entry.ok())
-        .any(|entry| entry.path().extension().and_then(|s| s.to_str()) == Some("mp4"));
-
-    Ok(has_mp4_files)
+    audio_checkpoint_files(&checkpoints_dir)
+        .map(|files| !files.is_empty())
+        .map_err(|e| format!("Failed to read checkpoints directory: {}", e))
 }
 
 #[cfg(test)]
@@ -476,6 +488,45 @@ mod tests {
     use super::super::recording_state::DeviceType;
     use super::*;
     use tempfile::tempdir;
+
+    #[test]
+    fn published_checkpoints_exclude_scratch_files_and_sort_by_sequence() {
+        let directory = tempdir().unwrap();
+        for name in ["audio_chunk_1000.mp4", "audio_chunk_002.mp4", "audio_chunk_010.mp4",
+            ".audio_chunk_partial.mp4", ".audio_chunk_partial.tmp", "other.mp4",
+            "audio_chunk_.mp4", "audio_chunk_+5.mp4"] {
+            std::fs::write(directory.path().join(name), b"test data").unwrap();
+        }
+        std::fs::create_dir(directory.path().join("audio_chunk_001.mp4")).unwrap();
+        let files = audio_checkpoint_files(&directory.path().to_path_buf()).unwrap();
+        assert_eq!(files, ["audio_chunk_002.mp4", "audio_chunk_010.mp4", "audio_chunk_1000.mp4"]
+            .map(|name| directory.path().join(name)));
+    }
+
+    #[tokio::test]
+    async fn recovery_ignores_interrupted_writes_and_merges_only_published_audio() {
+        let directory = tempdir().unwrap();
+        let checkpoints = directory.path().join(".checkpoints");
+        std::fs::create_dir(&checkpoints).unwrap();
+        for name in [".audio_chunk_partial.mp4", ".audio_chunk_partial.tmp", "other.mp4"] {
+            std::fs::write(checkpoints.join(name), b"incomplete audio").unwrap();
+        }
+        std::fs::create_dir(checkpoints.join("audio_chunk_001.mp4")).unwrap();
+        let folder = directory.path().to_string_lossy().to_string();
+        assert!(!has_audio_checkpoints(folder.clone()).await.unwrap());
+        let empty = recover_audio_from_checkpoints(folder.clone(), 48000).await.unwrap();
+        assert_eq!(empty.status, "none");
+        assert_eq!(empty.chunk_count, 0);
+
+        encode_single_audio(bytemuck::cast_slice(&vec![0.25f32; 4800]), 48000, 1,
+            &checkpoints.join("audio_chunk_000.mp4")).unwrap();
+        assert!(has_audio_checkpoints(folder.clone()).await.unwrap());
+        let recovered = recover_audio_from_checkpoints(folder, 48000).await.unwrap();
+        assert_eq!(recovered.status, "success", "{}", recovered.message);
+        assert_eq!(recovered.chunk_count, 1);
+        assert!(directory.path().join("audio.mp4").is_file());
+        assert!(checkpoints.join(".audio_chunk_partial.mp4").is_file());
+    }
 
     #[tokio::test]
     async fn test_checkpoint_creation() {
