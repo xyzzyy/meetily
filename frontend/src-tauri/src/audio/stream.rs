@@ -21,6 +21,7 @@ pub enum StreamBackend {
     #[cfg(target_os = "macos")]
     CoreAudio {
         task: Option<tokio::task::JoinHandle<()>>,
+        stream: Arc<std::sync::Mutex<super::capture::core_audio::CoreAudioStream>>,
     },
 }
 
@@ -161,13 +162,14 @@ impl AudioStream {
             })?;
 
         info!("✅ Stream: CoreAudioCapture created, calling stream()...");
-        let core_stream = capture_impl.stream()
+        let core_stream = capture_impl.stream_for_recording(state.clone())
             .map_err(|e| {
                 error!("❌ Stream: capture_impl.stream() failed: {}", e);
                 anyhow::anyhow!("Failed to create Core Audio stream: {}", e)
             })?;
 
         let sample_rate = core_stream.sample_rate();
+        let core_stream = Arc::new(std::sync::Mutex::new(core_stream));
         info!("✅ Stream: Core Audio stream created with sample rate: {} Hz", sample_rate);
 
         // Create audio capture processor for pipeline integration
@@ -187,15 +189,24 @@ impl AudioStream {
         info!("🔊 Stream: Spawning tokio task to poll Core Audio stream...");
         let task = tokio::spawn({
             let capture = capture.clone();
-            let mut stream = core_stream;
+            let stream = core_stream.clone();
 
             async move {
                 use futures_util::StreamExt;
 
                 info!("Core Audio processing task started for {}", device_name);
-                while let Some(sample) = stream.next().await {
-                    capture.process_audio_sample(sample);
-                }
+                while futures_util::future::poll_fn(|cx| {
+                    // Keep poll and delivery under one lock so stop cannot overtake a sample.
+                    let mut stream = stream.lock().unwrap();
+                    match stream.poll_next_unpin(cx) {
+                        std::task::Poll::Ready(Some(sample)) => {
+                            capture.process_captured_samples(&[sample]);
+                            std::task::Poll::Ready(Some(()))
+                        }
+                        std::task::Poll::Ready(None) => std::task::Poll::Ready(None),
+                        std::task::Poll::Pending => std::task::Poll::Pending,
+                    }
+                }).await.is_some() {}
                 if let Err(e) = capture.finish() {
                     error!("Failed to drain Core Audio capture: {}", e);
                 }
@@ -210,6 +221,7 @@ impl AudioStream {
             device: device.clone(),
             backend: StreamBackend::CoreAudio {
                 task: Some(task),
+                stream: core_stream,
             },
             capture,
         })
@@ -314,10 +326,16 @@ impl AudioStream {
                 drop(stream);
             }
             #[cfg(target_os = "macos")]
-            StreamBackend::CoreAudio { task } => {
+            StreamBackend::CoreAudio { task, stream } => {
+                // Stop owns the shared stream, so cancelling the task does not discard its queue.
                 if let Some(task_handle) = task {
                     task_handle.abort();
                 }
+                let mut stream = stream.lock().unwrap();
+                let samples = stream.stop_and_drain();
+                self.capture.process_captured_samples(&samples);
+                // Finish before releasing the lock, even if the cancelled task is still running.
+                self.capture.finish()?;
             }
         }
 

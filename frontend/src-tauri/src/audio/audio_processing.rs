@@ -102,6 +102,7 @@ struct TruePeakLimiter {
     buffer: Vec<f32>,
     gain_reduction: Vec<f32>,
     current_position: usize,
+    pending_samples: usize,
 }
 
 impl TruePeakLimiter {
@@ -114,10 +115,11 @@ impl TruePeakLimiter {
             buffer: vec![0.0; lookahead_samples],
             gain_reduction: vec![1.0; lookahead_samples],
             current_position: 0,
+            pending_samples: 0,
         }
     }
 
-    fn process(&mut self, sample: f32, true_peak_limit: f32) -> f32 {
+    fn process(&mut self, sample: f32, true_peak_limit: f32) -> Option<f32> {
         self.buffer[self.current_position] = sample;
 
         let sample_abs = sample.abs();
@@ -132,7 +134,29 @@ impl TruePeakLimiter {
         let output_sample = self.buffer[output_position] * self.gain_reduction[output_position];
 
         self.current_position = output_position;
-        output_sample
+        // Skip unfilled slots. They are startup silence, not captured samples.
+        if self.pending_samples < self.lookahead_samples - 1 {
+            self.pending_samples += 1;
+            None
+        } else {
+            Some(output_sample)
+        }
+    }
+
+    fn flush(&mut self) -> Vec<f32> {
+        let first = (self.current_position + self.lookahead_samples - self.pending_samples)
+            % self.lookahead_samples;
+        let output = (0..self.pending_samples)
+            .map(|offset| {
+                let index = (first + offset) % self.lookahead_samples;
+                self.buffer[index] * self.gain_reduction[index]
+            })
+            .collect();
+        self.pending_samples = 0;
+        self.buffer.fill(0.0);
+        self.gain_reduction.fill(1.0);
+        self.current_position = 0;
+        output
     }
 }
 
@@ -215,12 +239,17 @@ impl LoudnessNormalizer {
 
             // Apply gain and true peak limiting
             let amplified = sample * self.gain_linear;
-            let limited = self.limiter.process(amplified, self.true_peak_limit);
-
-            normalized_samples.push(limited);
+            if let Some(limited) = self.limiter.process(amplified, self.true_peak_limit) {
+                normalized_samples.push(limited);
+            }
         }
 
         normalized_samples
+    }
+
+    /// Return real samples held by the limiter, without adding padding to the recording.
+    pub fn flush(&mut self) -> Vec<f32> {
+        self.limiter.flush()
     }
 }
 
@@ -736,4 +765,29 @@ pub fn write_transcript_json_to_file(
     std::fs::write(&file_path, json_string)?;
 
     Ok(file_path.to_string_lossy().to_string())
+}
+
+#[cfg(test)]
+mod terminal_drain_tests {
+    use super::*;
+
+    #[test]
+    fn limiter_retains_all_samples_without_startup_silence_or_extra_duration() {
+        for length in [0, 1, 127, 479, 480, 481, 1024, 1457] {
+            let input: Vec<f32> = (0..length).map(|i| if i % 3 == 0 { 0.75 } else { -0.25 }).collect();
+            let mut limiter = TruePeakLimiter::new(48000);
+            let mut output: Vec<f32> = input.iter().filter_map(|sample| limiter.process(*sample, 0.5)).collect();
+            output.extend(limiter.flush());
+            let expected: Vec<f32> = input.iter().map(|sample| sample.clamp(-0.5, 0.5)).collect();
+            assert_eq!(output, expected, "length={length}");
+            assert!(limiter.flush().is_empty());
+        }
+    }
+
+    #[test]
+    fn single_sample_limiter_has_no_tail() {
+        let mut limiter = TruePeakLimiter::new(1);
+        assert_eq!(limiter.process(0.25, 0.5), Some(0.25));
+        assert!(limiter.flush().is_empty());
+    }
 }

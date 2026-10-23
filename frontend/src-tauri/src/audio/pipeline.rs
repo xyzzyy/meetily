@@ -489,6 +489,22 @@ impl AudioCapture {
         }
     }
 
+    /// The native callback admits these samples before it puts them in its queue.
+    #[cfg(target_os = "macos")]
+    pub(super) fn process_captured_samples(&self, samples: &[f32]) {
+        let mut processing = self.processing.lock().unwrap();
+        if processing.finished {
+            return;
+        }
+        for chunk in samples.chunks(1024) {
+            processing.pending_samples.extend_from_slice(chunk);
+            if processing.pending_samples.len() >= 1024 {
+                self.process_input(&processing.pending_samples, &processing.sender);
+                processing.pending_samples.clear();
+            }
+        }
+    }
+
     /// Send all accepted samples before closing this capture's pipeline sender.
     pub fn finish(&self) -> Result<()> {
         let mut processing = self.processing.lock().unwrap();
@@ -503,6 +519,22 @@ impl AudioCapture {
                 let tail = resampler.finish()?;
                 self.process_output(tail, &processing.sender);
             }
+            let noise_tail = self
+                .noise_suppressor
+                .lock()
+                .unwrap()
+                .as_mut()
+                .map(|suppressor| suppressor.flush())
+                .unwrap_or_default();
+            self.normalize_and_send(noise_tail, &processing.sender);
+            let limiter_tail = self
+                .normalizer
+                .lock()
+                .unwrap()
+                .as_mut()
+                .map(|normalizer| normalizer.flush())
+                .unwrap_or_default();
+            self.send_output(limiter_tail, &processing.sender);
             Ok(())
         })();
         // Release the sender even if the resampler fails, so stop can finish.
@@ -559,43 +591,50 @@ impl AudioCapture {
             }
 
             // STEP 2: Apply RNNoise noise suppression (10-15 dB reduction) - CONDITIONAL
-            if super::ffmpeg_mixer::RNNOISE_APPLY_ENABLED {
-                if let Ok(mut ns_lock) = self.noise_suppressor.lock() {
-                    if let Some(ref mut suppressor) = *ns_lock {
-                        let before_len = mono_data.len();
-                        mono_data = suppressor.process(&mono_data);
-                        let after_len = mono_data.len();
+            if let Ok(mut ns_lock) = self.noise_suppressor.lock() {
+                if let Some(ref mut suppressor) = *ns_lock {
+                    let before_len = mono_data.len();
+                    mono_data = suppressor.process(&mono_data);
+                    let after_len = mono_data.len();
 
-                        // CRITICAL MONITORING: Track buffer health
-                        let chunk_id = self.chunk_counter.load(std::sync::atomic::Ordering::SeqCst);
-                        if chunk_id % 100 == 0 {
-                            let buffered = suppressor.buffered_samples();
-                            let length_delta = (before_len as i32 - after_len as i32).abs();
+                    // CRITICAL MONITORING: Track buffer health
+                    let chunk_id = self.chunk_counter.load(std::sync::atomic::Ordering::SeqCst);
+                    if chunk_id % 100 == 0 {
+                        let buffered = suppressor.buffered_samples();
+                        let length_delta = (before_len as i32 - after_len as i32).abs();
 
-                            debug!("🔇 Noise suppression health: in={}, out={}, delta={}, buffered={}, RMS={:.4}",
+                        debug!("🔇 Noise suppression health: in={}, out={}, delta={}, buffered={}, RMS={:.4}",
                                    before_len, after_len, length_delta, buffered,
                                    if !mono_data.is_empty() {
                                        (mono_data.iter().map(|&x| x * x).sum::<f32>() / mono_data.len() as f32).sqrt()
                                    } else { 0.0 });
 
-                            // WARN if accumulating samples (potential latency buildup)
-                            if buffered > 1000 {
-                                warn!("⚠️ RNNoise accumulating samples: {} buffered (potential latency issue!)",
+                        // WARN if accumulating samples (potential latency buildup)
+                        if buffered > 1000 {
+                            warn!("⚠️ RNNoise accumulating samples: {} buffered (potential latency issue!)",
                                       buffered);
-                            }
+                        }
 
-                            // WARN if significant length mismatch
-                            if length_delta > 50 {
-                                warn!(
-                                    "⚠️ RNNoise length mismatch: input={} output={} (delta={})",
-                                    before_len, after_len, length_delta
-                                );
-                            }
+                        // WARN if significant length mismatch
+                        if length_delta > 50 {
+                            warn!(
+                                "⚠️ RNNoise length mismatch: input={} output={} (delta={})",
+                                before_len, after_len, length_delta
+                            );
                         }
                     }
                 }
             }
+        }
+        self.normalize_and_send(mono_data, sender);
+    }
 
+    fn normalize_and_send(
+        &self,
+        mut mono_data: Vec<f32>,
+        sender: &Option<mpsc::UnboundedSender<AudioChunk>>,
+    ) {
+        if matches!(self.device_type, DeviceType::Microphone) {
             // STEP 3: Apply EBU R128 normalization (professional loudness standard)
             if let Ok(mut normalizer_lock) = self.normalizer.lock() {
                 if let Some(ref mut normalizer) = *normalizer_lock {
@@ -617,6 +656,13 @@ impl AudioCapture {
             }
         }
 
+        self.send_output(mono_data, sender);
+    }
+
+    fn send_output(&self, mono_data: Vec<f32>, sender: &Option<mpsc::UnboundedSender<AudioChunk>>) {
+        if mono_data.is_empty() {
+            return;
+        }
         // Create audio chunk with stream-specific timestamp (get ID first for logging)
         let chunk_id = self
             .chunk_counter
@@ -1496,5 +1542,78 @@ mod tests {
                 Err(mpsc::error::TryRecvError::Disconnected)
             ));
         }
+    }
+    #[test]
+    fn microphone_drain_keeps_the_final_marker_and_real_duration() {
+        for rate in [16000, 44100, 48000, 96000] {
+            for length in [1usize, 127, 479, 480, 511, 512, 1024, 1457] {
+                let (capture, state, mut receiver) = capture_for_test(rate, DeviceType::Microphone);
+                let mut input = vec![0.0; length];
+                input[length.saturating_sub(80)..].fill(0.25);
+                for chunk in input.chunks(137) {
+                    capture.process_audio_data(chunk);
+                }
+                state.stop_recording();
+                capture.finish().unwrap();
+                capture.finish().unwrap();
+                let output: Vec<f32> = std::iter::from_fn(|| receiver.try_recv().ok())
+                    .flat_map(|chunk| chunk.data)
+                    .collect();
+                assert_eq!(
+                    output.len(),
+                    (length * 48000).div_ceil(rate as usize),
+                    "rate={rate}, length={length}"
+                );
+                let marker_start = length.saturating_sub(80) * 48000 / rate as usize;
+                assert!(
+                    output[marker_start..].iter().any(|v| v.abs() > 0.001),
+                    "Final microphone marker lost: rate={rate}, length={length}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn noise_suppression_and_limiter_tails_are_sent_once_in_order() {
+        let (capture, state, mut receiver) = capture_for_test(48000, DeviceType::Microphone);
+        *capture.high_pass_filter.lock().unwrap() = None;
+        *capture.noise_suppressor.lock().unwrap() =
+            Some(NoiseSuppressionProcessor::new(48000).unwrap());
+        let input: Vec<f32> = (0..1000).map(|i| (i as f32 * 0.15).sin() * 0.25).collect();
+        for chunk in input.chunks(137) {
+            capture.process_audio_data(chunk);
+        }
+        state.stop_recording();
+        capture.finish().unwrap();
+        capture.finish().unwrap();
+        let output: Vec<f32> = std::iter::from_fn(|| receiver.try_recv().ok())
+            .flat_map(|chunk| chunk.data)
+            .collect();
+        let mut suppressor = NoiseSuppressionProcessor::new(48000).unwrap();
+        let mut denoised = suppressor.process(&input);
+        denoised.extend(suppressor.flush());
+        let mut normalizer = LoudnessNormalizer::new(1, 48000).unwrap();
+        let mut expected = normalizer.normalize_loudness(&denoised);
+        expected.extend(normalizer.flush());
+        assert_eq!(output.len(), input.len());
+        assert_eq!(output, expected);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn queued_native_samples_are_delivered_before_the_capture_finishes() {
+        let (capture, state, mut receiver) = capture_for_test(48000, DeviceType::System);
+        capture.process_audio_sample(0.25);
+        state.stop_recording();
+        // These samples were admitted by the producer before stop and can arrive afterwards.
+        capture.process_captured_samples(&[0.5; 131072]);
+        capture.finish().unwrap();
+        capture.process_captured_samples(&[0.75; 1024]);
+        let output: Vec<f32> = std::iter::from_fn(|| receiver.try_recv().ok())
+            .flat_map(|chunk| chunk.data)
+            .collect();
+        assert_eq!(output.len(), 131073);
+        assert_eq!(output[0], 0.25);
+        assert_eq!(&output[1..], &[0.5; 131072]);
     }
 }
