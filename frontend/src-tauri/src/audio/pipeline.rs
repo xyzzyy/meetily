@@ -901,7 +901,16 @@ impl AudioPipeline {
     }
 
     /// Run the VAD-driven audio processing pipeline
-    pub async fn run(mut self) -> Result<()> {
+    pub async fn run(self) -> Result<()> {
+        self.run_with_flush(Self::flush_remaining_audio).await
+    }
+
+    /// Keep draining captured audio when a final transcript flush fails.
+    async fn run_with_flush(
+        mut self,
+        mut flush: impl FnMut(&mut Self) -> Result<()> + Send,
+    ) -> Result<()> {
+        let mut first_flush_error = None;
         info!("VAD-driven audio pipeline started - segments sent in real-time based on speech detection");
 
         // CRITICAL FIX: Continue processing until channel is closed, not based on recording state
@@ -924,7 +933,10 @@ impl AudioPipeline {
                             "📥 Received FLUSH signal #{} - flushing VAD processor",
                             u64::MAX - chunk.chunk_id
                         );
-                        self.flush_remaining_audio()?;
+                        if let Err(error) = flush(&mut self) {
+                            warn!("Final transcript flush failed: {error:#}");
+                            first_flush_error.get_or_insert(error);
+                        }
                         // Continue processing to handle any remaining chunks
                         continue;
                     }
@@ -1069,11 +1081,17 @@ impl AudioPipeline {
             }
         }
 
-        // Flush any remaining VAD segments
-        self.flush_remaining_audio()?;
+        // Retry the final flush after all queued audio has been processed.
+        if let Err(error) = flush(&mut self) {
+            warn!("Final transcript flush failed: {error:#}");
+            first_flush_error.get_or_insert(error);
+        }
 
         info!("VAD-driven audio pipeline ended");
-        Ok(())
+        match first_flush_error {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
     }
 
     fn flush_remaining_audio(&mut self) -> Result<()> {
@@ -1315,6 +1333,60 @@ mod tests {
             end_timestamp_ms: samples as f64 / 16.0,
             confidence: 1.0,
         }
+    }
+
+    #[tokio::test]
+    async fn failed_flush_keeps_draining_audio_and_retries_later_flushes() {
+        use super::super::device_detection::InputDeviceKind;
+        let (audio_sender, audio_receiver) = mpsc::unbounded_channel();
+        let (transcription_sender, _transcription_receiver) = mpsc::unbounded_channel();
+        let (recording_sender, mut recording_receiver) = mpsc::unbounded_channel();
+        let mut pipeline = AudioPipeline::new(
+            audio_receiver,
+            transcription_sender,
+            RecordingState::new(),
+            1000,
+            16000,
+            "Test microphone".to_string(),
+            InputDeviceKind::Wired,
+            "No System Audio".to_string(),
+            InputDeviceKind::Wired,
+        )
+        .unwrap();
+        pipeline.recording_sender_for_mixed = Some(recording_sender);
+        let chunk = |chunk_id, data| AudioChunk {
+            data,
+            chunk_id,
+            sample_rate: 16000,
+            timestamp: 0.0,
+            end_timestamp: None,
+            device_type: DeviceType::Microphone,
+            source_activity: None,
+        };
+        // Put one complete mixer window after a failing flush signal.
+        audio_sender.send(chunk(u64::MAX, vec![])).unwrap();
+        audio_sender.send(chunk(0, vec![0.05; 9600])).unwrap();
+        for id in 1..4 {
+            audio_sender.send(chunk(u64::MAX - id, vec![])).unwrap();
+        }
+        drop(audio_sender);
+        let mut flush_calls = 0;
+        let error = pipeline
+            .run_with_flush(|_| {
+                flush_calls += 1;
+                match flush_calls {
+                    1 => Err(anyhow::anyhow!("First flush failure")),
+                    2 => Err(anyhow::anyhow!("Second flush failure")),
+                    _ => Ok(()),
+                }
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(error.to_string(), "First flush failure");
+        // All four signals and the final flush must run, even after errors.
+        assert_eq!(flush_calls, 5);
+        assert_eq!(recording_receiver.recv().await.unwrap().data.len(), 9600);
+        assert!(recording_receiver.recv().await.is_none());
     }
 
     #[tokio::test]

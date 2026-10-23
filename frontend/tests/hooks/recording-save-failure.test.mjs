@@ -11,6 +11,7 @@ async function loadHook({
   poll = async () => ({ is_processing: false, chunks_in_queue: 0 }),
   deferRegistration = false,
   allowSuccess = false,
+  save = async () => ({ meeting_id: 'saved-meeting' }),
 } = {}) {
   const listeners = new Map();
   const statuses = [];
@@ -67,7 +68,7 @@ async function loadHook({
       setIsMeetingActive() {}, refetchMeetings: async () => {}, setCurrentMeeting() {},
     }) };
     if (name === '@/services/storageService') return { storageService: {
-      saveMeeting: async () => { calls.save++; return { meeting_id: 'saved-meeting' }; },
+      saveMeeting: async () => { calls.save++; return save(); },
       getMeeting: async () => ({ title: 'Saved meeting' }),
     } };
     if (name === '@/lib/summary-language-preferences') return {
@@ -270,3 +271,25 @@ test('a new recording clears the transcript warning before a successful stop', a
   assert.equal(state.activeToasts.size, 1);
   assert.equal(state.toasts.at(-1)[0], 'Recording saved successfully!');
 });
+
+for (const pendingStep of ['transcription wait', 'meeting save']) {
+  test(`a new recording during ${pendingStep} does not clear the previous stop warning`, async t => {
+    let finishStep;
+    const pending = () => new Promise(resolve => { finishStep = resolve; });
+    const state = await loadHook(pendingStep === 'meeting save' ? { save: pending } : { poll: pending });
+    t.after(state.unmount);
+    await state.listeners.get('recording-stopped')({ payload: { transcript_warning: transcriptWarning } });
+    const stopping = state.hook.handleRecordingStop(true);
+    await new Promise(setImmediate);
+    assert.equal(typeof finishStep, 'function');
+    state.listeners.get('recording-started')({ payload: {} });
+    finishStep(pendingStep === 'meeting save'
+      ? { meeting_id: 'saved-meeting' }
+      : { is_processing: false, chunks_in_queue: 0 });
+    await stopping;
+    assert.equal(state.calls.save, 1);
+    assert.equal(state.calls.transcriptionSuccess, 0);
+    assert.equal(state.toasts.at(-1)[0], 'Meeting saved. Transcript may be incomplete');
+    assert.equal(state.toasts.at(-1)[1].description, transcriptWarning);
+  });
+}

@@ -76,7 +76,8 @@ export function useRecordingStop(
   // Keep the error for this recording, including duplicate stop attempts.
   // The recording-started event clears it for the next recording.
   const saveErrorRef = useRef<string | null>(null);
-  const transcriptWarningRef = useRef<string | null>(null);
+  // Each stop keeps this object if a later recording replaces the current one.
+  const transcriptWarningRef = useRef<{ message: string | null }>({ message: null });
 
   // Promise to track recording-stopped event data (fixes race condition with recording-stop-complete)
   const recordingStoppedDataRef = useRef<Promise<void> | null>(null);
@@ -98,7 +99,7 @@ export function useRecordingStop(
 
     void listen('recording-started', () => {
       saveErrorRef.current = null;
-      transcriptWarningRef.current = null;
+      transcriptWarningRef.current = { message: null };
       toast.dismiss('recording-transcript-incomplete');
       recordingStoppedDataRef.current = null;
     }).then(retainUnlistener).catch(error => {
@@ -113,7 +114,7 @@ export function useRecordingStop(
           recordingStoppedDataRef.current = (async () => {
             const { folder_path, meeting_name, save_error, transcript_warning } = event.payload;
             saveErrorRef.current = save_error ?? null;
-            transcriptWarningRef.current = transcript_warning ?? null;
+            transcriptWarningRef.current.message = transcript_warning ?? null;
             if (transcript_warning) {
               toast.warning('Transcript may be incomplete', {
                 id: 'recording-transcript-incomplete',
@@ -163,6 +164,8 @@ export function useRecordingStop(
 
   // Main recording stop handler
   const handleRecordingStop = useCallback(async (isCallApi: boolean) => {
+    // Late stop events can update this object. A new recording gets a new object.
+    const transcriptWarning = transcriptWarningRef.current;
     if (recordingStoppedDataRef.current) {
       await recordingStoppedDataRef.current;
     }
@@ -397,15 +400,15 @@ export function useRecordingStop(
           setStatus(RecordingStatus.COMPLETED);
 
           // Record success only after the final transcript result is known.
-          if (!transcriptWarningRef.current) {
+          if (!transcriptWarning.message) {
             Analytics.trackTranscriptionSuccess();
           }
 
           // Keep the transcript warning visible after the meeting is saved.
-          const showSavedToast = transcriptWarningRef.current ? toast.warning : toast.success;
-          showSavedToast(transcriptWarningRef.current ? 'Meeting saved. Transcript may be incomplete' : 'Recording saved successfully!', {
-            id: transcriptWarningRef.current ? 'recording-transcript-incomplete' : undefined,
-            description: transcriptWarningRef.current ?? `${freshTranscripts.length} transcript segments saved.`,
+          const showSavedToast = transcriptWarning.message ? toast.warning : toast.success;
+          showSavedToast(transcriptWarning.message ? 'Meeting saved. Transcript may be incomplete' : 'Recording saved successfully!', {
+            id: transcriptWarning.message ? 'recording-transcript-incomplete' : undefined,
+            description: transcriptWarning.message ?? `${freshTranscripts.length} transcript segments saved.`,
             action: {
               label: 'View Meeting',
               onClick: () => {
@@ -413,7 +416,7 @@ export function useRecordingStop(
                 Analytics.trackButtonClick('view_meeting_from_toast', 'recording_complete');
               }
             },
-            duration: transcriptWarningRef.current ? 20000 : 10000,
+            duration: transcriptWarning.message ? 20000 : 10000,
           });
 
           // Auto-navigate after a short delay with source parameter
