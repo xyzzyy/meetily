@@ -119,11 +119,29 @@ for (const engine of engines) {
     expect(selectButton().props.disabled).toBe(false);
   });
 
+  test(`${engine.label}: damaged files of the selected model can be removed and the note says it is not ready`, async () => {
+    available = [{ ...engine.model, status: { Corrupted: { file_size: 1, expected_min_size: 2 } } }];
+    reply = command => {
+      if (command === `${engine.prefix}_delete_corrupted_model`) available = [{ ...engine.model, status: 'Missing' }];
+      return respond(command);
+    };
+    await show(engine.model.name);
+    expect(JSON.stringify(renderer!.toJSON())).toContain('is selected but not ready');
+    const remove = renderer!.root.findAllByProps({ title: 'Delete damaged files' }).find(node => node.type === 'button')!;
+    await act(async () => { await remove.props.onClick(); });
+    expect(confirm).toHaveBeenCalled();
+    expect(invoke).toHaveBeenCalledWith(`${engine.prefix}_delete_corrupted_model`, { modelName: engine.model.name });
+    const text = JSON.stringify(renderer!.toJSON());
+    expect(text).toContain('is selected but not ready');
+    expect(text).not.toContain('for transcription');
+  });
+
   test(`${engine.label}: the selected model must be changed before deletion`, async () => {
     available = [{ ...engine.model }];
     reply = respond;
     await show(engine.model.name);
     expect(selectButton().props['aria-pressed']).toBe(true);
+    expect(JSON.stringify(renderer!.toJSON())).toContain('for transcription');
     const remove = renderer!.root.findAllByProps({ title: 'Select another model before deleting this one' })
       .find(node => node.type === 'button')!;
     await act(async () => { await remove.props.onClick(); });

@@ -320,7 +320,9 @@ export function ParakeetModelManager({
   const deleteModel = async (model: ParakeetModelInfo) => {
     const modelName = model.name;
     const displayName = getModelDisplayName(modelName);
-    // The saved model stays usable: choose another one before removing it.
+    // A ready selected model must be replaced before it is removed. Damaged or
+    // partial files of the selected model can still be deleted: that selection
+    // was already unusable, and SelectedModelNote says so.
     if (selectedModel === modelName && model.status === 'Available') {
       toast.error('Select another model before deleting this one');
       return;
@@ -399,7 +401,10 @@ export function ParakeetModelManager({
         );
       })}
 
-      <SelectedModelNote displayName={selectedModel ? getModelDisplayName(selectedModel) : undefined} />
+      <SelectedModelNote
+        displayName={selectedModel ? getModelDisplayName(selectedModel) : undefined}
+        ready={models.some(model => model.name === selectedModel && model.status === 'Available')}
+      />
     </div>
   );
 }

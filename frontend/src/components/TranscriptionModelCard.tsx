@@ -253,8 +253,16 @@ export function ModelListError({ message }: { message: string }) {
   );
 }
 
-export function SelectedModelNote({ displayName }: { displayName?: string }) {
+/** Names the saved model, and says so when it cannot be used as it is. */
+export function SelectedModelNote({ displayName, ready }: { displayName?: string; ready: boolean }) {
   if (!displayName) return null;
+  if (!ready) {
+    return (
+      <p className="pt-2 text-center text-xs text-orange-700 dark:text-orange-300" role="status">
+        {displayName} is selected but not ready. Download it or choose another model.
+      </p>
+    );
+  }
   return (
     <p className="pt-2 text-center text-xs text-gray-500 dark:text-ink-400">
       Using {displayName} for transcription

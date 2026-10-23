@@ -234,3 +234,11 @@ test('a cancelled event that arrives before the cancel response leaves Cancel av
   expect(renderer!.root.findAllByProps({ title: 'Cancel download' }).length).toBeGreaterThan(0);
   expect(JSON.stringify(renderer!.toJSON())).not.toContain('Cancellation requested');
 });
+
+test('the note says a selected model that is not installed is not ready', async () => {
+  available = [{ ...model, status: 'Missing', has_partial_download: true }];
+  await act(async () => { renderer = create(<FunAsrModelManager selectedModel="nano-q4" onModelSelect={selected} autoSave />); });
+  const text = JSON.stringify(renderer!.toJSON());
+  expect(text).toContain('is selected but not ready');
+  expect(text).not.toContain('for transcription');
+});
