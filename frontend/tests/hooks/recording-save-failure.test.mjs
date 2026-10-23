@@ -16,6 +16,8 @@ async function loadHook({
   refetch = async () => {},
   getMeeting = async () => ({ title: 'Saved meeting' }),
   deferNavigation = false,
+  deferDelayMs,
+  loadStored = async () => [],
 } = {}) {
   const listeners = new Map();
   const statuses = [];
@@ -24,13 +26,14 @@ async function loadHook({
   const pendingRegistrations = [];
   const toasts = [];
   const navigationTimers = [];
-  const transcriptsRef = { current: [{ text: 'Keep this transcript' }] };
+  const transcriptsRef = { current: [{ id: 'old-segment', sequence_id: 1, text: 'Keep this transcript', timestamp: '00:00' }] };
+  const delayedWaits = [];
   const activeToasts = new Map();
   const showToast = (...args) => {
     toasts.push(args);
     activeToasts.set(args[1]?.id ?? Symbol('toast'), args);
   };
-  const calls = { save: 0, clear: 0, markSaved: 0, flush: 0, poll: 0, transcriptionSuccess: 0, markedIds: [], navigation: [], recording: [], disabled: [], active: [] };
+  const calls = { save: 0, clear: 0, markSaved: 0, flush: 0, poll: 0, transcriptionSuccess: 0, markedIds: [], savedMeetings: [], recoveryReads: [], refreshes: 0, navigation: [], recording: [], disabled: [], active: [] };
   const storage = new Map([['indexeddb_current_meeting_id', 'old-recording']]);
   const recordingStatus = Object.fromEntries([
     'IDLE', 'STOPPING', 'PROCESSING_TRANSCRIPTS', 'SAVING', 'ERROR', 'COMPLETED', 'RECORDING',
@@ -77,11 +80,14 @@ async function loadHook({
     }) };
     if (name === '@/components/Sidebar/SidebarProvider') return { useSidebar: () => ({
       setIsMeetingActive: active => calls.active.push(active),
-      refetchMeetings: refetch, setCurrentMeeting() {},
+      refetchMeetings: async () => { calls.refreshes++; return refetch(); }, setCurrentMeeting() {},
     }) };
     if (name === '@/services/storageService') return { storageService: {
-      saveMeeting: async () => { calls.save++; return save(); },
+      saveMeeting: async (...args) => { calls.save++; calls.savedMeetings.push(args); return save(...args); },
       getMeeting,
+    } };
+    if (name === '@/services/indexedDBService') return { indexedDBService: {
+      getTranscripts: async id => { calls.recoveryReads.push(id); return loadStored(id); },
     } };
     if (name === '@/lib/summary-language-preferences') return {
       applyPinnedSummaryLanguageToMeeting: async () => true,
@@ -111,6 +117,7 @@ async function loadHook({
     },
     setTimeout: (fn, ms) => {
       if (deferNavigation && ms === 2000) navigationTimers.push(fn);
+      else if (deferDelayMs === ms) delayedWaits.push(fn);
       else fn();
     },
   });
@@ -126,7 +133,7 @@ async function loadHook({
   await act(async () => { renderer = create(React.createElement(View)); });
   return {
     get hook() { return hook; },
-    listeners, statuses, toasts, activeToasts, calls, storage, transcriptsRef, navigationTimers, context, subscriptions, removals, pendingRegistrations,
+    listeners, statuses, toasts, activeToasts, calls, storage, transcriptsRef, navigationTimers, delayedWaits, context, subscriptions, removals, pendingRegistrations,
     render: () => act(async () => { renderer.update(React.createElement(View)); }),
     unmount: () => act(async () => { renderer.unmount(); }),
   };
@@ -290,12 +297,12 @@ test('a new recording clears the transcript warning before a successful stop', a
 });
 
 
-for (const pendingStep of ['transcription wait', 'meeting save', 'recovery update', 'meeting list', 'meeting fetch']) {
+for (const pendingStep of ['transcription wait', 'recovery read', 'meeting save', 'recovery update', 'meeting list', 'meeting fetch']) {
   test(`a new recording during ${pendingStep} cancels the previous stop UI work`, async t => {
     let finishStep;
     const pending = () => new Promise(resolve => { finishStep = resolve; });
     const options = {
-      'transcription wait': { poll: pending }, 'meeting save': { save: pending },
+      'transcription wait': { poll: pending }, 'recovery read': { loadStored: pending }, 'meeting save': { save: pending },
       'recovery update': { markSaved: pending }, 'meeting list': { refetch: pending },
       'meeting fetch': { getMeeting: pending },
     };
@@ -312,11 +319,12 @@ for (const pendingStep of ['transcription wait', 'meeting save', 'recovery updat
     const changes = { statuses: state.statuses.length, active: state.calls.active.length, disabled: state.calls.disabled.length };
     finishStep(pendingStep === 'transcription wait'
       ? { is_processing: false, chunks_in_queue: 0 }
+      : pendingStep === 'recovery read' ? []
       : { meeting_id: 'saved-meeting', title: 'Saved meeting' });
     await stopping;
-    assert.equal(state.calls.save, pendingStep === 'transcription wait' ? 0 : 1);
-    assert.equal(state.calls.markSaved, pendingStep === 'transcription wait' ? 0 : 1);
-    if (pendingStep !== 'transcription wait') assert.deepEqual(state.calls.markedIds, ['old-recording']);
+    assert.equal(state.calls.save, 1);
+    assert.equal(state.calls.markSaved, 1);
+    assert.deepEqual(state.calls.markedIds, ['old-recording']);
     assert.equal(state.calls.transcriptionSuccess, 0);
     assert.equal(state.calls.clear, 0);
     assert.equal(state.calls.navigation.length, 0);
@@ -435,7 +443,7 @@ for (const pendingStep of ['transcription wait', 'meeting save']) {
   });
 }
 
-test('a new recording after page unmount still cancels the old transcript wait', async t => {
+test('a new recording after page unmount preserves the old save and the new recovery ID', async t => {
   let finishPoll;
   const state = await loadHook({ poll: () => new Promise(resolve => { finishPoll = resolve; }) });
   t.after(state.unmount);
@@ -446,8 +454,9 @@ test('a new recording after page unmount still cancels the old transcript wait',
   state.storage.set('indexeddb_current_meeting_id', 'new-recording');
   finishPoll({ is_processing: false, chunks_in_queue: 0 });
   await stopping;
-  assert.equal(state.calls.save, 0);
-  assert.equal(state.calls.markSaved, 0);
+  assert.equal(state.calls.save, 1);
+  assert.equal(state.calls.markSaved, 1);
+  assert.deepEqual(state.calls.markedIds, ['old-recording']);
   assert.equal(state.storage.get('indexeddb_current_meeting_id'), 'new-recording');
   assert.equal(state.listeners.size, 0);
 });
@@ -483,4 +492,97 @@ test('a late audio save error after unmount still prevents recovery cleanup', as
   assert.equal(state.storage.get('indexeddb_current_meeting_id'), 'old-recording');
   assert.equal(state.statuses.at(-1).status, 'ERROR');
   assert.equal(state.listeners.size, 0);
+});
+
+test('a new recording during the wait saves the old transcript, final segments, and folder', async t => {
+  let finishPoll;
+  const state = await loadHook({
+    poll: () => new Promise(resolve => { finishPoll = resolve; }),
+    loadStored: async () => [
+      { id: 1, meetingId: 'old-recording', sequenceId: 1, text: 'Keep this transcript', timestamp: '00:00', speaker_label: 'You' },
+      { id: 2, meetingId: 'old-recording', sequence_id: 2, text: 'Old final segment', timestamp: '00:01',
+        audio_start_time: 1, audio_end_time: 2, duration: 1, speaker_label: 'Guest',
+        candidate_speaker_ids: ['guest'], diarization_status: 'provisional' },
+    ],
+  });
+  t.after(state.unmount);
+  await state.listeners.get('recording-stopped')({ payload: {
+    folder_path: '/recordings/Old', meeting_name: 'Old meeting', transcript_warning: transcriptWarning,
+  } });
+  const stopping = state.hook.handleRecordingStop(true);
+  await new Promise(setImmediate);
+  state.listeners.get('recording-started')({ payload: {} });
+  state.transcriptsRef.current = [{ id: 'new-segment', sequence_id: 1, text: 'New recording text' }];
+  state.storage.set('indexeddb_current_meeting_id', 'new-recording');
+  await state.listeners.get('recording-stopped')({ payload: {
+    folder_path: '/recordings/New', meeting_name: 'New meeting',
+  } });
+  finishPoll({ is_processing: true, chunks_in_queue: 1 });
+  await stopping;
+  const [title, transcripts, folder] = state.calls.savedMeetings[0];
+  assert.equal(title, 'Old meeting');
+  assert.equal(folder, '/recordings/Old');
+  assert.deepEqual(Array.from(transcripts, t => t.text), ['Keep this transcript', 'Old final segment']);
+  assert.equal(transcripts[0].speaker_label, 'You');
+  assert.equal(transcripts[1].audio_start_time, 1);
+  assert.equal(transcripts[1].audio_end_time, 2);
+  assert.equal(transcripts[1].speaker_label, 'Guest');
+  assert.equal(transcripts[1].candidate_speaker_ids[0], 'guest');
+  assert.equal(transcripts[1].diarization_status, 'provisional');
+  assert.deepEqual(state.calls.recoveryReads, ['old-recording']);
+  assert.deepEqual(state.calls.markedIds, ['old-recording']);
+  assert.equal(state.calls.refreshes, 1);
+  assert.equal(state.calls.clear, 0);
+  assert.equal(state.calls.navigation.length, 0);
+  assert.equal(state.storage.get('indexeddb_current_meeting_id'), 'new-recording');
+  assert.equal(state.storage.get('last_recording_folder_path'), '/recordings/New');
+});
+
+for (const delay of [4000, 500]) {
+  test(`a new recording during the ${delay} ms wait does not skip the old save`, async t => {
+    const state = await loadHook({ deferDelayMs: delay });
+    t.after(state.unmount);
+    const stopping = state.hook.handleRecordingStop(true);
+    await new Promise(setImmediate);
+    assert.equal(state.delayedWaits.length, 1);
+    state.listeners.get('recording-started')({ payload: {} });
+    state.transcriptsRef.current = [{ text: 'New recording text' }];
+    state.storage.set('indexeddb_current_meeting_id', 'new-recording');
+    state.delayedWaits[0]();
+    await stopping;
+    assert.equal(state.calls.save, 1);
+    assert.equal(state.calls.savedMeetings[0][1][0].text, 'Keep this transcript');
+    assert.deepEqual(state.calls.markedIds, ['old-recording']);
+    assert.equal(state.calls.clear, 0);
+    assert.equal(state.calls.navigation.length, 0);
+  });
+}
+
+test('starting a new recording dismisses the old audio save-error notification', async t => {
+  const state = await loadHook({ allowSuccess: true });
+  t.after(state.unmount);
+  await state.listeners.get('recording-stopped')({ payload: { save_error: 'Previous audio save failed' } });
+  assert.equal(state.activeToasts.has('recording-save-failed'), true);
+  state.listeners.get('recording-started')({ payload: {} });
+  await state.listeners.get('recording-stopped')({ payload: {} });
+  await state.hook.handleRecordingStop(true);
+  assert.equal(state.activeToasts.has('recording-save-failed'), false);
+  assert.equal(state.toasts.at(-1)[0], 'Recording saved successfully!');
+});
+
+test('a recovery read failure keeps the original transcript snapshot for saving', async t => {
+  let finishPoll;
+  const state = await loadHook({
+    poll: () => new Promise(resolve => { finishPoll = resolve; }),
+    loadStored: async () => { throw new Error('IndexedDB read failed'); },
+  });
+  t.after(state.unmount);
+  const stopping = state.hook.handleRecordingStop(true);
+  await new Promise(setImmediate);
+  state.transcriptsRef.current = [];
+  state.listeners.get('recording-started')({ payload: {} });
+  finishPoll({ is_processing: true, chunks_in_queue: 1 });
+  await stopping;
+  assert.equal(state.calls.save, 1);
+  assert.equal(state.calls.savedMeetings[0][1][0].text, 'Keep this transcript');
 });
