@@ -190,6 +190,7 @@ This document provides a quick overview of all available CI/CD workflows in this
 - Applies the same template rules to every author and actor, including maintainers
 - Recognizes the `[BUG]`, `[FEATURE]`, `[DOCS]`, and `[QUESTION]` title prefixes
 - Requires information in each required section and checks each required box
+- Accepts checked tasks in bullet or ordered lists, with optional notes after the required text
 - Keeps deeper Markdown headings inside their field and ignores code samples when checking required boxes
 - Ignores headings and task-list text inside raw HTML blocks; hidden HTML comments cannot complete required fields
 - Keeps code fences within their list item, including after a nested quote, and handles HTML blocks after a list, quote, or GFM table ends

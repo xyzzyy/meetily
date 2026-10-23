@@ -925,6 +925,42 @@ test("code samples and indented code cannot satisfy required task-list boxes", (
   }
 });
 
+test("checked task items accept ordered lists and trailing notes", async () => {
+  for (const [first, second] of [["1.", "2."], ["1)", "2)"], ["-", "-"], ["*", "*"], ["+", "+"]]) {
+    for (const suffix of ["", " (see above)"]) {
+      const body = completeBody.replace("- [x] I have described the issue clearly", first + " [x] I have described the issue clearly" + suffix)
+        .replace("- [x] I have searched for similar issues", second + " [x] I have searched for similar issues" + suffix);
+      for (const check of [enforce, sweep]) {
+        const f = fixture({ eventName: check === sweep ? "schedule" : "issues", issue: { body } });
+        await check(f);
+        assert.equal(f.issue.state, "open", first + suffix);
+      }
+    }
+  }
+});
+
+test("ordered task items in code, unchecked boxes, and changed required text still fail", () => {
+  const { validate } = require("./issue-template.js");
+  const ordered = completeBody.replace("- [x] I have described", "1. [x] I have described")
+    .replace("- [x] I have searched", "2. [x] I have searched");
+  const [fields, boxes] = ordered.split("### Checklist\n");
+  for (const body of [
+    fields + "### Checklist\n```text\n" + boxes + "\n```",
+    fields + "### Checklist\n" + boxes.split("\n").map((line) => "    " + line).join("\n"),
+    ordered.replace("1. [x]", "1. [ ]"),
+    ordered.replace("issue clearly", "issue clearlyer"),
+  ]) assert.equal(validate({ title: "[BUG] Test", body }).ok, false);
+});
+
+test("ordered markers in paragraph text or with too many digits are not task items", () => {
+  const { validate } = require("./issue-template.js");
+  for (const body of [
+    completeBody.replace("### Checklist\n", "### Checklist\nNotes.\n")
+      .replace("- [x] I have described", "2. [x] I have described").replace("- [x] I have searched", "3. [x] I have searched"),
+    completeBody.replaceAll("- [x]", "1000000000. [x]"),
+  ]) assert.equal(validate({ title: "[BUG] Test", body }).ok, false);
+});
+
 test("short or annotated fences do not end an outer code block", () => {
   const { validate } = require("./issue-template.js");
   for (const inner of ["```", "````text", "~~~"]) {

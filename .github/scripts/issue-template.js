@@ -216,6 +216,7 @@ function parseSections(markdown, { includeCode = true } = {}) {
     // can lazily continue a container paragraph; a new block cannot.
     let contentLine = expandedLine;
     let containerIndent = 0;
+    let isListItem = false;
     if (!inComment) {
       const indentation = expandedLine.match(/^ */)[0].length;
       const parentIndent = listIndents.findLast((indent) => indent <= indentation) || 0;
@@ -246,6 +247,7 @@ function parseSections(markdown, { includeCode = true } = {}) {
           const prefix = item[1].length + item[2].length + padding;
           containerIndent += prefix;
           listIndents.push(containerIndent);
+          isListItem = true;
           contentLine = contentLine.slice(prefix);
           inParagraph = false;
         }
@@ -300,7 +302,11 @@ function parseSections(markdown, { includeCode = true } = {}) {
       inParagraph = false;
       continue;
     }
-    if (current) sections.get(current).push(line);
+    // An ordered marker other than 1 cannot start a list within a paragraph.
+    // Do not count such literal text as a checked task when checking boxes.
+    if (current && (includeCode || isListItem || !/^ {0,3}\d{1,9}[.)][ \t]+\[[xX]\]/.test(line))) {
+      sections.get(current).push(line);
+    }
     const setextUnderline = inParagraph && /^ {0,3}(?:=+|-+)[ \t]*$/.test(line);
     inParagraph = !!line.trim() && !thematicBreak(line) && !setextUnderline &&
       !/^ {0,3}#{4,6}(?:[ \t]+|$)/.test(line);
@@ -337,7 +343,7 @@ function uncheckedCheckboxes(template, sections) {
   const unchecked = [];
   for (const item of template.checklist) {
     const pattern = new RegExp(
-      "^ {0,3}[-*+][ \\t]+\\[[xX]\\][ \\t]+" + escapeRegExp(item) + "[ \\t]*$",
+      "^ {0,3}(?:[-*+]|\\d{1,9}[.)])[ \\t]+\\[[xX]\\][ \\t]+" + escapeRegExp(item) + "(?:[ \\t]+.*)?$",
       "m"
     );
     if (!pattern.test(checklist)) unchecked.push(item);
