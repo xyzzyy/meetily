@@ -29,6 +29,13 @@ pub(crate) enum RecordingStartError {
     Other(#[from] anyhow::Error),
 }
 
+/// Keep capture shutdown errors separate from final transcript warnings.
+#[derive(Debug, Default)]
+pub(crate) struct RecordingStopOutcome {
+    pub capture_error: Option<anyhow::Error>,
+    pub transcript_error: Option<anyhow::Error>,
+}
+
 // ============================================================================
 // macOS Core Audio "pre-wake" — ported from feat/audio-device-handling
 // (commit 8bf6af8b, with refinements from d266feac + 7107adc7 + a10f8e55).
@@ -372,7 +379,7 @@ impl RecordingManager {
     }
 
     /// Stop streams and force immediate pipeline flush to process all accumulated audio
-    pub async fn stop_streams_and_force_flush(&mut self) -> Result<()> {
+    pub(crate) async fn stop_streams_and_force_flush(&mut self) -> RecordingStopOutcome {
         info!("🚀 Stopping recording streams with IMMEDIATE pipeline flush");
 
         // CRITICAL: Stop device monitor FIRST to prevent continuous WASAPI polling on Windows
@@ -385,15 +392,13 @@ impl RecordingManager {
         // Stop recording state first - this clears device references
         self.state.stop_recording();
 
-        // Stop audio streams immediately
-        if let Err(e) = self.stream_manager.stop_streams() {
-            error!("Error stopping audio streams: {}", e);
+        // Stop capture and drain the pipeline even when either step fails.
+        let capture_error = self.stream_manager.stop_streams().err();
+        if let Some(error) = &capture_error {
+            error!("Error stopping audio streams: {error:#}");
         }
-
-        // CRITICAL: Force pipeline to flush ALL accumulated audio before stopping
-        debug!("💨 Forcing pipeline to flush accumulated audio immediately");
-        let flush_result = self.pipeline_manager.force_flush_and_stop().await;
-        if let Err(error) = &flush_result {
+        let transcript_error = self.pipeline_manager.force_flush_and_stop().await.err();
+        if let Some(error) = &transcript_error {
             error!("Error during force flush: {error:#}");
         }
 
@@ -401,8 +406,7 @@ impl RecordingManager {
         // This ensures microphone is released even if Drop is delayed
         self.state.cleanup();
 
-        // Return the flush result after resources have been released.
-        flush_result
+        RecordingStopOutcome { capture_error, transcript_error }
     }
 
     /// Save recording after transcription is complete
@@ -704,11 +708,14 @@ mod stop_tests {
             Err(anyhow::anyhow!("Injected final flush failure"))
         }));
 
-        let error = manager.stop_streams_and_force_flush().await.unwrap_err();
-        assert!(error.to_string().contains("Injected final flush failure"));
+        let outcome = manager.stop_streams_and_force_flush().await;
+        assert!(outcome.capture_error.is_none());
+        assert!(outcome.transcript_error.unwrap().to_string().contains("Injected final flush failure"));
         assert!(!manager.state.is_recording());
         // cleanup() clears the start time as well as the recording flag.
         assert!(manager.state.get_recording_duration().is_none());
-        assert!(manager.stop_streams_and_force_flush().await.is_ok());
+        let outcome = manager.stop_streams_and_force_flush().await;
+        assert!(outcome.capture_error.is_none());
+        assert!(outcome.transcript_error.is_none());
     }
 }

@@ -38,7 +38,7 @@ pub async fn funasr_init() -> Result<(), String> {
 fn engine() -> Result<Arc<FunAsrEngine>, String> {
     FUNASR_ENGINE
         .lock()
-        .unwrap()
+        .map_err(|_| "The FUN-ASR engine lock failed. Restart Meetily.".to_string())?
         .as_ref()
         .cloned()
         .ok_or_else(|| "FUN-ASR engine is not initialized".to_string())
