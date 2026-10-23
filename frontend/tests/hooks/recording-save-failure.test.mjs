@@ -18,7 +18,12 @@ async function loadHook({
   const removals = new Map();
   const pendingRegistrations = [];
   const toasts = [];
-  const calls = { save: 0, clear: 0, markSaved: 0, flush: 0, poll: 0 };
+  const activeToasts = new Map();
+  const showToast = (...args) => {
+    toasts.push(args);
+    activeToasts.set(args[1]?.id ?? Symbol('toast'), args);
+  };
+  const calls = { save: 0, clear: 0, markSaved: 0, flush: 0, poll: 0, transcriptionSuccess: 0 };
   const storage = new Map();
   const recordingStatus = Object.fromEntries([
     'IDLE', 'STOPPING', 'PROCESSING_TRANSCRIPTS', 'SAVING', 'ERROR', 'COMPLETED',
@@ -42,11 +47,12 @@ async function loadHook({
         : Promise.resolve(unlisten);
     } };
     if (name === 'sonner') return { toast: {
-      error: (...args) => toasts.push(args),
-      warning: (...args) => toasts.push(args),
+      error: showToast,
+      warning: showToast,
+      dismiss: id => activeToasts.delete(id),
       success: (...args) => {
         assert.ok(allowSuccess, 'False save success');
-        toasts.push(args);
+        showToast(...args);
       },
     } };
     if (name === '@/contexts/RecordingStateContext') return {
@@ -69,6 +75,7 @@ async function loadHook({
     };
     if (name === '@tauri-apps/api/core') return { invoke: async () => ({ enabled: false }) };
     if (name === '@/lib/analytics') return { default: {
+      trackTranscriptionSuccess: () => calls.transcriptionSuccess++,
       trackPageView() {}, getMeetingsCountToday: async () => 1,
       trackMeetingCompleted: async () => {}, updateMeetingCount: async () => {},
     } };
@@ -101,7 +108,7 @@ async function loadHook({
   await act(async () => { renderer = create(React.createElement(View)); });
   return {
     get hook() { return hook; },
-    listeners, statuses, toasts, calls, storage, context, subscriptions, removals, pendingRegistrations,
+    listeners, statuses, toasts, activeToasts, calls, storage, context, subscriptions, removals, pendingRegistrations,
     render: () => act(async () => { renderer.update(React.createElement(View)); }),
     unmount: () => act(async () => { renderer.unmount(); }),
   };
@@ -215,6 +222,7 @@ test('a final transcript warning permits meeting save and replaces the success t
   await state.hook.handleRecordingStop(true);
   assert.equal(state.calls.save, 1);
   assert.equal(state.calls.markSaved, 1);
+  assert.equal(state.calls.transcriptionSuccess, 0);
   assert.equal(state.calls.clear, 1);
   assert.equal(state.toasts.at(-1)[0], 'Meeting saved. Transcript may be incomplete');
   assert.equal(state.toasts.at(-1)[1].description, transcriptWarning);
@@ -232,6 +240,7 @@ test('a late transcript warning replaces success without preventing meeting save
   finishPoll({ is_processing: false, chunks_in_queue: 0 });
   await stopping;
   assert.equal(state.calls.save, 1);
+  assert.equal(state.calls.transcriptionSuccess, 0);
   assert.equal(state.toasts.at(-1)[1].description, transcriptWarning);
 });
 
@@ -252,8 +261,12 @@ test('a new recording clears the transcript warning before a successful stop', a
   const state = await loadHook({ allowSuccess: true });
   t.after(state.unmount);
   await state.listeners.get('recording-stopped')({ payload: { transcript_warning: transcriptWarning } });
+  assert.equal(state.activeToasts.get('recording-transcript-incomplete')[1].description, transcriptWarning);
   state.listeners.get('recording-started')({ payload: {} });
+  assert.equal(state.activeToasts.has('recording-transcript-incomplete'), false);
   await state.hook.handleRecordingStop(true);
   assert.equal(state.calls.save, 1);
+  assert.equal(state.calls.transcriptionSuccess, 1);
+  assert.equal(state.activeToasts.size, 1);
   assert.equal(state.toasts.at(-1)[0], 'Recording saved successfully!');
 });

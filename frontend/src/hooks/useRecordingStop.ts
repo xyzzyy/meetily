@@ -99,6 +99,7 @@ export function useRecordingStop(
     void listen('recording-started', () => {
       saveErrorRef.current = null;
       transcriptWarningRef.current = null;
+      toast.dismiss('recording-transcript-incomplete');
       recordingStoppedDataRef.current = null;
     }).then(retainUnlistener).catch(error => {
       console.error('Failed to setup recording started listener:', error);
@@ -394,6 +395,11 @@ export function useRecordingStop(
 
           // Mark as completed
           setStatus(RecordingStatus.COMPLETED);
+
+          // Record success only after the final transcript result is known.
+          if (!transcriptWarningRef.current) {
+            Analytics.trackTranscriptionSuccess();
+          }
 
           // Keep the transcript warning visible after the meeting is saved.
           const showSavedToast = transcriptWarningRef.current ? toast.warning : toast.success;

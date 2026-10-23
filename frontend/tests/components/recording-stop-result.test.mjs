@@ -45,11 +45,11 @@ test('a duplicate stop does not start post-processing or report success', async 
   assert.equal(calls.stopping.at(-1), false);
 });
 
-test('the owning stop starts post-processing once', async () => {
+test('the owning stop starts post-processing without claiming transcription success', async () => {
   const { action, calls } = loadStopAction(true);
   await action();
   assert.deepEqual(calls.stopped, [true]);
-  assert.equal(calls.success, 1);
+  assert.equal(calls.success, 0);
 });
 
 test('a failed stop cannot report success', async () => {
