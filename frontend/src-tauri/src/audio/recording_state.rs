@@ -252,6 +252,10 @@ impl RecordingState {
         *self.audio_sender.lock().unwrap() = Some(sender);
     }
 
+    pub(super) fn audio_sender(&self) -> Option<mpsc::UnboundedSender<AudioChunk>> {
+        self.audio_sender.lock().unwrap().clone()
+    }
+
     pub fn send_audio_chunk(&self, chunk: AudioChunk) -> Result<()> {
         // Don't send audio chunks when paused
         if self.is_paused() {
@@ -259,21 +263,27 @@ impl RecordingState {
         }
 
         if let Some(sender) = self.audio_sender.lock().unwrap().as_ref() {
-            sender
-                .send(chunk)
-                .map_err(|_| anyhow::anyhow!("Failed to send audio chunk"))?;
-
-            // Update statistics
-            let mut stats = self.stats.lock().unwrap();
-            stats.chunks_processed += 1;
-            stats.last_activity = Some(Instant::now());
-            Ok(())
+            self.send_captured_chunk(sender, chunk)
         } else {
             // Return an error when no sender is available (pipeline not ready)
             Err(anyhow::anyhow!(
                 "Audio pipeline not ready - no sender available"
             ))
         }
+    }
+
+    pub(super) fn send_captured_chunk(
+        &self,
+        sender: &mpsc::UnboundedSender<AudioChunk>,
+        chunk: AudioChunk,
+    ) -> Result<()> {
+        sender
+            .send(chunk)
+            .map_err(|_| anyhow::anyhow!("Failed to send audio chunk"))?;
+        let mut stats = self.stats.lock().unwrap();
+        stats.chunks_processed += 1;
+        stats.last_activity = Some(Instant::now());
+        Ok(())
     }
 
     // Error handling

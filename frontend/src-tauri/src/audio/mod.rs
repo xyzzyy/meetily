@@ -24,6 +24,7 @@ pub mod diarization_stems;
 pub mod hardware_detector;
 pub mod incremental_saver; // NEW: Incremental audio saving with checkpoints
 pub mod level_monitor;
+mod capture_resampler;
 pub mod pipeline;
 pub mod playback_monitor;
 pub mod post_processor;

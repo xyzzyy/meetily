@@ -32,6 +32,7 @@ unsafe impl Send for StreamBackend {}
 pub struct AudioStream {
     device: Arc<AudioDevice>,
     backend: StreamBackend,
+    capture: AudioCapture,
 }
 
 // SAFETY: AudioStream contains StreamBackend which we've marked as Send
@@ -137,6 +138,7 @@ impl AudioStream {
         Ok(Self {
             device,
             backend: StreamBackend::Cpal(stream),
+            capture,
         })
     }
 
@@ -190,33 +192,12 @@ impl AudioStream {
             async move {
                 use futures_util::StreamExt;
 
-                let mut buffer = Vec::new();
-                let mut frame_count = 0;
-                let frames_per_chunk = 1024; // Process in chunks of 1024 samples
-
-                info!("✅ Stream: Core Audio processing task started for {}", device_name);
-
-                let mut _sample_count = 0u64;
+                info!("Core Audio processing task started for {}", device_name);
                 while let Some(sample) = stream.next().await {
-                    _sample_count += 1;
-                    // if _sample_count % 48000 == 0 {
-                    //     info!("📊 Stream: Received {} samples from Core Audio stream", _sample_count);
-                    // }
-
-                    buffer.push(sample);
-                    frame_count += 1;
-
-                    // Process when we have enough samples
-                    if frame_count >= frames_per_chunk {
-                        capture.process_audio_data(&buffer);
-                        buffer.clear();
-                        frame_count = 0;
-                    }
+                    capture.process_audio_sample(sample);
                 }
-
-                // Process any remaining samples
-                if !buffer.is_empty() {
-                    capture.process_audio_data(&buffer);
+                if let Err(e) = capture.finish() {
+                    error!("Failed to drain Core Audio capture: {}", e);
                 }
 
                 info!("⚠️ Stream: Core Audio processing task ended for {}", device_name);
@@ -230,6 +211,7 @@ impl AudioStream {
             backend: StreamBackend::CoreAudio {
                 task: Some(task),
             },
+            capture,
         })
     }
 
@@ -333,22 +315,19 @@ impl AudioStream {
             }
             #[cfg(target_os = "macos")]
             StreamBackend::CoreAudio { task } => {
-                // Abort the processing task and wait briefly for cleanup
                 if let Some(task_handle) = task {
-                    info!("Aborting Core Audio task...");
                     task_handle.abort();
-                    // Give the runtime a moment to clean up the aborted task
-                    // This helps ensure Arc references in the closure are dropped
-                    std::thread::sleep(std::time::Duration::from_millis(50));
-                    info!("Core Audio task aborted");
                 }
             }
         }
 
+        // This waits for any callback in progress and prevents later callbacks from sending.
+        let drain_result = self.capture.finish();
+
         // Explicitly drop self.device Arc reference
         drop(self.device);
         info!("Audio stream stopped and device reference dropped");
-        Ok(())
+        drain_result
     }
 }
 
