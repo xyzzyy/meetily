@@ -16,6 +16,7 @@ const TEMPLATES = {
       "Steps to Reproduce",
       "Environment",
     ],
+    optional: ["Additional Context"],
     checklist: [
       "I have described the issue clearly",
       "I have searched for similar issues",
@@ -26,6 +27,7 @@ const TEMPLATES = {
     file: "feature_request.yml",
     label: "enhancement",
     required: ["Feature Description", "Upstream Work & Prior Art"],
+    optional: ["Additional Context & Notes"],
     checklist: [
       "I have described the issue clearly",
       "I have searched for similar feature requests",
@@ -36,6 +38,7 @@ const TEMPLATES = {
     file: "documentation.yml",
     label: "documentation",
     required: ["Documentation Location", "Issue Type", "What's Wrong"],
+    optional: ["Suggested Fix", "Additional Context"],
     checklist: [
       "I have described the issue clearly",
       "I have searched for similar documentation issues",
@@ -46,6 +49,7 @@ const TEMPLATES = {
     file: "question.yml",
     label: "question",
     required: ["What are you trying to do?", "What have you already tried?"],
+    optional: ["Docs / Links You Consulted", "Environment (if relevant)", "Additional Context"],
     checklist: ["I have described the issue clearly"],
   },
 };
@@ -83,11 +87,15 @@ function htmlBlockStart(line, inParagraph) {
 }
 
 // Issue forms use level-three headings. Accept the older level-one and
-// level-two sections too. Deeper headings remain field content.
+// level-two sections too. Only form field names start sections; other
+// headings remain field content. Optional fields still end required fields.
 // Keep code in text fields, but exclude it when checking task-list boxes.
-function parseSections(markdown, { includeCode = true } = {}) {
+function parseSections(markdown, { includeCode = true, template } = {}) {
   const lines = markdown.split(/\r?\n/);
   const sections = new Map();
+  const sectionNames = new Set((template ? [template] : Object.values(TEMPLATES))
+    .flatMap((form) => [...form.required, ...form.optional, "Checklist"])
+    .map((name) => name.toLowerCase()));
   let current = null;
   let fence = null;
   let html = null;
@@ -296,8 +304,9 @@ function parseSections(markdown, { includeCode = true } = {}) {
     }
     const line = withoutComments(rawLine, lineIndex);
     const heading = line.match(/^ {0,3}#{1,3}[ \t]+(.+?)[ \t]*$/);
-    if (heading) {
-      current = heading[1].replace(/[ \t]+#+[ \t]*$/, "").trim();
+    const name = heading && heading[1].replace(/[ \t]+#+[ \t]*$/, "").trim();
+    if (name && sectionNames.has(name.toLowerCase())) {
+      current = name;
       if (!sections.has(current)) sections.set(current, []);
       inParagraph = false;
       continue;
@@ -309,7 +318,7 @@ function parseSections(markdown, { includeCode = true } = {}) {
     }
     const setextUnderline = inParagraph && /^ {0,3}(?:=+|-+)[ \t]*$/.test(line);
     inParagraph = !!line.trim() && !thematicBreak(line) && !setextUnderline &&
-      !/^ {0,3}#{4,6}(?:[ \t]+|$)/.test(line);
+      !/^ {0,3}#{1,6}(?:[ \t]+|$)/.test(line);
   }
   return sections;
 }
@@ -358,9 +367,9 @@ function validate(issue) {
   if (!template) {
     return { ok: false, template: null, missing: [], unchecked: [] };
   }
-  const sections = parseSections(issue.body || "");
+  const sections = parseSections(issue.body || "", { template });
   const missing = missingSections(template, sections);
-  const unchecked = uncheckedCheckboxes(template, parseSections(issue.body || "", { includeCode: false }));
+  const unchecked = uncheckedCheckboxes(template, parseSections(issue.body || "", { includeCode: false, template }));
   return {
     ok: missing.length === 0 && unchecked.length === 0,
     template: template,

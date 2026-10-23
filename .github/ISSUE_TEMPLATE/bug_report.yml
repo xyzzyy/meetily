@@ -31,7 +31,7 @@ body:
         Describe the current behavior. Separate observed results from source findings.
         Put relevant error output in code blocks and identify output that is only quoted from the source.
       placeholder: |
-        Paste error output between the fences below.
+        Describe what happened. Include relevant error output in a code block.
     validations:
       required: true
 

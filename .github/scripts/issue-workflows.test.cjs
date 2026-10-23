@@ -893,12 +893,43 @@ test("the shared validator rejects empty sections, unchecked boxes, and headings
   assert.equal(validate({ title: "No prefix", body: completeBody }).ok, false);
 });
 
-test("nested Markdown headings remain part of their required field", () => {
-  const { validate } = require("./issue-template.js");
-  for (const level of [4, 5, 6]) {
+test("headings within completed form fields do not close an issue", async () => {
+  for (const level of [1, 2, 3, 4, 5, 6]) {
     const body = completeBody.replace("### Bug Description\nThe app stops.", "### Bug Description\n" + "#".repeat(level) + " Details\nThe app stops.");
-    assert.equal(validate({ title: "[BUG] Example", body }).ok, true);
+    const f = fixture({ issue: { body } });
+    await enforce(f);
+    assert.equal(f.issue.state, "open", "heading level " + level);
+    assert.ok(!f.calls.some((call) => call.method === "update"));
   }
+});
+
+test("each form accepts headings in every required field", () => {
+  const { TEMPLATES, validate } = require("./issue-template.js");
+  for (const [prefix, form] of Object.entries(TEMPLATES)) {
+    for (const level of [1, 2, 3]) {
+      const body = form.required.map((name) => "### " + name + "\n" + "#".repeat(level) + " Summary\nSome details.").join("\n\n") +
+        "\n\n### Checklist\n" + form.checklist.map((item) => "- [x] " + item).join("\n");
+      assert.equal(validate({ title: prefix + " Example", body }).ok, true, prefix + " heading level " + level);
+    }
+  }
+});
+
+test("optional form fields cannot supply missing required information", () => {
+  const { TEMPLATES, validate } = require("./issue-template.js");
+  for (const [prefix, form] of Object.entries(TEMPLATES)) {
+    for (const optional of form.optional) {
+      const empty = form.required.at(-1);
+      const body = form.required.map((name) => "### " + name + "\n" + (name === empty ? "" : "Some details.")).join("\n\n") +
+        "\n\n### " + optional + "\nOptional details.\n\n### Checklist\n" + form.checklist.map((item) => "- [x] " + item).join("\n");
+      assert.deepEqual(validate({ title: prefix + " Example", body }).missing, [empty], prefix + " optional field " + optional);
+    }
+  }
+});
+
+test("a field name from another form remains content", () => {
+  const { validate } = require("./issue-template.js");
+  const body = completeBody.replace("### Bug Description\nThe app stops.", "### Bug Description\n### What's Wrong\nThe app stops.");
+  assert.equal(validate({ title: "[BUG] Example", body }).ok, true);
 });
 
 test("existing level-one and level-two section headings still pass", () => {
