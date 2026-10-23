@@ -156,6 +156,7 @@ export function useRecordingStop(
   // A stop owns its session until a later recording starts.
   const stopSessionRef = useRef<RecordingStopSession>({ saveError: null, transcriptWarning: null });
   const stopInProgressRef = useRef<RecordingStopSession | null>(null);
+  const pendingNavigationRef = useRef<RecordingStopSession | null>(null);
   // The page's Stop button calls handleRecordingStop only after stop_recording returns.
   const stopRequestedRef = useRef(false);
   const isMountedRef = useRef(true);
@@ -264,8 +265,8 @@ export function useRecordingStop(
     disposeListenersRef.current = disposeListeners;
     return () => {
       isMountedRef.current = false;
-      // Keep start/stop results available until a requested or in-flight stop has finished.
-      if (!stopInProgressRef.current && !stopRequestedRef.current) disposeListeners();
+      // Keep session changes visible until stop work and delayed cleanup have finished.
+      if (!stopInProgressRef.current && !stopRequestedRef.current && !pendingNavigationRef.current) disposeListeners();
     };
   }, []);
 
@@ -533,17 +534,25 @@ export function useRecordingStop(
           });
 
           // Auto-navigate after a short delay with source parameter
+          pendingNavigationRef.current = stopSession;
           setTimeout(() => {
-            if (!isCurrent()) return;
-            // Navigate only from the page the user is still on.
-            if (isMountedRef.current) {
-              router.push(`/meeting-details?id=${meetingId}&source=recording`);
-              Analytics.trackPageView('meeting_details');
-            }
-            clearTranscripts()
+            try {
+              if (!isCurrent()) return;
+              // Navigate only from the page the user is still on.
+              if (isMountedRef.current) {
+                router.push(`/meeting-details?id=${meetingId}&source=recording`);
+                Analytics.trackPageView('meeting_details');
+              }
+              clearTranscripts();
 
-            // Reset to IDLE after navigation
-            setStatus(RecordingStatus.IDLE);
+              // Reset to IDLE after navigation
+              setStatus(RecordingStatus.IDLE);
+            } finally {
+              if (pendingNavigationRef.current === stopSession) pendingNavigationRef.current = null;
+              if (!isMountedRef.current && !stopInProgressRef.current && !stopRequestedRef.current && !pendingNavigationRef.current) {
+                disposeListenersRef.current?.();
+              }
+            }
           }, 2000);
 
         } catch (saveError) {
@@ -595,7 +604,7 @@ export function useRecordingStop(
       if (stopInProgressRef.current === stopSession) {
         stopInProgressRef.current = null;
       }
-      if (!isMountedRef.current && !stopInProgressRef.current) {
+      if (!isMountedRef.current && !stopInProgressRef.current && !pendingNavigationRef.current) {
         disposeListenersRef.current?.();
       }
     }

@@ -517,6 +517,27 @@ test('unmount before delayed navigation still resets the saved recording', async
   assert.equal(state.calls.navigation.length, 0);
   assert.equal(state.calls.clear, 1);
   assert.equal(state.statuses.at(-1).status, 'IDLE');
+  assert.equal(state.listeners.size, 0);
+});
+
+test('a new recording after unmount is protected from the old navigation timer', async t => {
+  const state = await loadHook({ allowSuccess: true, deferNavigation: true });
+  t.after(state.unmount);
+  await state.hook.handleRecordingStop(true);
+  await state.unmount();
+  // The sidebar can open Home and start a new recording without reloading the app.
+  assert.equal(typeof state.listeners.get('recording-started'), 'function');
+  state.listeners.get('recording-started')({ payload: {} });
+  state.storage.set('indexeddb_current_meeting_id', 'new-recording');
+  state.transcriptsRef.current = [{ id: 'new-segment', text: 'New recording transcript' }];
+  state.statuses.push({ status: 'RECORDING' });
+  state.navigationTimers[0]();
+  assert.equal(state.calls.clear, 0);
+  assert.equal(state.calls.navigation.length, 0);
+  assert.equal(state.transcriptsRef.current[0].text, 'New recording transcript');
+  assert.equal(state.storage.get('indexeddb_current_meeting_id'), 'new-recording');
+  assert.equal(state.statuses.at(-1).status, 'RECORDING');
+  assert.equal(state.listeners.size, 0);
 });
 
 test('a cleared context before the final snapshot keeps the stop transcript', async t => {
