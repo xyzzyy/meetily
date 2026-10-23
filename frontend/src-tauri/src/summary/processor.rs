@@ -16,7 +16,7 @@ static THINK_MARKER_REGEX: Lazy<Regex> =
 
 /// Matches timestamp references like [14:32-15:18], [14:32–15:18], or single [14:32]
 static REFERENCE_REGEX: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"\[(\d{1,4}):(\d{2})(?:[-–—](\d{1,4}):(\d{2}))?\]").unwrap()
+    Regex::new(r"\[(\d{1,4}):(\d{2})(?:\s*[-–—]\s*(\d{1,4}):(\d{2}))?\]").unwrap()
 });
 
 /// A parsed transcript reference extracted from the summary markdown.
@@ -1020,6 +1020,16 @@ Second point. [27:41–28:05]"
         let refs = extract_transcript_references("Just a plain summary without timestamps.");
         assert!(refs.is_empty());
     }
+    #[test]
+    fn extracts_references_with_spaces_around_delimiter() {
+        let refs = extract_transcript_references("Decision: [14:32 - 15:18] and [20:00 – 21:30]");
+        assert_eq!(refs.len(), 2);
+        assert!((refs[0].start_time - 872.0).abs() < f64::EPSILON);
+        assert!((refs[0].end_time - 918.0).abs() < f64::EPSILON);
+        assert!((refs[1].start_time - 1200.0).abs() < f64::EPSILON);
+        assert!((refs[1].end_time - 1290.0).abs() < f64::EPSILON);
+    }
+
 
     #[test]
     fn prompt_tests_check_reference_instructions() {

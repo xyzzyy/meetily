@@ -97,6 +97,7 @@ const TranscriptSegment = memo(function TranscriptSegment({
     showConfidence,
     selected,
     onToggle,
+    highlighted,
 }: {
     id: string;
     timestamp: number;
@@ -112,6 +113,7 @@ const TranscriptSegment = memo(function TranscriptSegment({
     showConfidence: boolean;
     selected?: boolean;
     onToggle?: (id: string) => void;
+    highlighted?: boolean;
 }) {
     const displayText = cleanStopWords(text) || (text.trim() === '' ? '[Silence]' : text);
     const duration = endTime !== undefined && endTime >= timestamp
@@ -135,7 +137,12 @@ const TranscriptSegment = memo(function TranscriptSegment({
             : null;
 
     return (
-        <div id={`segment-${id}`} className="mb-3">
+        <div
+            id={`segment-${id}`}
+            className={`mb-3 rounded-md transition-all duration-500 ${
+                highlighted ? 'ring-2 ring-blue-500 bg-blue-50/60 dark:bg-blue-950/40 p-1.5 -m-1.5' : ''
+            }`}
+        >
             <div className="flex items-start gap-2">
                 {onToggle && (
                     <input
@@ -315,31 +322,76 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
     const useVirtualization = segments.length >= VIRTUALIZATION_THRESHOLD;
 
     // Scroll to specific segment when scrollToTime changes
+    const lastHandledKeyRef = useRef(0);
+    const pendingScrollRef = useRef<{ key: number; time: number } | null>(null);
+    const [highlightedSegmentId, setHighlightedSegmentId] = useState<string | null>(null);
+
+    // Scroll to specific segment when scrollToKey changes or pending load arrives
     useEffect(() => {
-        if (scrollToTime === undefined || segments.length === 0) return;
+        if (scrollToTime === undefined || scrollToKey === undefined || scrollToKey === 0 || segments.length === 0) return;
+
+        const isNewRequest = scrollToKey !== lastHandledKeyRef.current;
+        const isPending = pendingScrollRef.current?.key === scrollToKey;
+
+        if (!isNewRequest && !isPending) return;
+
+        if (isNewRequest) {
+            lastHandledKeyRef.current = scrollToKey;
+        }
+
+        // Check if target timestamp is beyond currently loaded segments
+        const lastSegment = segments[segments.length - 1];
+        const lastLoadedTime = lastSegment.endTime ?? lastSegment.timestamp;
+
+        if (scrollToTime > lastLoadedTime && hasMore && onLoadMore) {
+            pendingScrollRef.current = { key: scrollToKey, time: scrollToTime };
+            onLoadMore();
+            return;
+        }
+
+        // Target is within range or we reached end of available segments
+        pendingScrollRef.current = null;
 
         // Find the segment whose time range contains the target
         let targetIndex = segments.findIndex(s =>
             s.timestamp <= scrollToTime && (s.endTime ?? s.timestamp) >= scrollToTime
         );
-        // Fallback: find nearest segment
+
+        // Fallback: find nearest segment by distance to speech window
         if (targetIndex === -1) {
             let best = 0;
             let bestDist = Infinity;
             for (let i = 0; i < segments.length; i++) {
-                const dist = Math.abs(segments[i].timestamp - scrollToTime);
-                if (dist < bestDist) { bestDist = dist; best = i; }
+                const s = segments[i];
+                const sEnd = s.endTime ?? s.timestamp;
+                const dist = scrollToTime < s.timestamp
+                    ? s.timestamp - scrollToTime
+                    : scrollToTime > sEnd
+                        ? scrollToTime - sEnd
+                        : 0;
+                if (dist < bestDist) {
+                    bestDist = dist;
+                    best = i;
+                }
             }
             targetIndex = best;
         }
 
-        if (useVirtualization) {
-            virtualizer.scrollToIndex(targetIndex, { align: 'center' });
-        } else {
-            const el = document.getElementById(`segment-${segments[targetIndex].id}`);
-            el?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        const targetSegment = segments[targetIndex];
+        if (targetSegment) {
+            setHighlightedSegmentId(targetSegment.id);
+            const timer = setTimeout(() => setHighlightedSegmentId(null), 2500);
+
+            if (useVirtualization) {
+                virtualizer.scrollToIndex(targetIndex, { align: 'center' });
+            } else {
+                const el = document.getElementById(`segment-${targetSegment.id}`);
+                el?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            }
+
+            return () => clearTimeout(timer);
         }
-    }, [scrollToTime, scrollToKey, segments, useVirtualization, virtualizer]);
+    }, [scrollToTime, scrollToKey, segments, hasMore, onLoadMore, useVirtualization, virtualizer]);
 
     return (
         <div ref={scrollRef} className="flex flex-col h-full overflow-y-auto px-4 py-2">
@@ -422,6 +474,7 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
                                         showConfidence={showConfidence}
                                         selected={selectedSegmentIds?.has(segment.id)}
                                         onToggle={onToggleSegment}
+                                        highlighted={highlightedSegmentId === segment.id}
                                     />
                                 </div>
                             );
@@ -486,6 +539,7 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
                                         showConfidence={showConfidence}
                                         selected={selectedSegmentIds?.has(segment.id)}
                                         onToggle={onToggleSegment}
+                                        highlighted={highlightedSegmentId === segment.id}
                                     />
                                 </motion.div>
                             );

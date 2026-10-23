@@ -125,13 +125,39 @@ export const BlockNoteSummaryView = forwardRef<BlockNoteSummaryViewRef, BlockNot
   }, [format, data?.summary_json]);
 
 
+  // Handle transcript reference clicks via event delegation on container
+  const handleContainerClick = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
+    const target = (e.target as HTMLElement).closest('.transcript-ref');
+    if (target && target instanceof HTMLElement && containerRef.current?.contains(target)) {
+      e.preventDefault();
+      e.stopPropagation();
+      const startTime = parseFloat(target.dataset.start ?? '0');
+      const endTime = parseFloat(target.dataset.end ?? String(startTime));
+      onTranscriptRefClick?.(startTime, endTime);
+    }
+  }, [onTranscriptRefClick]);
+
+  const handleContainerKeyDown = useCallback((e: React.KeyboardEvent<HTMLDivElement>) => {
+    if (e.key === 'Enter' || e.key === ' ') {
+      const target = (e.target as HTMLElement).closest('.transcript-ref');
+      if (target && target instanceof HTMLElement && containerRef.current?.contains(target)) {
+        e.preventDefault();
+        e.stopPropagation();
+        const startTime = parseFloat(target.dataset.start ?? '0');
+        const endTime = parseFloat(target.dataset.end ?? String(startTime));
+        onTranscriptRefClick?.(startTime, endTime);
+      }
+    }
+  }, [onTranscriptRefClick]);
+
   // Make transcript references [MM:SS-MM:SS], [MM:SS–MM:SS], or [MM:SS] clickable in the rendered DOM
   useEffect(() => {
     if ((format !== 'markdown' && format !== 'blocknote') || !containerRef.current) return;
 
     const root = containerRef.current;
-    // Matches [MM:SS-MM:SS], [MM:SS–MM:SS], [MM:SS—MM:SS], or single [MM:SS]
-    const TIMESTAMP_REF = /\[(\d{1,4}:\d{2})(?:[-–—](\d{1,4}:\d{2}))?\]/g;
+    // Matches [MM:SS-MM:SS], [MM:SS–MM:SS], [MM:SS—MM:SS], or single [MM:SS], allowing optional whitespace around delimiters
+    const TIMESTAMP_REF = /\[(\d{1,4}:\d{2})(?:\s*[-–—]\s*(\d{1,4}:\d{2}))?\]/g;
+    let isMutating = false;
 
     function walkTextNodes(node: Node) {
       if (node.nodeType === Node.TEXT_NODE) {
@@ -167,10 +193,10 @@ export const BlockNoteSummaryView = forwardRef<BlockNoteSummaryViewRef, BlockNot
           refEl.title = `Jump to transcript ${match[0]}`;
           refEl.dataset.start = String(startTime);
           refEl.dataset.end = String(endTime);
-          refEl.onclick = (e) => {
-            e.stopPropagation();
-            onTranscriptRefClick?.(startTime, endTime);
-          };
+          refEl.contentEditable = 'false';
+          refEl.setAttribute('role', 'button');
+          refEl.setAttribute('tabindex', '0');
+          refEl.setAttribute('aria-label', `Jump to transcript at ${match[0]}`);
           fragment.appendChild(refEl);
 
           lastIndex = match.index + match[0].length;
@@ -191,13 +217,51 @@ export const BlockNoteSummaryView = forwardRef<BlockNoteSummaryViewRef, BlockNot
       }
     }
 
-    const timer = setTimeout(() => {
-      walkTextNodes(root);
-    }, 200);
+    const scan = () => {
+      if (isMutating || !containerRef.current) return;
+      isMutating = true;
+      try {
+        walkTextNodes(containerRef.current);
+      } finally {
+        isMutating = false;
+      }
+    };
 
-    return () => clearTimeout(timer);
-  }, [format, data?.markdown, data?.summary_json, onTranscriptRefClick]);
+    scan();
+    const rafId = requestAnimationFrame(scan);
+    const timeoutId = setTimeout(scan, 100);
 
+    const observer = new MutationObserver((mutations) => {
+      if (isMutating) return;
+      let shouldScan = false;
+      for (const mutation of mutations) {
+        for (const added of Array.from(mutation.addedNodes)) {
+          if (added.nodeType === Node.TEXT_NODE) {
+            shouldScan = true;
+            break;
+          } else if (
+            added.nodeType === Node.ELEMENT_NODE &&
+            !(added as HTMLElement).classList.contains('transcript-ref')
+          ) {
+            shouldScan = true;
+            break;
+          }
+        }
+        if (shouldScan) break;
+      }
+      if (shouldScan) {
+        scan();
+      }
+    });
+
+    observer.observe(root, { childList: true, subtree: true });
+
+    return () => {
+      cancelAnimationFrame(rafId);
+      clearTimeout(timeoutId);
+      observer.disconnect();
+    };
+  }, [format, data?.markdown, data?.summary_json]);
   const handleEditorChange = useCallback((blocks: Block[]) => {
     // Only set dirty flag if content has finished loading
     if (isContentLoaded.current) {
@@ -316,7 +380,7 @@ export const BlockNoteSummaryView = forwardRef<BlockNoteSummaryViewRef, BlockNot
   if (format === 'blocknote') {
     console.log('🎨 Rendering BLOCKNOTE format (direct)');
     return (
-      <div ref={containerRef} className="flex flex-col w-full">
+      <div ref={containerRef} onClick={handleContainerClick} onKeyDown={handleContainerKeyDown} className="flex flex-col w-full">
         <div className="w-full">
           <Editor
             initialContent={data.summary_json}
@@ -335,7 +399,7 @@ export const BlockNoteSummaryView = forwardRef<BlockNoteSummaryViewRef, BlockNot
   if (format === 'markdown') {
     console.log('🎨 Rendering MARKDOWN format (parsed to BlockNote)');
     return (
-      <div ref={containerRef} className="flex flex-col w-full">
+      <div ref={containerRef} onClick={handleContainerClick} onKeyDown={handleContainerKeyDown} className="flex flex-col w-full">
         <div className="w-full">
           <BlockNoteView
             editor={editor}
