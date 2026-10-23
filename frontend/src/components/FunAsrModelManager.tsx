@@ -178,8 +178,17 @@ export function FunAsrModelManager({
     };
   }, [refresh, reportDownloadError, displayName]);
 
+  const clearCancelling = (modelName: string) => {
+    setCancelling(current => {
+      const next = new Set(current);
+      next.delete(modelName);
+      return next;
+    });
+  };
+
   const downloadModel = async (modelName: string) => {
     downloadErrors.current.delete(modelName);
+    clearCancelling(modelName);
     setModels((current) =>
       current.map((model) =>
         model.name === modelName
@@ -190,11 +199,7 @@ export function FunAsrModelManager({
     try {
       await FunAsrAPI.downloadModel(modelName);
     } catch (error) {
-      setCancelling(current => {
-        const next = new Set(current);
-        next.delete(modelName);
-        return next;
-      });
+      clearCancelling(modelName);
       const message = error instanceof Error ? error.message : String(error);
       const cancelled = message === 'FUN-ASR model download cancelled';
       // The worker also rejects the command on a normal cancellation. Show
@@ -209,13 +214,19 @@ export function FunAsrModelManager({
   };
 
   const cancelDownload = async (modelName: string) => {
+    // Mark the request before it is sent: the worker's terminal event can
+    // arrive before the command returns, and it must be able to clear this.
+    setCancelling(current => new Set(current).add(modelName));
     try {
       const requested = await FunAsrAPI.cancelDownload(modelName);
       // A transfer may finish between rendering the Cancel button and clicking
       // it. Refresh that state without claiming that a transfer was cancelled.
-      if (requested) setCancelling(current => new Set(current).add(modelName));
-      else await refresh();
+      if (!requested) {
+        clearCancelling(modelName);
+        await refresh();
+      }
     } catch (error) {
+      clearCancelling(modelName);
       toast.error('Could not cancel the download', { description: String(error) });
     }
   };
