@@ -78,6 +78,7 @@
 
 @layer base {
   :root {
+    color-scheme: light;
     --background: 0 0% 100%;
     --foreground: 0 0% 3.9%;
     --card: 0 0% 100%;
@@ -105,26 +106,29 @@
     --chart-5: 27 87% 67%;
   }
 
-  .dark {
-    --background: 0 0% 3.9%;
-    --foreground: 0 0% 98%;
-    --card: 0 0% 3.9%;
-    --card-foreground: 0 0% 98%;
-    --popover: 0 0% 3.9%;
-    --popover-foreground: 0 0% 98%;
-    --primary: 0 0% 98%;
-    --primary-foreground: 0 0% 9%;
-    --secondary: 0 0% 14.9%;
-    --secondary-foreground: 0 0% 98%;
-    --muted: 0 0% 14.9%;
-    --muted-foreground: 0 0% 63.9%;
-    --accent: 0 0% 14.9%;
-    --accent-foreground: 0 0% 98%;
-    --destructive: 0 62.8% 30.6%;
+  /* BlockNote's shadcn theme ships its own near-black dark palette; keep editors on the app palette */
+  .dark,
+  .dark .bn-shadcn.dark {
+    color-scheme: dark;
+    --background: 240 4% 9.8%;
+    --foreground: 240 5.6% 92.9%;
+    --card: 240 4% 9.8%;
+    --card-foreground: 240 5.6% 92.9%;
+    --popover: 240 4.2% 13.9%;
+    --popover-foreground: 240 5.6% 92.9%;
+    --primary: 240 5.6% 92.9%;
+    --primary-foreground: 240 4% 9.8%;
+    --secondary: 240 4.2% 13.9%;
+    --secondary-foreground: 240 5.6% 92.9%;
+    --muted: 240 4.2% 13.9%;
+    --muted-foreground: 240 3.6% 56.1%;
+    --accent: 240 4.3% 18.4%;
+    --accent-foreground: 240 5.6% 92.9%;
+    --destructive: 0 72.2% 50.6%;
     --destructive-foreground: 0 0% 98%;
-    --border: 0 0% 14.9%;
-    --input: 0 0% 14.9%;
-    --ring: 0 0% 83.1%;
+    --border: 240 4.2% 13.9%;
+    --input: 240 4% 24.5%;
+    --ring: 240 3.6% 56.1%;
     --chart-1: 220 70% 50%;
     --chart-2: 160 60% 45%;
     --chart-3: 30 80% 55%;
@@ -166,18 +170,18 @@
   }
 
   .custom-scrollbar::-webkit-scrollbar-thumb {
-    background: #d1d5db;
+    background: hsl(var(--input));
     border-radius: 3px;
   }
 
   .custom-scrollbar::-webkit-scrollbar-thumb:hover {
-    background: #9ca3af;
+    background: hsl(var(--muted-foreground));
   }
 
   /* Firefox scrollbar */
   .custom-scrollbar {
     scrollbar-width: thin;
-    scrollbar-color: #d1d5db transparent;
+    scrollbar-color: hsl(var(--input)) transparent;
   }
 
   /* BlockNote Editor - Override fixed dimensions for responsive layout */
@@ -210,5 +214,11 @@
   /* Disable scrolling on any BlockNote wrapper elements */
   [data-node-type] {
     overflow: visible !important;
+  }
+
+  /* BlockNote hardcodes light table borders */
+  .dark .bn-editor [data-content-type=table] th,
+  .dark .bn-editor [data-content-type=table] td {
+    border-color: theme('colors.ink.600');
   }
 }

@@ -248,22 +248,22 @@ export function ImportAudioDialog({
           <DialogTitle className="flex items-center gap-2">
             {isProcessing ? (
               <>
-                <Loader2 className="h-5 w-5 animate-spin text-blue-600" />
+                <Loader2 className="h-5 w-5 animate-spin text-blue-600 dark:text-blue-400" />
                 Importing Audio...
               </>
             ) : error ? (
               <>
-                <AlertCircle className="h-5 w-5 text-red-600" />
+                <AlertCircle className="h-5 w-5 text-red-600 dark:text-red-400" />
                 Import Failed
               </>
             ) : status === 'complete' ? (
               <>
-                <CheckCircle2 className="h-5 w-5 text-green-600" />
+                <CheckCircle2 className="h-5 w-5 text-green-600 dark:text-green-400" />
                 Import Complete
               </>
             ) : (
               <>
-                <Upload className="h-5 w-5 text-blue-600" />
+                <Upload className="h-5 w-5 text-blue-600 dark:text-blue-400" />
                 Import Audio File
               </>
             )}
@@ -282,12 +282,12 @@ export function ImportAudioDialog({
           {!isProcessing && !error && (
             <>
               {fileInfo ? (
-                <div className="bg-gray-50 rounded-lg p-4 space-y-3">
+                <div className="bg-gray-50 dark:bg-ink-800/50 rounded-lg p-4 space-y-3">
                   <div className="flex items-start gap-3">
-                    <FileAudio className="h-8 w-8 text-blue-600 flex-shrink-0" />
+                    <FileAudio className="h-8 w-8 text-blue-600 dark:text-blue-400 flex-shrink-0" />
                     <div className="flex-1 min-w-0">
-                      <p className="font-medium text-gray-900 truncate">{fileInfo.filename}</p>
-                      <div className="flex items-center gap-4 text-sm text-gray-500 mt-1">
+                      <p className="font-medium text-gray-900 dark:text-ink-100 truncate">{fileInfo.filename}</p>
+                      <div className="flex items-center gap-4 text-sm text-gray-500 dark:text-ink-400 mt-1">
                         <span className="flex items-center gap-1">
                           <Clock className="h-3.5 w-3.5" />
                           {formatDuration(fileInfo.duration_seconds)}
@@ -296,14 +296,14 @@ export function ImportAudioDialog({
                           <HardDrive className="h-3.5 w-3.5" />
                           {formatFileSize(fileInfo.size_bytes)}
                         </span>
-                        <span className="text-blue-600 font-medium">{fileInfo.format}</span>
+                        <span className="text-blue-600 dark:text-blue-400 font-medium">{fileInfo.format}</span>
                       </div>
                     </div>
                   </div>
 
                   {/* Editable title */}
                   <div className="space-y-1">
-                    <label className="text-sm font-medium text-gray-700">Meeting Title</label>
+                    <label className="text-sm font-medium text-gray-700 dark:text-ink-200">Meeting Title</label>
                     <Input
                       value={title}
                       onChange={(e) => {
@@ -319,7 +319,7 @@ export function ImportAudioDialog({
                   </Button>
                 </div>
               ) : (
-                <div className="border-2 border-dashed border-gray-300 rounded-lg p-8 text-center">
+                <div className="border-2 border-dashed border-gray-300 dark:border-ink-700 rounded-lg p-8 text-center">
                   <FileAudio className="h-12 w-12 text-gray-400 mx-auto mb-4" />
                   <Button onClick={handleSelectFile} disabled={status === 'validating'}>
                     {status === 'validating' ? (
@@ -334,7 +334,7 @@ export function ImportAudioDialog({
                       </>
                     )}
                   </Button>
-                  <p className="text-sm text-gray-500 mt-2">MP4, WAV, MP3, FLAC, OGG, MKV, WebM, WMA</p>
+                  <p className="text-sm text-gray-500 dark:text-ink-400 mt-2">MP4, WAV, MP3, FLAC, OGG, MKV, WebM, WMA</p>
                 </div>
               )}
 
@@ -343,7 +343,7 @@ export function ImportAudioDialog({
                 <div className="border rounded-lg">
                   <button
                     onClick={() => setShowAdvanced(!showAdvanced)}
-                    className="w-full flex items-center justify-between p-3 text-sm font-medium text-gray-700 hover:bg-gray-50"
+                    className="w-full flex items-center justify-between p-3 text-sm font-medium text-gray-700 dark:text-ink-200 hover:bg-gray-50 dark:hover:bg-ink-800/50"
                   >
                     <span>Advanced Options</span>
                     {showAdvanced ? (
@@ -387,7 +387,7 @@ export function ImportAudioDialog({
                         </div>
                       )}
 
-                      {modelNotice && <p className="text-sm text-amber-700" role="status">{modelNotice}</p>}
+                      {modelNotice && <p className="text-sm text-amber-700 dark:text-amber-300" role="status">{modelNotice}</p>}
                       {/* Model selector */}
                       {availableModels.length > 0 && (
                         <div className="space-y-2">
@@ -427,13 +427,13 @@ export function ImportAudioDialog({
           {isProcessing && progress && (
             <div className="space-y-2">
               <div className="relative">
-                <div className="w-full bg-gray-200 rounded-full h-3">
+                <div className="w-full bg-gray-200 dark:bg-ink-800 rounded-full h-3">
                   <div
                     className="bg-blue-600 h-3 rounded-full transition-all duration-300 ease-out"
                     style={{ width: `${Math.min(progress.progress_percentage, 100)}%` }}
                   />
                 </div>
-                <div className="flex justify-between text-xs text-gray-600 mt-1">
+                <div className="flex justify-between text-xs text-gray-600 dark:text-ink-300 mt-1">
                   <span>{progress.stage}</span>
                   <span>{Math.round(progress.progress_percentage)}%</span>
                 </div>
@@ -444,8 +444,8 @@ export function ImportAudioDialog({
 
           {/* Error display */}
           {error && (
-            <div className="bg-red-50 border border-red-200 rounded-lg p-3">
-              <p className="text-sm text-red-800">{error}</p>
+            <div className="bg-red-50 dark:bg-red-500/10 border border-red-200 dark:border-red-500/30 rounded-lg p-3">
+              <p className="text-sm text-red-800 dark:text-red-200">{error}</p>
             </div>
           )}
         </div>

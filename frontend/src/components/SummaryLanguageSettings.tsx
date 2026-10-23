@@ -16,12 +16,12 @@ export function SummaryLanguageSettings() {
   };
 
   return (
-    <div className="bg-white rounded-lg border border-gray-200 p-6 shadow-sm relative">
+    <div className="bg-white dark:bg-ink-900 rounded-lg border border-gray-200 dark:border-ink-800 p-6 shadow-sm relative">
       <div className="flex items-center gap-2 mb-2">
-        <Globe size={18} className="text-gray-500" />
-        <h3 className="text-lg font-semibold text-gray-900">Summary Language</h3>
+        <Globe size={18} className="text-gray-500 dark:text-ink-400" />
+        <h3 className="text-lg font-semibold text-gray-900 dark:text-ink-100">Summary Language</h3>
       </div>
-      <p className="text-sm text-gray-600 mb-4">
+      <p className="text-sm text-gray-600 dark:text-ink-300 mb-4">
         Pin one language as the default for new meetings. Unpinned languages remain as
         quick-switch options in the summary generator. Auto uses the dominant transcript language.
       </p>
@@ -34,8 +34,8 @@ export function SummaryLanguageSettings() {
               key={code}
               className={`inline-flex items-center rounded-full border text-sm overflow-hidden ${
                 isPinned
-                  ? 'bg-blue-50 border-blue-200 text-blue-800'
-                  : 'bg-gray-100 border-gray-200 text-gray-800'
+                  ? 'bg-blue-50 dark:bg-blue-500/10 border-blue-200 dark:border-blue-500/30 text-blue-800 dark:text-blue-200'
+                  : 'bg-gray-100 dark:bg-ink-800 border-gray-200 dark:border-ink-800 text-gray-800 dark:text-ink-100'
               }`}
             >
               <button
@@ -45,12 +45,12 @@ export function SummaryLanguageSettings() {
                 title={isPinned ? 'Click to unset as default' : 'Click to set as default'}
                 onClick={() => togglePin(code)}
                 className={`flex items-center gap-1.5 pl-3 pr-2 py-1 hover:brightness-95 active:brightness-90 ${
-                  isPinned ? 'text-blue-800' : 'text-gray-800'
+                  isPinned ? 'text-blue-800 dark:text-blue-200' : 'text-gray-800 dark:text-ink-100'
                 }`}
               >
                 <Pin
                   size={14}
-                  className={isPinned ? 'text-blue-600' : 'text-gray-400'}
+                  className={isPinned ? 'text-blue-600 dark:text-blue-400' : 'text-gray-400'}
                   fill={isPinned ? 'currentColor' : 'none'}
                 />
                 {labelForCode(code)}
@@ -59,7 +59,7 @@ export function SummaryLanguageSettings() {
                 type="button"
                 aria-label={`Remove ${labelForCode(code)}`}
                 onClick={() => removeRecent(code)}
-                className={`pr-2.5 pl-0.5 py-1 leading-none ${isPinned ? 'text-blue-400 hover:text-blue-700' : 'text-gray-400 hover:text-gray-700'}`}
+                className={`pr-2.5 pl-0.5 py-1 leading-none ${isPinned ? 'text-blue-400 hover:text-blue-700 dark:hover:text-blue-300' : 'text-gray-400 hover:text-gray-700 dark:hover:text-ink-200'}`}
               >
                 ×
               </button>
@@ -72,7 +72,7 @@ export function SummaryLanguageSettings() {
             <button
               type="button"
               disabled={recents.length >= 5}
-              className="inline-flex items-center gap-1 rounded-full border border-dashed border-gray-300 px-3 py-1 text-sm text-gray-600 hover:border-gray-400 hover:text-gray-800 disabled:cursor-not-allowed disabled:opacity-50"
+              className="inline-flex items-center gap-1 rounded-full border border-dashed border-gray-300 dark:border-ink-700 px-3 py-1 text-sm text-gray-600 dark:text-ink-300 hover:border-gray-400 dark:hover:border-ink-500 hover:text-gray-800 dark:hover:text-ink-100 disabled:cursor-not-allowed disabled:opacity-50"
             >
               ＋ Add language
             </button>

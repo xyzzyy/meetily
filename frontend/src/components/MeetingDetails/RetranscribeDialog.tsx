@@ -308,17 +308,17 @@ export function RetranscribeDialog({
           <DialogTitle className="flex items-center gap-2">
             {isProcessing ? (
               <>
-                <Loader2 className="h-5 w-5 animate-spin text-blue-600" />
+                <Loader2 className="h-5 w-5 animate-spin text-blue-600 dark:text-blue-400" />
                 Retranscribing...
               </>
             ) : error ? (
               <>
-                <AlertCircle className="h-5 w-5 text-red-600" />
+                <AlertCircle className="h-5 w-5 text-red-600 dark:text-red-400" />
                 Enhancement failed
               </>
             ) : (
               <>
-                <RefreshCw className="h-5 w-5 text-blue-600" />
+                <RefreshCw className="h-5 w-5 text-blue-600 dark:text-blue-400" />
                 Enhance meeting
               </>
             )}
@@ -370,7 +370,7 @@ export function RetranscribeDialog({
           )}
 
           {!isProcessing && !error && modelNotice && (
-            <p className="text-sm text-amber-700" role="status">{modelNotice}</p>
+            <p className="text-sm text-amber-700 dark:text-amber-300" role="status">{modelNotice}</p>
           )}
           {!isProcessing && !error && availableModels.length > 0 && (
             <div className="space-y-3">
@@ -412,13 +412,13 @@ export function RetranscribeDialog({
           {isProcessing && progress && (
             <div className="space-y-2">
               <div className="relative">
-                <div className="w-full bg-gray-200 rounded-full h-3">
+                <div className="w-full bg-gray-200 dark:bg-ink-800 rounded-full h-3">
                   <div
                     className="bg-blue-600 h-3 rounded-full transition-all duration-300 ease-out"
                     style={{ width: `${Math.min(progress.progress_percentage, 100)}%` }}
                   />
                 </div>
-                <div className="flex justify-between text-xs text-gray-600 mt-1">
+                <div className="flex justify-between text-xs text-gray-600 dark:text-ink-300 mt-1">
                   <span>{progress.stage}</span>
                   <span>{Math.round(progress.progress_percentage)}%</span>
                 </div>
@@ -430,8 +430,8 @@ export function RetranscribeDialog({
           )}
 
           {error && (
-            <div className="bg-red-50 border border-red-200 rounded-lg p-3">
-              <p className="text-sm text-red-800">{error}</p>
+            <div className="bg-red-50 dark:bg-red-500/10 border border-red-200 dark:border-red-500/30 rounded-lg p-3">
+              <p className="text-sm text-red-800 dark:text-red-200">{error}</p>
             </div>
           )}
         </div>

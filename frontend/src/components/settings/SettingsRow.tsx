@@ -16,7 +16,7 @@ export function SettingsRow({ title, description, control, disabledReason }: Set
           <div className="mt-1 text-sm text-muted-foreground">{description}</div>
         )}
         {disabledReason && (
-          <div className="mt-2 text-xs text-amber-700">{disabledReason}</div>
+          <div className="mt-2 text-xs text-amber-700 dark:text-amber-300">{disabledReason}</div>
         )}
       </div>
       <div className="flex-shrink-0">{control}</div>

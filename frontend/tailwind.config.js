@@ -28,6 +28,20 @@ module.exports = {
   				foreground: 'hsl(var(--secondary-foreground))'
   			},
   			tertiary: '#64748b',
+  			// Dark mode surfaces and text, from canvas (950) to primary text (100)
+  			ink: {
+  				'50': '#f7f7f8',
+  				'100': '#ececee',
+  				'200': '#d6d6da',
+  				'300': '#b5b5bb',
+  				'400': '#8b8b93',
+  				'500': '#5d5d64',
+  				'600': '#3c3c41',
+  				'700': '#2d2d31',
+  				'800': '#222225',
+  				'900': '#18181a',
+  				'950': '#0f0f10'
+  			},
   			card: {
   				DEFAULT: 'hsl(var(--card))',
   				foreground: 'hsl(var(--card-foreground))'

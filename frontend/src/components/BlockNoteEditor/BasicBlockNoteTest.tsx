@@ -3,10 +3,12 @@ import { useCreateBlockNote } from "@blocknote/react";
 import { BlockNoteView } from "@blocknote/shadcn";
 import "@blocknote/shadcn/style.css";
 import { ChangeEvent, useCallback, useEffect } from "react";
+import { useTheme } from '@/contexts/ThemeContext';
 
 const initialMarkdown = "Hello, **world!**";
 
 export default function BasicBlockNoteTest() {
+  const { resolvedTheme } = useTheme();
   // Creates a new editor instance.
   const editor = useCreateBlockNote({});
 
@@ -46,7 +48,7 @@ export default function BasicBlockNoteTest() {
       <div className="view-wrapper">
         <div className="view-label">Editor Output</div>
         <div className="view">
-          <BlockNoteView editor={editor} editable={true} />
+          <BlockNoteView editor={editor} editable={true} theme={resolvedTheme} />
         </div>
       </div>
     </div>
