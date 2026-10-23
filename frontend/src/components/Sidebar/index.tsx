@@ -665,8 +665,7 @@ const Sidebar: React.FC = () => {
       {/* Floating collapse button */}
       <button
         onClick={toggleCollapse}
-        className="absolute -right-6 top-20 z-50 p-1 bg-white dark:bg-gray-900 hover:bg-gray-100 dark:hover:bg-gray-800 rounded-full shadow-lg border"
-        style={{ transform: 'translateX(50%)' }}
+        className="absolute -right-4 top-20 z-50 p-1 bg-white dark:bg-gray-900 hover:bg-gray-100 dark:hover:bg-gray-800 rounded-full shadow-lg border"
       >
         {isCollapsed ? (
           <ChevronRightCircle className="w-6 h-6" />
