@@ -245,6 +245,7 @@ impl ProfessionalAudioMixer {
 /// Simplified audio capture without broadcast channels
 #[derive(Clone)]
 pub struct AudioCapture {
+    id: u64,
     device: Arc<AudioDevice>,
     state: Arc<RecordingState>,
     sample_rate: u32, // Original device sample rate
@@ -444,7 +445,9 @@ impl AudioCapture {
         };
 
         let sender = state.audio_sender();
-        Self {
+        static NEXT_CAPTURE_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        let capture = Self {
+            id: NEXT_CAPTURE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             device,
             state,
             sample_rate,
@@ -463,7 +466,11 @@ impl AudioCapture {
             high_pass_filter: Arc::new(std::sync::Mutex::new(high_pass_filter)),
             normalizer: Arc::new(std::sync::Mutex::new(normalizer)),
             // Using global recording time for sync
-        }
+        };
+        // The stream may leave its manager before it stops. Session stop finishes
+        // registered captures so a stalled teardown cannot keep the pipeline open.
+        capture.state.register_capture(capture.clone());
+        capture
     }
 
     /// Process audio data directly from callback
@@ -505,6 +512,10 @@ impl AudioCapture {
         }
     }
 
+    pub(super) fn id(&self) -> u64 {
+        self.id
+    }
+
     /// Send all accepted samples before closing this capture's pipeline sender.
     pub fn finish(&self) -> Result<()> {
         let mut processing = self.processing.lock().unwrap();
@@ -512,6 +523,7 @@ impl AudioCapture {
             return Ok(());
         }
         processing.finished = true;
+        self.state.unregister_capture(self.id);
         let samples = std::mem::take(&mut processing.pending_samples);
         self.process_input(&samples, &processing.sender);
         let result = (|| {
@@ -1310,6 +1322,26 @@ mod tests {
                 Err(mpsc::error::TryRecvError::Disconnected)
             ));
         }
+    }
+
+    #[test]
+    fn session_stop_releases_capture_whose_stream_teardown_is_stalled() {
+        let (capture, state, mut receiver) = capture_for_test(16000, DeviceType::Microphone);
+        capture.process_audio_data(&[0.25; 128]);
+        state.stop_recording();
+        // The stalled stream still owns `capture`; session stop must not wait for it.
+        state.finish_captures().unwrap();
+        let mut output = Vec::new();
+        while let Ok(chunk) = receiver.try_recv() {
+            output.extend(chunk.data);
+        }
+        assert!(!output.is_empty());
+        assert!(matches!(
+            receiver.try_recv(),
+            Err(mpsc::error::TryRecvError::Disconnected)
+        ));
+        // The stream's own stop() runs later and finds nothing left to do.
+        capture.finish().unwrap();
     }
 
     #[cfg(target_os = "macos")]

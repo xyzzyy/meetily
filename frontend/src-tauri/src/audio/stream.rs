@@ -445,6 +445,13 @@ impl AudioStreamManager {
             }
         }
 
+        // A stream a device swap took out of this manager may still be stopping.
+        // Finish its capture here so the pipeline sender is released now.
+        if let Err(e) = self.state.finish_captures() {
+            error!("Failed to finish remaining captures: {}", e);
+            errors.push(e);
+        }
+
         if !errors.is_empty() {
             Err(anyhow::anyhow!("Failed to stop some streams: {:?}", errors))
         } else {

@@ -6,6 +6,7 @@ use tokio::sync::mpsc;
 
 use super::buffer_pool::AudioBufferPool;
 use super::devices::AudioDevice;
+use super::pipeline::AudioCapture;
 
 /// Device type for audio chunks
 #[derive(Debug, Clone, PartialEq)]
@@ -117,6 +118,8 @@ pub struct RecordingState {
 
     // Audio pipeline
     audio_sender: Mutex<Option<mpsc::UnboundedSender<AudioChunk>>>,
+    // Captures that have not finished; each holds a pipeline sender until it does
+    captures: Mutex<Vec<AudioCapture>>,
 
     // Memory optimization
     buffer_pool: AudioBufferPool,
@@ -145,6 +148,7 @@ impl RecordingState {
             microphone_device: Mutex::new(None),
             system_device: Mutex::new(None),
             audio_sender: Mutex::new(None),
+            captures: Mutex::new(Vec::new()),
             buffer_pool: AudioBufferPool::new(16, 48000), // Pool of 16 buffers with 48kHz samples capacity
             error_count: AtomicU32::new(0),
             recoverable_error_count: AtomicU32::new(0),
@@ -250,6 +254,27 @@ impl RecordingState {
     // Audio pipeline management
     pub fn set_audio_sender(&self, sender: mpsc::UnboundedSender<AudioChunk>) {
         *self.audio_sender.lock().unwrap() = Some(sender);
+    }
+
+    pub(super) fn register_capture(&self, capture: AudioCapture) {
+        self.captures.lock().unwrap().push(capture);
+    }
+
+    pub(super) fn unregister_capture(&self, id: u64) {
+        self.captures.lock().unwrap().retain(|capture| capture.id() != id);
+    }
+
+    /// Finish every capture that is still open, including streams a device swap
+    /// removed from the manager whose native teardown has not returned.
+    pub(super) fn finish_captures(&self) -> Result<()> {
+        let captures = std::mem::take(&mut *self.captures.lock().unwrap());
+        let mut result = Ok(());
+        for capture in captures {
+            if let Err(e) = capture.finish() {
+                result = Err(e);
+            }
+        }
+        result
     }
 
     pub(super) fn audio_sender(&self) -> Option<mpsc::UnboundedSender<AudioChunk>> {
@@ -412,6 +437,7 @@ impl RecordingState {
         *self.microphone_device.lock().unwrap() = None;
         *self.system_device.lock().unwrap() = None;
         *self.audio_sender.lock().unwrap() = None;
+        self.captures.lock().unwrap().clear();
         *self.last_error.lock().unwrap() = None;
         *self.error_callback.lock().unwrap() = None;
         *self.stats.lock().unwrap() = RecordingStats::default();
@@ -434,6 +460,7 @@ impl Default for RecordingState {
             microphone_device: Mutex::new(None),
             system_device: Mutex::new(None),
             audio_sender: Mutex::new(None),
+            captures: Mutex::new(Vec::new()),
             buffer_pool: AudioBufferPool::new(16, 48000), // Pool of 16 buffers with 48kHz samples capacity
             error_count: AtomicU32::new(0),
             recoverable_error_count: AtomicU32::new(0),
