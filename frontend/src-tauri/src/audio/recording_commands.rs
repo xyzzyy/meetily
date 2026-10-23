@@ -425,20 +425,12 @@ pub async fn start_recording_with_meeting_name<R: Runtime>(
 
     // Spawn background device event processor (mic-disconnect fallback).
     if let Some(receiver) = device_event_receiver {
-        spawn_device_event_processor(app.clone(), receiver, session);
+        spawn_device_event_processor(app.clone(), receiver, session.clone());
     }
 
     // Flip recording live + reset per-session flags (speech-detected latch,
     // mic-recovery budget). Shared with the other start path — see helper.
     finalize_recording_start();
-    drop(engine_lifecycle_guard);
-
-    // Start optimized parallel transcription task and store handle
-    let task_handle = transcription::start_transcription_task(app.clone(), transcription_receiver);
-    {
-        let mut global_task = TRANSCRIPTION_TASK.lock().unwrap();
-        *global_task = Some(task_handle);
-    }
 
     // CRITICAL: Listen for transcript-update events and save to recording manager
     // This enables transcript history persistence for page reload sync
@@ -477,6 +469,10 @@ pub async fn start_recording_with_meeting_name<R: Runtime>(
 
     // Update tray menu to reflect recording state
     crate::tray::update_tray_menu(&app);
+
+    // Register startup events and listeners before the worker can fail.
+    start_managed_transcription(app, transcription_receiver, session);
+    drop(engine_lifecycle_guard);
 
     info!("✅ Recording started successfully with async-first approach");
 
@@ -612,20 +608,12 @@ pub async fn start_recording_with_devices_and_meeting<R: Runtime>(
 
     // Spawn background device event processor (mic-disconnect fallback).
     if let Some(receiver) = device_event_receiver {
-        spawn_device_event_processor(app.clone(), receiver, session);
+        spawn_device_event_processor(app.clone(), receiver, session.clone());
     }
 
     // Flip recording live + reset per-session flags (speech-detected latch,
     // mic-recovery budget). Shared with the other start path — see helper.
     finalize_recording_start();
-    drop(engine_lifecycle_guard);
-
-    // Start optimized parallel transcription task and store handle
-    let task_handle = transcription::start_transcription_task(app.clone(), transcription_receiver);
-    {
-        let mut global_task = TRANSCRIPTION_TASK.lock().unwrap();
-        *global_task = Some(task_handle);
-    }
 
     // CRITICAL: Listen for transcript-update events and save to recording manager
     // This enables transcript history persistence for page reload sync
@@ -668,9 +656,41 @@ pub async fn start_recording_with_devices_and_meeting<R: Runtime>(
     // Update tray menu to reflect recording state
     crate::tray::update_tray_menu(&app);
 
+    // Register startup events and listeners before the worker can fail.
+    start_managed_transcription(app, transcription_receiver, session);
+    drop(engine_lifecycle_guard);
+
     info!("✅ Recording started with custom devices using async-first approach");
 
     Ok(())
+}
+
+/// Keep worker failure handling outside the worker: shutdown joins the worker.
+/// Store its handle before starting the failure monitor.
+fn start_managed_transcription<R: Runtime>(
+    app: AppHandle<R>,
+    receiver: tokio::sync::mpsc::UnboundedReceiver<super::AudioChunk>,
+    session: Arc<super::RecordingState>,
+) {
+    let (worker, fatal_error) = transcription::start_transcription_task(app.clone(), receiver);
+    *TRANSCRIPTION_TASK.lock().unwrap() = Some(worker);
+    tokio::spawn(async move {
+        if fatal_error.await.is_ok() {
+            if let Err(error) = stop_recording_session(app, Some(session)).await {
+                error!("Recording shutdown after a transcription failure failed: {error}");
+            }
+        }
+    });
+}
+
+/// A delayed worker failure can stop only the recording that owns the worker.
+fn matches_stop_session(
+    current: Option<&Arc<super::RecordingState>>,
+    expected: Option<&Arc<super::RecordingState>>,
+) -> bool {
+    expected.map_or(true, |expected| {
+        current.map_or(false, |current| Arc::ptr_eq(current, expected))
+    })
 }
 
 /// Local engine to release after a recording stops.
@@ -703,9 +723,19 @@ pub async fn stop_recording<R: Runtime>(
     app: AppHandle<R>,
     _args: RecordingArgs,
 ) -> Result<bool, String> {
+    stop_recording_session(app, None).await
+}
+
+async fn stop_recording_session<R: Runtime>(
+    app: AppHandle<R>,
+    expected_session: Option<Arc<super::RecordingState>>,
+) -> Result<bool, String> {
     info!(
         "🛑 Starting optimized recording shutdown - ensuring ALL transcript chunks are preserved"
     );
+
+    // Wait for start to store the manager, worker, and listener together.
+    let engine_lifecycle_guard = super::common::acquire_engine_lifecycle_lock().await;
 
     // Check if recording is active
     if !IS_RECORDING.load(Ordering::SeqCst) {
@@ -721,6 +751,22 @@ pub async fn stop_recording<R: Runtime>(
         return Ok(false);
     }
 
+    // Validate the session while taking its manager. Stop ownership keeps a
+    // manual stop and a fatal worker failure from taking it twice.
+    let manager_for_cleanup = {
+        let mut manager = RECORDING_MANAGER.lock().unwrap();
+        if !matches_stop_session(
+            manager.as_ref().map(|manager| manager.get_state()),
+            expected_session.as_ref(),
+        ) {
+            return Ok(false);
+        }
+        manager.take()
+    };
+    // Model unload below can acquire this lock. Release it before waiting for
+    // worker completion or doing any engine cleanup.
+    drop(engine_lifecycle_guard);
+
     // Emit shutdown progress to frontend
     let _ = app.emit(
         "recording-shutdown-progress",
@@ -732,11 +778,6 @@ pub async fn stop_recording<R: Runtime>(
     );
 
     // Step 1: Stop audio capture immediately (no more new chunks) with proper error handling
-    let manager_for_cleanup = {
-        let mut global_manager = RECORDING_MANAGER.lock().unwrap();
-        global_manager.take()
-    };
-
     let stop_result = if let Some(mut manager) = manager_for_cleanup {
         // Use FORCE FLUSH to immediately process all accumulated audio - eliminates 30s delay!
         info!("🚀 Using FORCE FLUSH to eliminate pipeline accumulation delays");
@@ -751,15 +792,12 @@ pub async fn stop_recording<R: Runtime>(
 
     let (stop_result, manager_for_cleanup) = stop_result;
 
-    match stop_result {
-        Ok(_) => {
-            info!("✅ Audio streams stopped successfully - no more chunks will be created");
-        }
-        Err(e) => {
-            error!("❌ Failed to stop audio streams: {}", e);
-            return Err(format!("Failed to stop audio streams: {}", e)); // _stopping_guard clears on return
-        }
-    }
+    // Continue through listener cleanup, save, and the final event on failure.
+    // Capture handles have been consumed even if stopping or flushing failed.
+    let shutdown_error = stop_result.err().map(|error| {
+        error!("Failed to stop audio capture: {error:#}");
+        format!("Recording shutdown failed: {error:#}. Audio may be incomplete.")
+    });
 
     // Step 1.5: Clean up transcript listener to release microphone
     // Unlisten transcript-update event to prevent lingering references
@@ -1100,6 +1138,11 @@ pub async fn stop_recording<R: Runtime>(
         (None, None, Some("Recording save failed: recording manager is missing".to_string()))
     };
 
+    let save_error = match (shutdown_error, save_error) {
+        (Some(shutdown), Some(save)) => Some(format!("{shutdown} {save}")),
+        (shutdown, save) => shutdown.or(save),
+    };
+
     // Set recording flag to false
     info!("🔍 Setting IS_RECORDING to false");
     IS_RECORDING.store(false, Ordering::SeqCst);
@@ -1148,6 +1191,11 @@ pub async fn stop_recording<R: Runtime>(
     if let Some(error) = save_error {
         error!("{error}");
         return Err(error);
+    }
+    if expected_session.is_some() {
+        // Use the global stop handler, including when the recording page is not
+        // mounted. Do not report transcription success after a fatal failure.
+        app.emit("recording-stop-complete", false).map_err(|error| error.to_string())?;
     }
     info!("Recording stopped and saved successfully");
     Ok(true)
@@ -1779,11 +1827,21 @@ mod unload_tests {
 
 #[cfg(test)]
 mod stopping_tests {
-    use super::StoppingGuard;
+    use super::{matches_stop_session, StoppingGuard};
     use std::sync::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
         Barrier,
     };
+
+    #[test]
+    fn failed_worker_can_stop_only_its_own_session() {
+        let failed_session = crate::audio::RecordingState::new();
+        let later_session = crate::audio::RecordingState::new();
+        assert!(matches_stop_session(Some(&failed_session), Some(&failed_session)));
+        assert!(!matches_stop_session(Some(&later_session), Some(&failed_session)));
+        assert!(!matches_stop_session(None, Some(&failed_session)));
+        assert!(matches_stop_session(Some(&later_session), None));
+    }
 
     #[test]
     fn concurrent_stops_have_only_one_owner() {

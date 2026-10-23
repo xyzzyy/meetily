@@ -82,3 +82,15 @@ test('registration completed after unmount releases the tray stop listener', asy
   assert.equal(state.listeners.size, 0);
   assert.equal(state.removals, 1);
 });
+
+test('a fatal worker stop runs global post-processing without reporting success', async () => {
+  const state = await mountProvider();
+  const calls = [];
+  try {
+    await state.render(value => calls.push(value));
+    await state.listeners.get(1)({ payload: false });
+    assert.deepEqual(calls, [false]);
+  } finally {
+    await state.unmount();
+  }
+});
