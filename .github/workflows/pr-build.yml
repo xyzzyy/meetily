@@ -43,6 +43,8 @@ jobs:
         run: pnpm install --frozen-lockfile
       - name: Run build guard tests
         run: node --test .github/verify-portable-ggml.test.cjs
+      - name: Run issue workflow tests
+        run: node --test .github/scripts/issue-workflows.test.cjs
       - name: Run frontend tests
         working-directory: frontend
         run: |

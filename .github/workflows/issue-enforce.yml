@@ -1,0 +1,42 @@
+name: issue-enforce
+
+# Check every author against the same issue templates. Incomplete issues close
+# with an explanation unless template-grace protects edits until the nightly
+# check. Removing template-grace makes the issue subject to normal checks.
+# Closed issues have no automatic checks or cleanup.
+
+on:
+  issues:
+    types: [opened, reopened, edited, unlabeled]
+
+jobs:
+  enforce:
+    if: >-
+      github.event.issue.state == 'open' &&
+      (github.event.action != 'unlabeled' || github.event.label.name == 'template-grace')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    concurrency:
+      group: issue-template-${{ github.event.issue.number }}
+      cancel-in-progress: false
+      queue: max
+    permissions:
+      issues: write
+      contents: read
+    steps:
+      - name: Check out issue checks
+        uses: actions/checkout@v4
+        with:
+          sparse-checkout: .github/scripts
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+
+      - name: Check the open issue
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const path = require("path");
+            const { enforce } = require(
+              path.join(process.env.GITHUB_WORKSPACE, ".github/scripts/issue-workflows.js")
+            );
+            await enforce({ context, github, core });

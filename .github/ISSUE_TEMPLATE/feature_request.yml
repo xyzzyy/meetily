@@ -1,0 +1,60 @@
+name: ✨ Feature Request
+description: Suggest an idea or enhancement for Meetily
+title: '[FEATURE] '
+labels: ['enhancement']
+assignees: []
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for suggesting a feature! Before submitting, please [search existing feature requests](https://github.com/xyzzyy/meetily/issues?q=is%3Aissue%20label%3Aenhancement) and upvote existing ones instead of opening duplicates.
+
+  - type: markdown
+    attributes:
+      value: >
+        Describe the problem, why it matters, and the result you want. Keep solution choices open. Do not add acceptance criteria, completion checklists, or new requirements unless the requester supplied them. Present possible approaches as ideas. Do not turn prior art into requirements.
+        Keep the issue brief. Include only evidence and links that help explain or investigate this problem. Give each useful source a short note about its relevance. Omit search diaries, unrelated results, and repeated details. Distinguish observed behavior, source findings, and untested ideas. Agents must check the current code and merged work before calling a bug unresolved. Check a checklist item only when it is true. Put later progress updates and resolution details in comments. Keep the original problem or request in the issue body.
+
+  - id: feature-description
+    type: textarea
+    attributes:
+      label: Feature Description
+      description: >
+        Describe the problem this feature would solve, why it matters, and the result you want.
+        Possible approaches are optional ideas, not requirements.
+    validations:
+      required: true
+
+  - id: upstream-work
+    type: textarea
+    attributes:
+      label: Upstream Work & Prior Art
+      description: >
+        Link the closest related upstream issues or PRs (for example, on Zackriya-Solutions/meetily)
+        and useful examples from other tools. Give each source a short note about its relevance.
+        An AI agent can do this search. If the search found nothing, write "None found".
+        Report only research that was done.
+      placeholder: |
+        - Upstream: <closest related issue/PR, why it matters, or "None found">
+        - Prior art: <useful example, why it matters, or "None found">
+    validations:
+      required: true
+
+  - id: additional-context
+    type: textarea
+    attributes:
+      label: Additional Context & Notes
+      description: Any other context, screenshots, or mockups about the feature request.
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: checklist
+    attributes:
+      label: Checklist
+      options:
+        - label: I have described the issue clearly
+          required: true
+        - label: I have searched for similar feature requests
+          required: true
+        - label: I have included any relevant screenshots/mockups
