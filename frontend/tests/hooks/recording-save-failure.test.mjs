@@ -496,6 +496,34 @@ test('a requested stop that never reaches the handler releases listeners at the 
   assert.equal(state.listeners.size, 0);
 });
 
+test('a finished stop request without post-processing releases listeners after unmount', async t => {
+  const state = await loadHook();
+  t.after(state.unmount);
+  state.hook.setIsStopping(true);
+  await state.unmount();
+  assert.equal(state.listeners.size, 2);
+  state.statuses.push({ status: 'SAVING' });
+  state.hook.setIsStopping(false);
+  assert.equal(state.listeners.size, 0);
+  assert.equal(state.statuses.at(-1).status, 'SAVING');
+});
+
+test('a finished request keeps an unmounted handler listening until its save ends', async t => {
+  let finishSave;
+  const state = await loadHook({ save: () => new Promise(resolve => { finishSave = resolve; }) });
+  t.after(state.unmount);
+  state.hook.setIsStopping(true);
+  const stopping = state.hook.handleRecordingStop(true);
+  await new Promise(setImmediate);
+  await state.unmount();
+  state.hook.setIsStopping(false);
+  assert.equal(typeof state.listeners.get('recording-stopped'), 'function');
+  finishSave({ meeting_id: 'saved-meeting' });
+  await stopping;
+  assert.equal(state.calls.save, 1);
+  assert.equal(state.listeners.size, 0);
+});
+
 test('an unsaved stop after unmount still ends the meeting', async t => {
   const state = await loadHook();
   t.after(state.unmount);

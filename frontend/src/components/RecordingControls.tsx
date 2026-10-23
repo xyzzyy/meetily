@@ -20,6 +20,7 @@ interface RecordingControlsProps {
   onTranscriptReceived: (summary: SummaryResponse) => void;
   onTranscriptionError?: (message: string) => void;
   onStopInitiated?: () => void; // Called immediately when stop button is clicked
+  onStopRequestFinished?: () => void;
   isRecordingDisabled: boolean;
   isParentProcessing: boolean;
   selectedDevices?: {
@@ -37,6 +38,7 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
   onTranscriptReceived,
   onTranscriptionError,
   onStopInitiated,
+  onStopRequestFinished,
   isRecordingDisabled,
   isParentProcessing,
   selectedDevices,
@@ -184,8 +186,9 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
       onRecordingStop(false);
     } finally {
       setIsStopping(false);
+      onStopRequestFinished?.();
     }
-  }, [onRecordingStop]);
+  }, [onRecordingStop, onStopRequestFinished]);
 
   const handleStopRecording = useCallback(async () => {
     console.log('handleStopRecording called - isRecording:', isRecording, 'isStarting:', isStarting, 'isStopping:', isStopping, 'isStartingRecording:', isStartingRecording);

@@ -101,7 +101,7 @@ fn finalize_recording_start() {
 
 // Global recording manager and transcription task to keep them alive during recording
 static RECORDING_MANAGER: Mutex<Option<RecordingManager>> = Mutex::new(None);
-static TRANSCRIPTION_TASK: Mutex<Option<JoinHandle<()>>> = Mutex::new(None);
+static TRANSCRIPTION_TASK: Mutex<Option<JoinHandle<Result<(), String>>>> = Mutex::new(None);
 
 // Listener ID for proper cleanup - prevents microphone from staying active after recording stops
 static TRANSCRIPT_LISTENER_ID: Mutex<Option<tauri::EventId>> = Mutex::new(None);
@@ -774,12 +774,16 @@ fn model_to_unload(provider: Option<&str>) -> ModelUnload {
 
 /// Return true when queued transcript chunks may not have been processed.
 fn transcription_wait_lost_chunks(
-    result: Result<Result<(), tokio::task::JoinError>, tokio::time::error::Elapsed>,
+    result: Result<Result<Result<(), String>, tokio::task::JoinError>, tokio::time::error::Elapsed>,
 ) -> bool {
     match result {
-        Ok(Ok(())) => {
+        Ok(Ok(Ok(()))) => {
             info!("✅ ALL transcription chunks processed successfully - no data lost");
             false
+        }
+        Ok(Ok(Err(error))) => {
+            warn!("Transcription finished with missing chunks or a failed worker: {error}");
+            true
         }
         Ok(Err(e)) => {
             // Continue anyway, but queued final chunks may not have been transcribed.
@@ -2066,7 +2070,7 @@ mod stop_outcome_tests {
     async fn failed_or_timed_out_transcription_worker_marks_transcript_incomplete() {
         let finished = tokio::time::timeout(
             std::time::Duration::from_secs(5),
-            tokio::spawn(async {}),
+            tokio::spawn(async { Ok(()) }),
         )
         .await;
         assert!(!transcription_wait_lost_chunks(finished));
@@ -2080,10 +2084,19 @@ mod stop_outcome_tests {
 
         let timed_out = tokio::time::timeout(
             std::time::Duration::from_millis(1),
-            tokio::spawn(std::future::pending::<()>()),
+            tokio::spawn(std::future::pending::<Result<(), String>>()),
         )
         .await;
         assert!(transcription_wait_lost_chunks(timed_out));
+    }
+
+    #[tokio::test]
+    async fn reported_inner_worker_failure_marks_transcript_incomplete() {
+        let failed = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            tokio::spawn(async { Err("Inner worker failed".to_string()) }),
+        ).await;
+        assert!(transcription_wait_lost_chunks(failed));
     }
 
     #[test]

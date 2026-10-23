@@ -17,7 +17,7 @@ function loadStopAction(result) {
   }
   visit(file);
   assert.ok(initializer);
-  const calls = { stopped: [], success: 0, processing: [], stopping: [], paths: [] };
+  const calls = { stopped: [], success: 0, processing: [], stopping: [], paths: [], requestsFinished: 0 };
   const compiled = ts.transpileModule(`const stop = ${initializer}; stop;`, {
     compilerOptions: { module: ts.ModuleKind.CommonJS },
   }).outputText;
@@ -29,6 +29,7 @@ function loadStopAction(result) {
     setIsStopping: value => calls.stopping.push(value),
     setRecordingPath: value => calls.paths.push(value),
     onRecordingStop: value => calls.stopped.push(value),
+    onStopRequestFinished: () => calls.requestsFinished++,
     Analytics: { trackTranscriptionSuccess: () => calls.success++ },
     console: { log() {}, error() {} },
   });
@@ -43,6 +44,7 @@ test('a duplicate stop does not start post-processing or report success', async 
   assert.deepEqual(calls.paths, []);
   assert.equal(calls.processing.at(-1), false);
   assert.equal(calls.stopping.at(-1), false);
+  assert.equal(calls.requestsFinished, 1);
 });
 
 test('the owning stop starts post-processing without claiming transcription success', async () => {
@@ -50,6 +52,7 @@ test('the owning stop starts post-processing without claiming transcription succ
   await action();
   assert.deepEqual(calls.stopped, [true]);
   assert.equal(calls.success, 0);
+  assert.equal(calls.requestsFinished, 1);
 });
 
 test('a failed stop cannot report success', async () => {
@@ -57,6 +60,14 @@ test('a failed stop cannot report success', async () => {
   await action();
   assert.deepEqual(calls.stopped, [false]);
   assert.equal(calls.success, 0);
+  assert.equal(calls.requestsFinished, 1);
+});
+
+test('an inactive stop releases its request without starting post-processing', async () => {
+  const { action, calls } = loadStopAction(new Error('No recording in progress'));
+  await action();
+  assert.deepEqual(calls.stopped, []);
+  assert.equal(calls.requestsFinished, 1);
 });
 
 /** Run the component's actual event effect with controllable Tauri events. */

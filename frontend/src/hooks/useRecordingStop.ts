@@ -654,7 +654,12 @@ export function useRecordingStop(
     summaryStatus,
     setIsStopping: (value: boolean) => {
       stopRequestedRef.current = value;
-      setStatus(value ? RecordingStatus.STOPPING : RecordingStatus.IDLE);
+      if (value) {
+        setStatus(RecordingStatus.STOPPING);
+      } else if (!isMountedRef.current && !stopInProgressRef.current && !pendingNavigationRef.current) {
+        // A duplicate or inactive stop does not start post-processing.
+        disposeListenersRef.current?.();
+      }
     },
   };
 }

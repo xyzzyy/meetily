@@ -238,11 +238,31 @@ fn resolve_transcript_timing(chunk: &AudioChunk) -> (f64, f64, f64) {
 // NOTE: get_transcript_history and get_recording_meeting_name functions
 // have been moved to recording_commands.rs where they have access to RECORDING_MANAGER
 
-/// Optimized parallel transcription task ensuring ZERO chunk loss
+/// Join every worker and pass failures to the recording stop command.
+async fn wait_for_transcription_workers(
+    workers: Vec<tokio::task::JoinHandle<()>>,
+) -> Result<(), String> {
+    let mut failure = None;
+    for (worker_id, handle) in workers.into_iter().enumerate() {
+        if let Err(error) = handle.await {
+            let message = format!("Transcription worker {worker_id} failed: {error}");
+            error!("{message}");
+            failure.get_or_insert(message);
+        } else {
+            info!("Worker {worker_id} completed successfully");
+        }
+    }
+    match failure {
+        Some(error) => Err(error),
+        None => Ok(()),
+    }
+}
+
+/// Run the transcription workers and report failures or missing chunks.
 pub fn start_transcription_task<R: Runtime>(
     app: AppHandle<R>,
     transcription_receiver: tokio::sync::mpsc::UnboundedReceiver<AudioChunk>,
-) -> (tokio::task::JoinHandle<()>, tokio::sync::oneshot::Receiver<Result<(), String>>) {
+) -> (tokio::task::JoinHandle<Result<(), String>>, tokio::sync::oneshot::Receiver<Result<(), String>>) {
     let (init_sender, init_receiver) = tokio::sync::oneshot::channel();
     let task = tokio::spawn(async move {
         info!("🚀 Starting optimized parallel transcription task - guaranteeing zero chunk loss");
@@ -255,8 +275,8 @@ pub fn start_transcription_task<R: Runtime>(
                 error!("Failed to initialize transcription engine: {}", e);
                 // The recording owner must stop capture. It runs outside this
                 // task, because shutdown waits for this task to finish.
-                let _ = init_sender.send(Err(e));
-                return;
+                let _ = init_sender.send(Err(e.clone()));
+                return Err(e);
             }
         };
         // A closed channel before this signal means that initialization did
@@ -575,14 +595,8 @@ pub fn start_transcription_task<R: Runtime>(
             "message": format!("{} chunks queued for processing - waiting for completion", total_chunks_queued)
         }));
 
-        // Wait for all workers to complete
-        for (worker_id, handle) in worker_handles.into_iter().enumerate() {
-            if let Err(e) = handle.await {
-                error!("❌ Worker {} panicked: {:?}", worker_id, e);
-            } else {
-                info!("✅ Worker {} completed successfully", worker_id);
-            }
-        }
+        // Keep the result while the final count check and its event still run.
+        let worker_result = wait_for_transcription_workers(worker_handles).await;
 
         // Final verification with retry logic to catch any stragglers
         let mut verification_attempts = 0;
@@ -625,7 +639,14 @@ pub fn start_transcription_task<R: Runtime>(
             }
         }
 
+        worker_result?;
+        let queued = chunks_queued.load(Ordering::SeqCst);
+        let completed = chunks_completed.load(Ordering::SeqCst);
+        if queued != completed {
+            return Err(format!("Transcription ended with {queued} chunks queued and {completed} completed"));
+        }
         info!("✅ Parallel transcription task completed - all workers finished, ready for model unload");
+        Ok(())
     });
     (task, init_receiver)
 }
@@ -829,6 +850,27 @@ fn format_recording_time(seconds: f64) -> String {
     mod tests {
         use super::*;
         use crate::audio::recording_state::{AudioChunk, DeviceType, SourceActivity};
+
+        #[tokio::test]
+        async fn inner_worker_panic_reaches_the_outer_task_after_all_workers_finish() {
+            let (finished_sender, finished_receiver) = tokio::sync::oneshot::channel();
+            let failed = tokio::spawn(async { panic!("Injected inner worker panic") });
+            let remaining = tokio::spawn(async move {
+                tokio::task::yield_now().await;
+                finished_sender.send(()).unwrap();
+            });
+            let supervisor = tokio::spawn(async move {
+                wait_for_transcription_workers(vec![failed, remaining]).await
+            });
+            let error = supervisor.await.unwrap().unwrap_err();
+            assert!(error.contains("Injected inner worker panic"));
+            assert!(finished_receiver.await.is_ok());
+        }
+
+        #[tokio::test]
+        async fn completed_workers_return_success() {
+            assert!(wait_for_transcription_workers(vec![tokio::spawn(async {})]).await.is_ok());
+        }
 
         #[test]
         fn keeps_short_acknowledgements() {
