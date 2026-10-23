@@ -71,6 +71,7 @@ export function RecordingStateProvider({ children }: { children: React.ReactNode
 
   const pollingIntervalRef = useRef<NodeJS.Timeout | null>(null);
   const lifecycleVersionRef = useRef(0);
+  const pauseVersionRef = useRef(0);
 
   // NEW: Status setter with logging
   const setStatus = useCallback((status: RecordingStatus, message?: string) => {
@@ -89,18 +90,27 @@ export function RecordingStateProvider({ children }: { children: React.ReactNode
    */
   const syncWithBackend = async () => {
     const version = lifecycleVersionRef.current;
+    const pauseVersion = pauseVersionRef.current;
     try {
       const backendState = await recordingService.getRecordingState();
 
-      // A response sent before a lifecycle event must not undo that event.
-      setState(prev => version !== lifecycleVersionRef.current ? prev : ({
-        ...prev,
-        isRecording: backendState.is_recording,
-        isPaused: backendState.is_paused,
-        isActive: backendState.is_active,
-        recordingDuration: backendState.recording_duration,
-        activeDuration: backendState.active_duration,
-      }));
+      setState(prev => {
+        // Start and stop events invalidate a snapshot for the whole session.
+        if (version !== lifecycleVersionRef.current) return prev;
+        // Pause events must not discard the mount sync that restores recording
+        // controls after a refresh. Keep the newer pause state instead.
+        const pauseChanged = pauseVersion !== pauseVersionRef.current;
+        return {
+          ...prev,
+          isRecording: backendState.is_recording,
+          isPaused: pauseChanged ? prev.isPaused : backendState.is_paused,
+          isActive: pauseChanged
+            ? backendState.is_recording && !prev.isPaused
+            : backendState.is_active,
+          recordingDuration: backendState.recording_duration,
+          activeDuration: backendState.active_duration,
+        };
+      });
 
       console.log('[RecordingStateContext] Synced with backend:', backendState);
     } catch (error) {
@@ -197,7 +207,7 @@ export function RecordingStateProvider({ children }: { children: React.ReactNode
 
         // Recording paused
         const unlistenPaused = await recordingService.onRecordingPaused(() => {
-          lifecycleVersionRef.current++;
+          pauseVersionRef.current++;
           console.log('[RecordingStateContext] Recording paused event');
           setState(prev => ({
             ...prev,
@@ -209,7 +219,7 @@ export function RecordingStateProvider({ children }: { children: React.ReactNode
 
         // Recording resumed
         const unlistenResumed = await recordingService.onRecordingResumed(() => {
-          lifecycleVersionRef.current++;
+          pauseVersionRef.current++;
           console.log('[RecordingStateContext] Recording resumed event');
           setState(prev => ({
             ...prev,

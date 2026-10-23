@@ -672,15 +672,30 @@ fn start_managed_transcription<R: Runtime>(
     receiver: tokio::sync::mpsc::UnboundedReceiver<super::AudioChunk>,
     session: Arc<super::RecordingState>,
 ) {
-    let (worker, fatal_error) = transcription::start_transcription_task(app.clone(), receiver);
+    let (worker, init_result) = transcription::start_transcription_task(app.clone(), receiver);
     *TRANSCRIPTION_TASK.lock().unwrap() = Some(worker);
     tokio::spawn(async move {
-        if fatal_error.await.is_ok() {
+        if let Err(error) = wait_for_transcription_init(init_result).await {
+            let _ = app.emit("transcription-error", serde_json::json!({
+                "error": error,
+                "userMessage": "Speech recognition failed. Recording is stopping. Check your model settings.",
+                "actionable": true,
+                "phase": "active"
+            }));
             if let Err(error) = stop_recording_session(app, Some(session)).await {
                 error!("Recording shutdown after a transcription failure failed: {error}");
             }
         }
     });
+}
+
+/// Require a success signal. An unexpected worker exit must stop capture too.
+async fn wait_for_transcription_init(
+    result: tokio::sync::oneshot::Receiver<Result<(), String>>,
+) -> Result<(), String> {
+    result.await.unwrap_or_else(|_| {
+        Err("The speech recognition worker exited before initialization finished. Restart Meetily.".to_string())
+    })
 }
 
 /// A delayed worker failure can stop only the recording that owns the worker.
@@ -914,7 +929,7 @@ async fn stop_recording_session<R: Runtime>(
             let engine_clone = {
                 let engine_guard = crate::parakeet_engine::commands::PARAKEET_ENGINE
                     .lock()
-                    .unwrap();
+                    .unwrap_or_else(|error| error.into_inner());
                 engine_guard.as_ref().cloned()
             };
 
@@ -965,7 +980,7 @@ async fn stop_recording_session<R: Runtime>(
             let engine_clone = {
                 let engine_guard = crate::whisper_engine::commands::WHISPER_ENGINE
                     .lock()
-                    .unwrap();
+                    .unwrap_or_else(|error| error.into_inner());
                 engine_guard.as_ref().cloned()
             };
 
@@ -1827,11 +1842,40 @@ mod unload_tests {
 
 #[cfg(test)]
 mod stopping_tests {
-    use super::{matches_stop_session, StoppingGuard};
+    use super::{matches_stop_session, wait_for_transcription_init, StoppingGuard};
     use std::sync::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
         Barrier,
     };
+
+    #[tokio::test]
+    async fn successful_worker_init_does_not_request_shutdown() {
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        sender.send(Ok(())).unwrap();
+        assert_eq!(wait_for_transcription_init(receiver).await, Ok(()));
+    }
+
+    #[tokio::test]
+    async fn failed_worker_init_preserves_the_error_for_shutdown() {
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        sender.send(Err("Model load failed".to_string())).unwrap();
+        assert_eq!(
+            wait_for_transcription_init(receiver).await,
+            Err("Model load failed".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn panicked_worker_init_requests_shutdown() {
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        let worker = tokio::spawn(async move {
+            let _sender = sender;
+            panic!("Model initialization panicked");
+        });
+        let error = wait_for_transcription_init(receiver).await.unwrap_err();
+        assert!(error.contains("exited before initialization finished"));
+        assert!(worker.await.unwrap_err().is_panic());
+    }
 
     #[test]
     fn failed_worker_can_stop_only_its_own_session() {

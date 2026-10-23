@@ -81,3 +81,24 @@ test('a current poll still updates recording state', async t => {
   assert.equal(app.state.isRecording, true);
   assert.equal(app.state.recordingDuration, 10);
 });
+
+test('pause during refresh keeps recording controls and the newer pause state', async t => {
+  const app = await mountState();
+  t.after(app.unmount);
+  await act(async () => app.listeners.get('onRecordingPaused')());
+  await act(async () => app.polls[0](active));
+  assert.equal(app.state.isRecording, true);
+  assert.equal(app.state.isPaused, true);
+  assert.equal(app.state.isActive, false);
+  assert.equal(app.state.recordingDuration, 10);
+});
+
+test('resume during refresh keeps recording controls and the newer resume state', async t => {
+  const app = await mountState();
+  t.after(app.unmount);
+  await act(async () => app.listeners.get('onRecordingResumed')());
+  await act(async () => app.polls[0]({ ...active, is_paused: true, is_active: false }));
+  assert.equal(app.state.isRecording, true);
+  assert.equal(app.state.isPaused, false);
+  assert.equal(app.state.isActive, true);
+});
