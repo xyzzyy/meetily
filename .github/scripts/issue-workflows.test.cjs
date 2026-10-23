@@ -208,12 +208,23 @@ for (const association of ["NONE", "OWNER", "MEMBER", "COLLABORATOR"]) {
   }
 }
 
-test("a complete issue gets its matching label and an explanation", async () => {
-  const f = fixture({ issue: { author_association: "OWNER", body: completeBody } });
+test("a recovered issue gets its matching label and an explanation", async () => {
+  const f = fixture({ issue: { author_association: "OWNER", body: completeBody, labels: [INVALID] } });
   await enforce(f);
   assert.equal(f.issue.state, "open");
   assert.deepEqual(f.labels(), ["bug"]);
   assert.match(f.comments[0].body, /add the `bug` label/);
+});
+
+test("a complete issue without its type label is left alone, by event and by nightly check", async () => {
+  for (const run of [enforce, sweep]) {
+    const f = fixture({ eventName: run === sweep ? "schedule" : undefined, issue: { body: completeBody, labels: ["question"] } });
+    await run(f);
+    assert.equal(f.issue.state, "open");
+    assert.equal(f.comments.length, 0);
+    assert.deepEqual(f.labels(), ["question"]);
+    assert.equal(f.calls.filter((call) => call.method === "addLabels").length, 0);
+  }
 });
 
 test("a complete issue with correct labels needs no changes or comment", async () => {
@@ -234,7 +245,7 @@ test("a missing title prefix closes with links to all four forms", async () => {
 });
 
 test("enforcement uses the current body and state", async () => {
-  const fixed = fixture({ live: { body: completeBody } });
+  const fixed = fixture({ live: { body: completeBody, labels: [INVALID] } });
   await enforce(fixed);
   assert.equal(fixed.issue.state, "open");
   assert.ok(fixed.labels().includes("bug"));
@@ -890,6 +901,11 @@ test("the shared validator rejects empty sections, unchecked boxes, and headings
     completeBody.replace("- [x] I have described", "- [ ] I have described"),
     completeBody.replace("### Environment\nmacOS 15", "```\n### Environment\nmacOS 15\n```"),
   ]) assert.equal(validate({ title: "[BUG] Example", body }).ok, false);
+  for (const field of ["```text\n```", "```\n\n```", "~~~\n~~~", "```\n_No response_\n```", "- ```text\n  ```"]) {
+    const result = validate({ title: "[BUG] Example", body: completeBody.replace("macOS 15", field) });
+    assert.deepEqual(result.missing, ["Environment"], field);
+  }
+  assert.equal(validate({ title: "[BUG] Example", body: completeBody.replace("macOS 15", "```text\nmacOS 15\n```") }).ok, true);
   assert.equal(validate({ title: "No prefix", body: completeBody }).ok, false);
 });
 
@@ -1006,7 +1022,7 @@ test("code fences on list-item lines do not hide later issue fields", async () =
     const fence = opening.includes("~") ? "~~~" : opening.includes("````") ? "````" : "```";
     const body = completeBody.replace("The app stops.",
       "The app stops.\n\n" + opening + "\n" + indent + "Example output\n" + indent + fence);
-    const f = fixture({ issue: { body } });
+    const f = fixture({ issue: { body, labels: ["bug"] } });
     await enforce(f);
     assert.equal(f.issue.state, "open", opening);
     assert.deepEqual(f.labels(), ["bug"]);
@@ -1039,7 +1055,7 @@ test("fences on list-continuation lines end with their list", async () => {
   ]) {
     const body = completeBody.replace("The app stops.", "The app stops.\n\n" + example);
     for (const check of [enforce, sweep]) {
-      const f = fixture({ eventName: check === sweep ? "schedule" : "issues", issue: { body } });
+      const f = fixture({ eventName: check === sweep ? "schedule" : "issues", issue: { body, labels: ["bug"] } });
       await check(f);
       assert.equal(f.issue.state, "open", example);
       assert.deepEqual(f.labels(), ["bug"]);

@@ -330,8 +330,13 @@ function findSection(sections, heading) {
   return match === undefined ? null : sections.get(match).join("\n");
 }
 
+// Fence delimiters are not content. A field holding only an empty code block is blank.
+const FENCE_LINE = /^[ \t>]*(?:(?:[-*+]|\d{1,9}[.)])[ \t]+)?(?:`{3,}[^`]*|~{3,}.*)$/;
+
 function isBlankSection(content) {
-  return content === null || content.trim() === "" || /^_no response_$/i.test(content.trim());
+  if (content === null) return true;
+  const text = content.split("\n").filter((line) => !FENCE_LINE.test(line)).join("\n").trim();
+  return text === "" || /^_no response_$/i.test(text);
 }
 
 function escapeRegExp(value) {

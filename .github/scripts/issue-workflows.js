@@ -122,9 +122,11 @@ async function checkOpenIssue({ context, github, core }, issue, { nightly = fals
 
   const key = "template-check:" + context.runId + ":" + issue.number;
   if (result.ok) {
-    const added = api.labels.has(result.template.label) ? [] : [result.template.label];
     const removed = [INVALID, GRACE].filter((name) => api.labels.has(name));
-    if (!added.length && !removed.length) return;
+    // The forms label new issues. Add the type label only when recovering an
+    // issue, so a maintainer who removes it during triage is not overridden.
+    const added = removed.length && !api.labels.has(result.template.label) ? [result.template.label] : [];
+    if (!removed.length) return;
     core.info("#" + issue.number + " follows its template; updating its labels.");
     if (dryRun) return;
     const changes = [];
