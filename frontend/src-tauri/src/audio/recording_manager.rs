@@ -11,7 +11,7 @@ use super::devices::AudioDevice;
 
 use super::recording_state::{RecordingState, AudioChunk};
 use super::diarization_stems::DiarizationStemSaver;
-use super::pipeline::AudioPipelineManager;
+use super::pipeline::{AudioPipelineManager, PipelineStopError};
 use super::recording_saver::RecordingSaver;
 use super::stream::AudioStreamManager;
 use super::device_monitor::{AudioDeviceMonitor, DeviceEvent};
@@ -29,10 +29,12 @@ pub(crate) enum RecordingStartError {
     Other(#[from] anyhow::Error),
 }
 
-/// Keep capture shutdown errors separate from final transcript warnings.
+/// Keep audio shutdown errors separate from final transcript warnings.
 #[derive(Debug, Default)]
 pub(crate) struct RecordingStopOutcome {
-    pub capture_error: Option<anyhow::Error>,
+    /// Capture or the pipeline failed, so saved audio may be incomplete.
+    pub audio_error: Option<anyhow::Error>,
+    /// Only the final transcript segments may be missing.
     pub transcript_error: Option<anyhow::Error>,
 }
 
@@ -397,16 +399,27 @@ impl RecordingManager {
         if let Some(error) = &capture_error {
             error!("Error stopping audio streams: {error:#}");
         }
-        let transcript_error = self.pipeline_manager.force_flush_and_stop().await.err();
-        if let Some(error) = &transcript_error {
-            error!("Error during force flush: {error:#}");
-        }
+        let (pipeline_error, transcript_error) = match self.pipeline_manager.force_flush_and_stop().await {
+            Ok(()) => (None, None),
+            Err(PipelineStopError::Pipeline(error)) => {
+                error!("Audio pipeline failed before stop: {error:#}");
+                (Some(error), None)
+            }
+            Err(PipelineStopError::FinalTranscript(error)) => {
+                error!("Error during force flush: {error:#}");
+                (None, Some(error))
+            }
+        };
+        let audio_error = match (capture_error, pipeline_error) {
+            (Some(capture), Some(pipeline)) => Some(anyhow::anyhow!("{capture:#}. {pipeline:#}")),
+            (capture, pipeline) => capture.or(pipeline),
+        };
 
         // CRITICAL: Full cleanup to release all Arc references and resources
         // This ensures microphone is released even if Drop is delayed
         self.state.cleanup();
 
-        RecordingStopOutcome { capture_error, transcript_error }
+        RecordingStopOutcome { audio_error, transcript_error }
     }
 
     /// Save recording after transcription is complete
@@ -709,13 +722,26 @@ mod stop_tests {
         }));
 
         let outcome = manager.stop_streams_and_force_flush().await;
-        assert!(outcome.capture_error.is_none());
+        assert!(outcome.audio_error.is_none());
         assert!(outcome.transcript_error.unwrap().to_string().contains("Injected final flush failure"));
         assert!(!manager.state.is_recording());
         // cleanup() clears the start time as well as the recording flag.
         assert!(manager.state.get_recording_duration().is_none());
         let outcome = manager.stop_streams_and_force_flush().await;
-        assert!(outcome.capture_error.is_none());
+        assert!(outcome.audio_error.is_none());
         assert!(outcome.transcript_error.is_none());
+    }
+    #[tokio::test]
+    async fn pipeline_failure_reports_incomplete_audio() {
+        let mut manager = RecordingManager::new();
+        manager.state.start_recording().unwrap();
+        manager.pipeline_manager = AudioPipelineManager::with_task_for_test(tokio::spawn(async {
+            panic!("Injected pipeline panic")
+        }));
+
+        let outcome = manager.stop_streams_and_force_flush().await;
+        assert!(outcome.audio_error.unwrap().to_string().contains("Audio pipeline task failed"));
+        assert!(outcome.transcript_error.is_none());
+        assert!(!manager.state.is_recording());
     }
 }

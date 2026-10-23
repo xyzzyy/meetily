@@ -33,7 +33,7 @@ async function loadHook({
     toasts.push(args);
     activeToasts.set(args[1]?.id ?? Symbol('toast'), args);
   };
-  const calls = { save: 0, clear: 0, markSaved: 0, flush: 0, poll: 0, transcriptionSuccess: 0, markedIds: [], savedMeetings: [], recoveryReads: [], refreshes: 0, navigation: [], recording: [], disabled: [], active: [] };
+  const calls = { save: 0, clear: 0, markSaved: 0, flush: 0, poll: 0, transcriptionSuccess: 0, meetingsCompleted: 0, markedIds: [], savedMeetings: [], recoveryReads: [], refreshes: 0, navigation: [], recording: [], disabled: [], active: [] };
   const storage = new Map([['indexeddb_current_meeting_id', 'old-recording']]);
   const recordingStatus = Object.fromEntries([
     'IDLE', 'STOPPING', 'PROCESSING_TRANSCRIPTS', 'SAVING', 'ERROR', 'COMPLETED', 'RECORDING',
@@ -96,7 +96,7 @@ async function loadHook({
     if (name === '@/lib/analytics') return { default: {
       trackTranscriptionSuccess: () => calls.transcriptionSuccess++,
       trackPageView() {}, getMeetingsCountToday: async () => 1,
-      trackMeetingCompleted: async () => {}, updateMeetingCount: async () => {},
+      trackMeetingCompleted: async () => { calls.meetingsCompleted++; }, updateMeetingCount: async () => {},
     } };
     if (name === '@/services/transcriptService') return { transcriptService: {
       getTranscriptionStatus: async () => {
@@ -414,8 +414,12 @@ test('a rejected old meeting save cannot set the new recording to error', async 
   rejectSave(new Error('Previous database save failed'));
   await stopping;
   assert.equal(state.statuses.at(-1).status, 'RECORDING');
-  assert.equal(state.toasts.length, 0);
+  // The user still learns that the earlier meeting was not saved.
+  assert.equal(state.toasts.length, 1);
+  assert.equal(state.toasts[0][0], 'Failed to save the previous meeting');
+  assert.match(state.toasts[0][1].description, /Previous database save failed/);
   assert.equal(state.calls.clear, 0);
+  assert.equal(state.calls.markSaved, 0);
 });
 
 for (const pendingStep of ['transcription wait', 'meeting save']) {
@@ -435,13 +439,98 @@ for (const pendingStep of ['transcription wait', 'meeting save']) {
     assert.equal(state.calls.save, 1);
     assert.equal(state.calls.markSaved, 1);
     assert.deepEqual(state.calls.markedIds, ['old-recording']);
-    assert.equal(state.calls.clear, 0);
+    // The saved meeting's transcript is cleared, but the user is not navigated away.
+    assert.equal(state.calls.clear, 1);
     assert.equal(state.calls.navigation.length, 0);
     assert.equal(state.toasts.length, 0);
     assert.equal(state.statuses.at(-1).status, 'IDLE');
+    assert.equal(state.calls.active.at(-1), false);
+    assert.equal(state.calls.meetingsCompleted, 1);
+    assert.equal(state.calls.transcriptionSuccess, 1);
     assert.equal(state.listeners.size, 0);
   });
 }
+
+test('page unmount before a requested stop returns keeps its save error and start events', async t => {
+  const state = await loadHook();
+  t.after(state.unmount);
+  // The Stop button marks the stop before stop_recording returns.
+  state.hook.setIsStopping(true);
+  await state.unmount();
+  assert.equal(typeof state.listeners.get('recording-stopped'), 'function');
+  await state.listeners.get('recording-stopped')({ payload: { save_error: 'Audio save failed' } });
+  await state.hook.handleRecordingStop(false);
+  assert.equal(state.statuses.at(-1).status, 'ERROR');
+  assert.equal(state.statuses.at(-1).message, 'Audio save failed');
+  assert.equal(state.calls.poll, 0);
+  assert.equal(state.listeners.size, 0);
+});
+
+test('a new recording after an unmounted requested stop cancels the old stop UI work', async t => {
+  let finishPoll;
+  const state = await loadHook({ poll: () => new Promise(resolve => { finishPoll = resolve; }) });
+  t.after(state.unmount);
+  state.hook.setIsStopping(true);
+  await state.unmount();
+  const stopping = state.hook.handleRecordingStop(true);
+  await new Promise(setImmediate);
+  state.listeners.get('recording-started')({ payload: {} });
+  state.statuses.push({ status: 'RECORDING' });
+  const changes = { statuses: state.statuses.length, active: state.calls.active.length };
+  finishPoll({ is_processing: false, chunks_in_queue: 0 });
+  await stopping;
+  assert.equal(state.calls.save, 1);
+  assert.equal(state.calls.clear, 0);
+  assert.equal(state.statuses.length, changes.statuses);
+  assert.equal(state.calls.active.length, changes.active);
+  assert.equal(state.listeners.size, 0);
+});
+
+test('a requested stop that never reaches the handler releases listeners at the next start', async t => {
+  const state = await loadHook();
+  t.after(state.unmount);
+  state.hook.setIsStopping(true);
+  await state.unmount();
+  assert.equal(state.listeners.size, 2);
+  state.listeners.get('recording-started')({ payload: {} });
+  assert.equal(state.listeners.size, 0);
+});
+
+test('an unsaved stop after unmount still ends the meeting', async t => {
+  const state = await loadHook();
+  t.after(state.unmount);
+  state.hook.setIsStopping(true);
+  await state.unmount();
+  await state.hook.handleRecordingStop(false);
+  assert.equal(state.statuses.at(-1).status, 'IDLE');
+  assert.equal(state.calls.active.at(-1), false);
+  assert.equal(state.calls.save, 0);
+});
+
+test('unmount before delayed navigation still resets the saved recording', async t => {
+  const state = await loadHook({ allowSuccess: true, deferNavigation: true });
+  t.after(state.unmount);
+  await state.hook.handleRecordingStop(true);
+  assert.equal(state.navigationTimers.length, 1);
+  await state.unmount();
+  state.navigationTimers[0]();
+  assert.equal(state.calls.navigation.length, 0);
+  assert.equal(state.calls.clear, 1);
+  assert.equal(state.statuses.at(-1).status, 'IDLE');
+});
+
+test('a cleared context before the final snapshot keeps the stop transcript', async t => {
+  const state = await loadHook({ deferDelayMs: 500 });
+  t.after(state.unmount);
+  const stopping = state.hook.handleRecordingStop(true);
+  await new Promise(setImmediate);
+  assert.equal(state.delayedWaits.length, 1);
+  // A new start can clear the context before its recording-started event arrives.
+  state.transcriptsRef.current = [];
+  state.delayedWaits[0]();
+  await stopping;
+  assert.equal(state.calls.savedMeetings[0][1].map(t => t.text).join('|'), 'Keep this transcript');
+});
 
 test('a new recording after page unmount preserves the old save and the new recovery ID', async t => {
   let finishPoll;

@@ -1162,6 +1162,17 @@ impl AudioPipeline {
     }
 }
 
+/// Separate an early pipeline exit from a failed final transcript flush.
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum PipelineStopError {
+    /// The pipeline also feeds the recording, so saved audio may be incomplete.
+    #[error("{0:#}")]
+    Pipeline(anyhow::Error),
+    /// Only the final transcript segments may be missing.
+    #[error("{0:#}")]
+    FinalTranscript(anyhow::Error),
+}
+
 /// Simple audio pipeline manager
 pub struct AudioPipelineManager {
     pipeline_handle: Option<JoinHandle<Result<()>>>,
@@ -1242,18 +1253,17 @@ impl AudioPipelineManager {
     }
 
     /// Stop the audio pipeline
-    pub async fn stop(&mut self) -> Result<()> {
+    pub(crate) async fn stop(&mut self) -> std::result::Result<(), PipelineStopError> {
         // Drop the sender to close the pipeline
         self.audio_sender = None;
 
         // Wait for pipeline to finish
         if let Some(handle) = self.pipeline_handle.take() {
             match handle.await {
-                Ok(result) => result,
-                Err(e) => {
-                    error!("Pipeline task failed: {}", e);
-                    Err(anyhow::anyhow!("Audio pipeline task failed: {e}"))
-                }
+                Ok(result) => result.map_err(PipelineStopError::FinalTranscript),
+                Err(e) => Err(PipelineStopError::Pipeline(anyhow::anyhow!(
+                    "Audio pipeline task failed: {e}"
+                ))),
             }
         } else {
             Ok(())
@@ -1262,7 +1272,7 @@ impl AudioPipelineManager {
 
     /// Force immediate flush of accumulated audio and stop pipeline
     /// PERFORMANCE CRITICAL: Eliminates 30+ second shutdown delays
-    pub async fn force_flush_and_stop(&mut self) -> Result<()> {
+    pub(crate) async fn force_flush_and_stop(&mut self) -> std::result::Result<(), PipelineStopError> {
         info!("🚀 Force flushing pipeline - processing ALL accumulated audio immediately");
 
         let mut flush_error = None;
@@ -1279,8 +1289,11 @@ impl AudioPipelineManager {
                 source_activity: None,
             };
 
+            // The receiver closes only when the pipeline task has already ended.
             if let Err(e) = sender.send(flush_chunk) {
-                flush_error = Some(anyhow::anyhow!("Failed to send final flush signal: {e}"));
+                flush_error = Some(PipelineStopError::Pipeline(anyhow::anyhow!(
+                    "Audio pipeline ended before the final flush: {e}"
+                )));
             } else {
                 info!("📤 Sent flush signal to pipeline");
 
@@ -1398,7 +1411,8 @@ mod tests {
             })
         }));
         let error = manager.force_flush_and_stop().await.unwrap_err();
-        let message = format!("{error:#}");
+        assert!(matches!(error, PipelineStopError::FinalTranscript(_)));
+        let message = error.to_string();
         assert!(message.contains("Failed to flush final VAD audio"));
         assert!(message.contains("Injected VAD failure"));
         assert!(manager.pipeline_handle.is_none());
@@ -1417,7 +1431,8 @@ mod tests {
             })
         }));
         let error = manager.force_flush_and_stop().await.unwrap_err();
-        assert!(format!("{error:#}").contains("Failed to send final VAD segment"));
+        assert!(matches!(error, PipelineStopError::FinalTranscript(_)));
+        assert!(error.to_string().contains("Failed to send final VAD segment"));
         assert!(manager.pipeline_handle.is_none());
     }
 
@@ -1438,17 +1453,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pipeline_task_failure_is_not_success() {
+    async fn pipeline_task_failure_is_an_audio_failure() {
         let mut manager = AudioPipelineManager::new();
         manager.pipeline_handle = Some(tokio::spawn(async {
             panic!("Injected pipeline panic");
         }));
-        assert!(manager
-            .stop()
-            .await
-            .unwrap_err()
-            .to_string()
-            .contains("Audio pipeline task failed"));
+        let error = manager.stop().await.unwrap_err();
+        assert!(matches!(error, PipelineStopError::Pipeline(_)));
+        assert!(error.to_string().contains("Audio pipeline task failed"));
         assert!(manager.pipeline_handle.is_none());
     }
 
@@ -1460,9 +1472,10 @@ mod tests {
         manager.audio_sender = Some(sender);
         manager.pipeline_handle = Some(tokio::spawn(async { Ok(()) }));
         let error = manager.force_flush_and_stop().await.unwrap_err();
+        assert!(matches!(error, PipelineStopError::Pipeline(_)));
         assert!(error
             .to_string()
-            .contains("Failed to send final flush signal"));
+            .contains("Audio pipeline ended before the final flush"));
         assert!(manager.pipeline_handle.is_none());
         assert!(manager.audio_sender.is_none());
     }

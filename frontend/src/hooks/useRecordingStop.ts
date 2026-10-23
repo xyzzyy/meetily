@@ -25,6 +25,77 @@ interface RecordingStopSession {
   meetingName?: string | null;
 }
 
+/** Merge transcript snapshots by sequence ID. Later copies win; ids stay stable. */
+function mergeTranscripts(base: Transcript[], updates: Transcript[]): Transcript[] {
+  const bySequence = new Map(base.map(t => [t.sequence_id ?? t.id, t]));
+  for (const segment of updates) {
+    const key = segment.sequence_id ?? segment.id;
+    const prior = bySequence.get(key);
+    bySequence.set(key, { ...prior, ...segment, id: prior?.id ?? segment.id });
+  }
+  return Array.from(bySequence.values()).sort((a, b) =>
+    (a.chunk_start_time ?? a.audio_start_time ?? 0) - (b.chunk_start_time ?? b.audio_start_time ?? 0)
+    || (a.sequence_id ?? 0) - (b.sequence_id ?? 0)
+  );
+}
+
+/** Record a saved meeting, even after the page unmounts or a new recording starts. */
+async function trackMeetingCompletion(meetingId: string, transcripts: Transcript[], transcriptComplete: boolean) {
+  try {
+    if (transcriptComplete) {
+      Analytics.trackTranscriptionSuccess();
+    }
+
+    // Calculate meeting duration from transcript timestamps
+    let durationSeconds = 0;
+    if (transcripts.length > 0 && transcripts[0].audio_start_time !== undefined) {
+      // Use audio_end_time of last transcript if available
+      const lastTranscript = transcripts[transcripts.length - 1];
+      durationSeconds = lastTranscript.audio_end_time || lastTranscript.audio_start_time || 0;
+    }
+
+    // Calculate word count
+    const transcriptWordCount = transcripts
+      .map(t => t.text.split(/\s+/).length)
+      .reduce((a, b) => a + b, 0);
+
+    // Calculate words per minute
+    const wordsPerMinute = durationSeconds > 0 ? transcriptWordCount / (durationSeconds / 60) : 0;
+
+    // Get meetings count today
+    const meetingsToday = await Analytics.getMeetingsCountToday();
+
+    // Track meeting completed
+    await Analytics.trackMeetingCompleted(meetingId, {
+      duration_seconds: durationSeconds,
+      transcript_segments: transcripts.length,
+      transcript_word_count: transcriptWordCount,
+      words_per_minute: wordsPerMinute,
+      meetings_today: meetingsToday
+    });
+
+    // Update meeting count in analytics.json
+    await Analytics.updateMeetingCount();
+
+    // Check for activation (first meeting)
+    const { Store } = await import('@tauri-apps/plugin-store');
+    const store = await Store.load('analytics.json');
+    const totalMeetings = await store.get<number>('total_meetings');
+
+    if (totalMeetings === 1) {
+      const daysSinceInstall = await Analytics.calculateDaysSince('first_launch_date');
+      await Analytics.track('user_activated', {
+        meetings_count: '1',
+        days_since_install: daysSinceInstall?.toString() || 'null',
+        first_meeting_duration_seconds: durationSeconds.toString()
+      });
+    }
+  } catch (analyticsError) {
+    console.error('Failed to track meeting completion analytics:', analyticsError);
+    // Don't block user flow on analytics errors
+  }
+}
+
 type SummaryStatus = 'idle' | 'processing' | 'summarizing' | 'regenerating' | 'completed' | 'error';
 
 interface UseRecordingStopReturn {
@@ -85,6 +156,8 @@ export function useRecordingStop(
   // A stop owns its session until a later recording starts.
   const stopSessionRef = useRef<RecordingStopSession>({ saveError: null, transcriptWarning: null });
   const stopInProgressRef = useRef<RecordingStopSession | null>(null);
+  // The page's Stop button calls handleRecordingStop only after stop_recording returns.
+  const stopRequestedRef = useRef(false);
   const isMountedRef = useRef(true);
   const disposeListenersRef = useRef<(() => void) | null>(null);
 
@@ -110,9 +183,17 @@ export function useRecordingStop(
     void listen('recording-started', () => {
       // Capture the old transcript before the new recording clears the context.
       if (transcriptsRef.current.length > 0) {
-        stopSessionRef.current.transcripts = [...transcriptsRef.current];
+        stopSessionRef.current.transcripts = mergeTranscripts(
+          stopSessionRef.current.transcripts ?? [],
+          transcriptsRef.current,
+        );
       }
       stopSessionRef.current = { saveError: null, transcriptWarning: null };
+      // A requested stop that never reached the handler has ended by now.
+      if (!isMountedRef.current && !stopInProgressRef.current) {
+        stopRequestedRef.current = false;
+        disposeListenersRef.current?.();
+      }
       toast.dismiss('recording-transcript-incomplete');
       toast.dismiss('recording-save-failed');
       recordingStoppedDataRef.current = null;
@@ -183,8 +264,8 @@ export function useRecordingStop(
     disposeListenersRef.current = disposeListeners;
     return () => {
       isMountedRef.current = false;
-      // Keep start/stop results available until an in-flight save has finished.
-      if (!stopInProgressRef.current) disposeListeners();
+      // Keep start/stop results available until a requested or in-flight stop has finished.
+      if (!stopInProgressRef.current && !stopRequestedRef.current) disposeListeners();
     };
   }, []);
 
@@ -195,6 +276,7 @@ export function useRecordingStop(
     const isCurrent = () => stopSessionRef.current === stopSession;
     const recoveryMeetingId = currentMeetingId || sessionStorage.getItem('indexeddb_current_meeting_id');
     if (stopInProgressRef.current === stopSession) return;
+    stopRequestedRef.current = false;
     stopSession.transcripts = [...transcriptsRef.current];
     const initialFolderPath = sessionStorage.getItem('last_recording_folder_path');
     const initialMeetingName = sessionStorage.getItem('last_recording_meeting_name');
@@ -214,7 +296,7 @@ export function useRecordingStop(
       // Keep the transcript recovery copy after a failed file save.
       if (stopSession.saveError) {
         flushBuffer();
-        if (isCurrent() && isMountedRef.current) setIsMeetingActive(false);
+        if (isCurrent()) setIsMeetingActive(false);
         throw new Error(stopSession.saveError);
       }
       console.log('Post-stop processing (new implementation)...', {
@@ -241,16 +323,11 @@ export function useRecordingStop(
         transcriptionComplete = true;
       });
 
-      if (!isCurrent()) transcriptionComplete = true;
-
-      // Poll for transcription status
-      while (elapsedTime < MAX_WAIT_TIME && !transcriptionComplete) {
+      // Poll for transcription status. A newer recording means Rust already drained this one.
+      while (isCurrent() && elapsedTime < MAX_WAIT_TIME && !transcriptionComplete) {
         try {
           const status = await transcriptService.getTranscriptionStatus();
-          if (!isCurrent()) {
-            transcriptionComplete = true;
-            break;
-          }
+          if (!isCurrent()) break;
           console.log('Transcription status:', status);
 
           // Check if transcription is complete
@@ -275,18 +352,13 @@ export function useRecordingStop(
 
           // Wait before next check
           await new Promise(resolve => setTimeout(resolve, POLL_INTERVAL));
-          if (!isCurrent()) {
-            transcriptionComplete = true;
-            break;
-          }
+          if (!isCurrent()) break;
           elapsedTime += POLL_INTERVAL;
         } catch (error) {
           console.error('Error checking transcription status:', error);
           break;
         }
       }
-
-      if (!isCurrent()) transcriptionComplete = true;
 
       // Clean up listener
       console.log('🧹 CLEANUP: Cleaning up transcription-complete listener');
@@ -307,10 +379,9 @@ export function useRecordingStop(
         setStatus(RecordingStatus.PROCESSING_TRANSCRIPTS, 'Flushing transcript buffer...');
         flushBuffer();
         await new Promise(resolve => setTimeout(resolve, 500));
-        if (isCurrent()) stopSession.transcripts = [...transcriptsRef.current];
+        if (isCurrent()) stopSession.transcripts = mergeTranscripts(stopSession.transcripts ?? [], transcriptsRef.current);
       }
 
-      if (!isCurrent()) transcriptionComplete = true;
       if (stopSession.saveError) {
         throw new Error(stopSession.saveError);
       }
@@ -318,7 +389,7 @@ export function useRecordingStop(
       // Save to SQLite
       // NOTE: enabled to save COMPLETE transcripts after frontend receives all updates
       // This ensures user sees all transcripts streaming in before database save
-      if (isCallApi && transcriptionComplete == true) {
+      if (isCallApi && (transcriptionComplete || !isCurrent())) {
 
         if (isCurrent()) setStatus(RecordingStatus.SAVING, 'Saving meeting to database...');
 
@@ -337,16 +408,7 @@ export function useRecordingStop(
             console.warn('Could not read stored transcripts; keeping the stop snapshot:', error);
           }
         }
-        const bySequence = new Map((stopSession.transcripts ?? []).map(t => [t.sequence_id ?? t.id, t]));
-        for (const segment of storedTranscripts) {
-          const key = segment.sequence_id ?? segment.id;
-          const prior = bySequence.get(key);
-          bySequence.set(key, { ...prior, ...segment, id: prior?.id ?? segment.id });
-        }
-        const freshTranscripts = Array.from(bySequence.values()).sort((a, b) =>
-          (a.chunk_start_time ?? a.audio_start_time ?? 0) - (b.chunk_start_time ?? b.audio_start_time ?? 0)
-          || (a.sequence_id ?? 0) - (b.sequence_id ?? 0)
-        );
+        const freshTranscripts = mergeTranscripts(stopSession.transcripts ?? [], storedTranscripts);
         if (stopSession.saveError) throw new Error(stopSession.saveError);
 
         const folderPath = stopSession.folderPath ?? initialFolderPath;
@@ -377,6 +439,8 @@ export function useRecordingStop(
           // SQLite is committed. Mark that recording even if a new one has started.
           await markMeetingAsSaved(recoveryMeetingId);
           savedToSQLite = true;
+          // Record success only after the final transcript result is known.
+          void trackMeetingCompletion(meetingId, freshTranscripts, !stopSession.transcriptWarning);
 
           let shouldDetectSummaryLanguage = false;
           try {
@@ -453,11 +517,6 @@ export function useRecordingStop(
           // Mark as completed
           setStatus(RecordingStatus.COMPLETED);
 
-          // Record success only after the final transcript result is known.
-          if (!stopSession.transcriptWarning) {
-            Analytics.trackTranscriptionSuccess();
-          }
-
           // Keep the transcript warning visible after the meeting is saved.
           const showSavedToast = stopSession.transcriptWarning ? toast.warning : toast.success;
           showSavedToast(stopSession.transcriptWarning ? 'Meeting saved. Transcript may be incomplete' : 'Recording saved successfully!', {
@@ -475,73 +534,33 @@ export function useRecordingStop(
 
           // Auto-navigate after a short delay with source parameter
           setTimeout(() => {
-            if (!isCurrent() || !isMountedRef.current) return;
-            router.push(`/meeting-details?id=${meetingId}&source=recording`);
+            if (!isCurrent()) return;
+            // Navigate only from the page the user is still on.
+            if (isMountedRef.current) {
+              router.push(`/meeting-details?id=${meetingId}&source=recording`);
+              Analytics.trackPageView('meeting_details');
+            }
             clearTranscripts()
-            Analytics.trackPageView('meeting_details');
 
             // Reset to IDLE after navigation
             setStatus(RecordingStatus.IDLE);
           }, 2000);
-          // Track meeting completion analytics
-          try {
-            // Calculate meeting duration from transcript timestamps
-            let durationSeconds = 0;
-            if (freshTranscripts.length > 0 && freshTranscripts[0].audio_start_time !== undefined) {
-              // Use audio_end_time of last transcript if available
-              const lastTranscript = freshTranscripts[freshTranscripts.length - 1];
-              durationSeconds = lastTranscript.audio_end_time || lastTranscript.audio_start_time || 0;
-            }
-
-            // Calculate word count
-            const transcriptWordCount = freshTranscripts
-              .map(t => t.text.split(/\s+/).length)
-              .reduce((a, b) => a + b, 0);
-
-            // Calculate words per minute
-            const wordsPerMinute = durationSeconds > 0 ? transcriptWordCount / (durationSeconds / 60) : 0;
-
-            // Get meetings count today
-            const meetingsToday = await Analytics.getMeetingsCountToday();
-
-            // Track meeting completed
-            await Analytics.trackMeetingCompleted(meetingId, {
-              duration_seconds: durationSeconds,
-              transcript_segments: freshTranscripts.length,
-              transcript_word_count: transcriptWordCount,
-              words_per_minute: wordsPerMinute,
-              meetings_today: meetingsToday
-            });
-
-            // Update meeting count in analytics.json
-            await Analytics.updateMeetingCount();
-
-            // Check for activation (first meeting)
-            const { Store } = await import('@tauri-apps/plugin-store');
-            const store = await Store.load('analytics.json');
-            const totalMeetings = await store.get<number>('total_meetings');
-
-            if (totalMeetings === 1) {
-              const daysSinceInstall = await Analytics.calculateDaysSince('first_launch_date');
-              await Analytics.track('user_activated', {
-                meetings_count: '1',
-                days_since_install: daysSinceInstall?.toString() || 'null',
-                first_meeting_duration_seconds: durationSeconds.toString()
-              });
-            }
-          } catch (analyticsError) {
-            console.error('Failed to track meeting completion analytics:', analyticsError);
-            // Don't block user flow on analytics errors
-          }
 
         } catch (saveError) {
-          if (!isCurrent()) return;
           const saveErrorMessage = saveError instanceof Error
             ? saveError.message
             : String(saveError || 'Unknown error');
           console.error('Failed to save meeting to database:', saveError);
+          if (!isCurrent()) {
+            // Leave the newer recording's state alone, but still report the lost save.
+            toast.error('Failed to save the previous meeting', {
+              description: `${saveErrorMessage} Its transcript is kept for recovery on the home page.`,
+              duration: 20000,
+            });
+            return;
+          }
           setStatus(RecordingStatus.ERROR, saveErrorMessage);
-          if (isMountedRef.current) toast.error('Failed to save meeting', {
+          toast.error('Failed to save meeting', {
             description: saveErrorMessage
           });
           throw saveError;
@@ -551,16 +570,16 @@ export function useRecordingStop(
         setStatus(RecordingStatus.IDLE);
       }
 
-      if (!isCurrent() || !isMountedRef.current) return;
+      if (!isCurrent()) return;
       setIsMeetingActive(false);
       // isRecording already set to false at function start
-      setIsRecordingDisabled(false);
+      if (isMountedRef.current) setIsRecordingDisabled(false);
     } catch (error) {
+      console.error('Error in handleRecordingStop:', error);
       if (!isCurrent()) return;
       const errorMessage = error instanceof Error
         ? error.message
         : String(error || 'Unknown error');
-      console.error('Error in handleRecordingStop:', error);
       setStatus(RecordingStatus.ERROR, errorMessage);
       // isRecording already set to false at function start
       if (isMountedRef.current) setIsRecordingDisabled(false);
@@ -568,6 +587,7 @@ export function useRecordingStop(
       unlistenComplete?.();
       // Navigation can unmount the page while the shared recording state lives on.
       if (!isMountedRef.current && isCurrent() && savedToSQLite) {
+        clearTranscripts();
         setStatus(RecordingStatus.IDLE);
         setIsMeetingActive(false);
       }
@@ -624,6 +644,7 @@ export function useRecordingStop(
     isSavingTranscript,
     summaryStatus,
     setIsStopping: (value: boolean) => {
+      stopRequestedRef.current = value;
       setStatus(value ? RecordingStatus.STOPPING : RecordingStatus.IDLE);
     },
   };
