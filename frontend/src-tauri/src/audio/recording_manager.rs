@@ -392,16 +392,17 @@ impl RecordingManager {
 
         // CRITICAL: Force pipeline to flush ALL accumulated audio before stopping
         debug!("💨 Forcing pipeline to flush accumulated audio immediately");
-        if let Err(e) = self.pipeline_manager.force_flush_and_stop().await {
-            error!("Error during force flush: {}", e);
+        let flush_result = self.pipeline_manager.force_flush_and_stop().await;
+        if let Err(error) = &flush_result {
+            error!("Error during force flush: {error:#}");
         }
 
         // CRITICAL: Full cleanup to release all Arc references and resources
         // This ensures microphone is released even if Drop is delayed
         self.state.cleanup();
 
-        info!("✅ Recording streams stopped with immediate flush completed");
-        Ok(())
+        // Return the flush result after resources have been released.
+        flush_result
     }
 
     /// Save recording after transcription is complete
@@ -688,5 +689,26 @@ mod wake_tests {
         // Nonexistent device name fails at the `find` step — no audio hardware needed.
         // Asserts the wake is non-fatal (returns Err, does not panic).
         assert!(wake_audio_connection_sync("__no_such_device__").is_err());
+    }
+}
+
+#[cfg(test)]
+mod stop_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn final_flush_failure_reaches_the_caller_after_cleanup() {
+        let mut manager = RecordingManager::new();
+        manager.state.start_recording().unwrap();
+        manager.pipeline_manager = AudioPipelineManager::with_task_for_test(tokio::spawn(async {
+            Err(anyhow::anyhow!("Injected final flush failure"))
+        }));
+
+        let error = manager.stop_streams_and_force_flush().await.unwrap_err();
+        assert!(error.to_string().contains("Injected final flush failure"));
+        assert!(!manager.state.is_recording());
+        // cleanup() clears the start time as well as the recording flag.
+        assert!(manager.state.get_recording_duration().is_none());
+        assert!(manager.stop_streams_and_force_flush().await.is_ok());
     }
 }

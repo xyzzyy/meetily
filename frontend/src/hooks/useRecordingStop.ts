@@ -7,6 +7,7 @@ import { useTranscripts } from '@/contexts/TranscriptContext';
 import { useSidebar } from '@/components/Sidebar/SidebarProvider';
 import { useRecordingState, RecordingStatus } from '@/contexts/RecordingStateContext';
 import { storageService } from '@/services/storageService';
+import type { RecordingStoppedPayload } from '@/services/recordingService';
 import { transcriptService } from '@/services/transcriptService';
 import Analytics from '@/lib/analytics';
 import {
@@ -75,6 +76,7 @@ export function useRecordingStop(
   // Keep the error for this recording, including duplicate stop attempts.
   // The recording-started event clears it for the next recording.
   const saveErrorRef = useRef<string | null>(null);
+  const transcriptWarningRef = useRef<string | null>(null);
 
   // Promise to track recording-stopped event data (fixes race condition with recording-stop-complete)
   const recordingStoppedDataRef = useRef<Promise<void> | null>(null);
@@ -96,6 +98,7 @@ export function useRecordingStop(
 
     void listen('recording-started', () => {
       saveErrorRef.current = null;
+      transcriptWarningRef.current = null;
       recordingStoppedDataRef.current = null;
     }).then(retainUnlistener).catch(error => {
       console.error('Failed to setup recording started listener:', error);
@@ -104,16 +107,19 @@ export function useRecordingStop(
     const setupRecordingStoppedListener = async () => {
       try {
         console.log('Setting up recording-stopped listener for navigation...');
-        const unlisten = await listen<{
-          message: string;
-          folder_path?: string;
-          meeting_name?: string;
-          save_error?: string | null;
-        }>('recording-stopped', async (event) => {
+        const unlisten = await listen<RecordingStoppedPayload>('recording-stopped', async (event) => {
           // Create promise that resolves when sessionStorage is set (prevents race condition)
           recordingStoppedDataRef.current = (async () => {
-            const { folder_path, meeting_name, save_error } = event.payload;
+            const { folder_path, meeting_name, save_error, transcript_warning } = event.payload;
             saveErrorRef.current = save_error ?? null;
+            transcriptWarningRef.current = transcript_warning ?? null;
+            if (transcript_warning) {
+              toast.warning('Transcript may be incomplete', {
+                id: 'recording-transcript-incomplete',
+                description: transcript_warning,
+                duration: 20000,
+              });
+            }
             if (save_error) {
               const { flushBuffer, setIsRecording, setIsRecordingDisabled, setIsMeetingActive, setStatus } = eventHandlersRef.current;
               flushBuffer();
@@ -389,9 +395,11 @@ export function useRecordingStop(
           // Mark as completed
           setStatus(RecordingStatus.COMPLETED);
 
-          // Show success toast with navigation option
-          toast.success('Recording saved successfully!', {
-            description: `${freshTranscripts.length} transcript segments saved.`,
+          // Keep the transcript warning visible after the meeting is saved.
+          const showSavedToast = transcriptWarningRef.current ? toast.warning : toast.success;
+          showSavedToast(transcriptWarningRef.current ? 'Meeting saved. Transcript may be incomplete' : 'Recording saved successfully!', {
+            id: transcriptWarningRef.current ? 'recording-transcript-incomplete' : undefined,
+            description: transcriptWarningRef.current ?? `${freshTranscripts.length} transcript segments saved.`,
             action: {
               label: 'View Meeting',
               onClick: () => {
@@ -399,7 +407,7 @@ export function useRecordingStop(
                 Analytics.trackButtonClick('view_meeting_from_toast', 'recording_complete');
               }
             },
-            duration: 10000,
+            duration: transcriptWarningRef.current ? 20000 : 10000,
           });
 
           // Auto-navigate after a short delay with source parameter

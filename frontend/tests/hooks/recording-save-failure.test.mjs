@@ -10,6 +10,7 @@ import { act, create } from 'react-test-renderer';
 async function loadHook({
   poll = async () => ({ is_processing: false, chunks_in_queue: 0 }),
   deferRegistration = false,
+  allowSuccess = false,
 } = {}) {
   const listeners = new Map();
   const statuses = [];
@@ -41,7 +42,12 @@ async function loadHook({
         : Promise.resolve(unlisten);
     } };
     if (name === 'sonner') return { toast: {
-      error: (...args) => toasts.push(args), success: () => assert.fail('False save success'),
+      error: (...args) => toasts.push(args),
+      warning: (...args) => toasts.push(args),
+      success: (...args) => {
+        assert.ok(allowSuccess, 'False save success');
+        toasts.push(args);
+      },
     } };
     if (name === '@/contexts/RecordingStateContext') return {
       useRecordingState: () => context, RecordingStatus: recordingStatus,
@@ -51,8 +57,21 @@ async function loadHook({
       flushBuffer: () => calls.flush++, clearTranscripts: () => calls.clear++,
       markMeetingAsSaved: async () => calls.markSaved++,
     }) };
-    if (name === '@/components/Sidebar/SidebarProvider') return { useSidebar: () => ({ setIsMeetingActive() {} }) };
-    if (name === '@/services/storageService') return { storageService: { saveMeeting: async () => calls.save++ } };
+    if (name === '@/components/Sidebar/SidebarProvider') return { useSidebar: () => ({
+      setIsMeetingActive() {}, refetchMeetings: async () => {}, setCurrentMeeting() {},
+    }) };
+    if (name === '@/services/storageService') return { storageService: {
+      saveMeeting: async () => { calls.save++; return { meeting_id: 'saved-meeting' }; },
+      getMeeting: async () => ({ title: 'Saved meeting' }),
+    } };
+    if (name === '@/lib/summary-language-preferences') return {
+      applyPinnedSummaryLanguageToMeeting: async () => true,
+    };
+    if (name === '@tauri-apps/api/core') return { invoke: async () => ({ enabled: false }) };
+    if (name === '@/lib/analytics') return { default: {
+      trackPageView() {}, getMeetingsCountToday: async () => 1,
+      trackMeetingCompleted: async () => {}, updateMeetingCount: async () => {},
+    } };
     if (name === '@/services/transcriptService') return { transcriptService: {
       getTranscriptionStatus: async () => {
         calls.poll++;
@@ -181,4 +200,60 @@ test('late listener registration is removed after unmount', async () => {
   assert.equal(state.listeners.size, 0);
   assert.equal(state.removals.get('recording-stopped'), 1);
   assert.equal(state.removals.get('recording-started'), 1);
+});
+
+const transcriptWarning = 'The final transcript may be incomplete. Transcribe saved audio again to recover missing text.';
+
+test('a final transcript warning permits meeting save and replaces the success toast', async t => {
+  const state = await loadHook();
+  t.after(state.unmount);
+  await state.listeners.get('recording-stopped')({ payload: {
+    folder_path: '/recordings/Meeting', meeting_name: 'Meeting',
+    save_error: null, transcript_warning: transcriptWarning,
+  } });
+  // Both a UI stop and a tray stop run this same post-processing handler.
+  await state.hook.handleRecordingStop(true);
+  assert.equal(state.calls.save, 1);
+  assert.equal(state.calls.markSaved, 1);
+  assert.equal(state.calls.clear, 1);
+  assert.equal(state.toasts.at(-1)[0], 'Meeting saved. Transcript may be incomplete');
+  assert.equal(state.toasts.at(-1)[1].description, transcriptWarning);
+  assert.equal(state.toasts.at(-1)[1].action.label, 'View Meeting');
+  assert.equal(state.statuses.at(-1).status, 'IDLE');
+});
+
+test('a late transcript warning replaces success without preventing meeting save', async t => {
+  let finishPoll;
+  const state = await loadHook({ poll: () => new Promise(resolve => { finishPoll = resolve; }) });
+  t.after(state.unmount);
+  const stopping = state.hook.handleRecordingStop(true);
+  await new Promise(setImmediate);
+  await state.listeners.get('recording-stopped')({ payload: { transcript_warning: transcriptWarning } });
+  finishPoll({ is_processing: false, chunks_in_queue: 0 });
+  await stopping;
+  assert.equal(state.calls.save, 1);
+  assert.equal(state.toasts.at(-1)[1].description, transcriptWarning);
+});
+
+test('audio save failure remains an error when the final transcript also fails', async t => {
+  const state = await loadHook();
+  t.after(state.unmount);
+  await state.listeners.get('recording-stopped')({ payload: {
+    transcript_warning: transcriptWarning, save_error: 'Audio save failed',
+  } });
+  await state.hook.handleRecordingStop(false);
+  assert.equal(state.calls.save, 0);
+  assert.equal(state.calls.markSaved, 0);
+  assert.equal(state.statuses.at(-1).status, 'ERROR');
+  assert.equal(state.toasts.at(-1)[0], 'Recording save failed');
+});
+
+test('a new recording clears the transcript warning before a successful stop', async t => {
+  const state = await loadHook({ allowSuccess: true });
+  t.after(state.unmount);
+  await state.listeners.get('recording-stopped')({ payload: { transcript_warning: transcriptWarning } });
+  state.listeners.get('recording-started')({ payload: {} });
+  await state.hook.handleRecordingStop(true);
+  assert.equal(state.calls.save, 1);
+  assert.equal(state.toasts.at(-1)[0], 'Recording saved successfully!');
 });

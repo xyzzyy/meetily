@@ -751,14 +751,10 @@ pub async fn stop_recording<R: Runtime>(
 
     let (stop_result, manager_for_cleanup) = stop_result;
 
-    match stop_result {
-        Ok(_) => {
-            info!("✅ Audio streams stopped successfully - no more chunks will be created");
-        }
-        Err(e) => {
-            error!("❌ Failed to stop audio streams: {}", e);
-            return Err(format!("Failed to stop audio streams: {}", e)); // _stopping_guard clears on return
-        }
+    // Keep this failure while the remaining transcript and audio are saved.
+    let transcript_error = stop_result.err();
+    if let Some(error) = &transcript_error {
+        error!("Final transcript flush failed: {error:#}");
     }
 
     // Step 1.5: Clean up transcript listener to release microphone
@@ -1120,12 +1116,22 @@ pub async fn stop_recording<R: Runtime>(
     // Database save removed - frontend will handle this after receiving all transcripts
     info!("ℹ️ Skipping database save in Rust - frontend will save after all transcripts received");
 
+    let transcript_warning = transcript_error.map(|_| {
+        let location = meeting_folder.as_ref()
+            .map(|folder| format!(" Recording folder: {}.", folder.display()))
+            .unwrap_or_default();
+        format!(
+            "The final transcript may be incomplete. If saved audio is available, use Enhance in the meeting to transcribe it again.{location}"
+        )
+    });
+
     // Step 5: Complete shutdown
     let _ = app.emit(
         "recording-shutdown-progress",
         serde_json::json!({
-            "stage": if save_error.is_some() { "error" } else { "complete" },
-            "message": save_error.as_deref().unwrap_or("Recording stopped successfully"),
+            "stage": if save_error.is_some() { "error" } else if transcript_warning.is_some() { "warning" } else { "complete" },
+            "message": save_error.as_deref().or(transcript_warning.as_deref())
+                .unwrap_or("Recording stopped successfully"),
             "progress": 100
         }),
     );
@@ -1134,10 +1140,12 @@ pub async fn stop_recording<R: Runtime>(
     app.emit(
         "recording-stopped",
         serde_json::json!({
-            "message": "Recording stopped - frontend will save after all transcripts received",
+            "message": save_error.as_deref().or(transcript_warning.as_deref())
+                .unwrap_or("Recording stopped"),
             "folder_path": folder_path_str,
             "meeting_name": meeting_name_str,
-            "save_error": save_error
+            "save_error": save_error,
+            "transcript_warning": transcript_warning
         }),
     )
     .map_err(|e| e.to_string())?;
@@ -1149,7 +1157,11 @@ pub async fn stop_recording<R: Runtime>(
         error!("{error}");
         return Err(error);
     }
-    info!("Recording stopped and saved successfully");
+    if let Some(warning) = transcript_warning {
+        warn!("{warning}");
+    } else {
+        info!("Recording stopped and saved successfully");
+    }
     Ok(true)
 }
 
