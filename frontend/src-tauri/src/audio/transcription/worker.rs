@@ -242,8 +242,9 @@ fn resolve_transcript_timing(chunk: &AudioChunk) -> (f64, f64, f64) {
 pub fn start_transcription_task<R: Runtime>(
     app: AppHandle<R>,
     transcription_receiver: tokio::sync::mpsc::UnboundedReceiver<AudioChunk>,
-) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
+) -> (tokio::task::JoinHandle<()>, tokio::sync::oneshot::Receiver<Result<(), String>>) {
+    let (init_sender, init_receiver) = tokio::sync::oneshot::channel();
+    let task = tokio::spawn(async move {
         info!("🚀 Starting optimized parallel transcription task - guaranteeing zero chunk loss");
 
         // Initialize transcription engine (Whisper or Parakeet based on config)
@@ -252,15 +253,15 @@ pub fn start_transcription_task<R: Runtime>(
             Ok(engine) => engine,
             Err(e) => {
                 error!("Failed to initialize transcription engine: {}", e);
-                let _ = app.emit("transcription-error", serde_json::json!({
-                    "error": e,
-                    "userMessage": "Recording failed: Unable to initialize speech recognition. Please check your model settings.",
-                    "actionable": true,
-                    "phase": "active"
-                }));
+                // The recording owner must stop capture. It runs outside this
+                // task, because shutdown waits for this task to finish.
+                let _ = init_sender.send(Err(e));
                 return;
             }
         };
+        // A closed channel before this signal means that initialization did
+        // not finish, for example because this task panicked.
+        let _ = init_sender.send(Ok(()));
 
         // Create parallel workers for faster processing while preserving ALL chunks
         const NUM_WORKERS: usize = 1; // Serial processing ensures transcripts emit in chronological order
@@ -625,7 +626,8 @@ pub fn start_transcription_task<R: Runtime>(
         }
 
         info!("✅ Parallel transcription task completed - all workers finished, ready for model unload");
-    })
+    });
+    (task, init_receiver)
 }
 
 /// Transcribe audio chunk using the appropriate provider (Whisper, Parakeet, or trait-based)
