@@ -111,7 +111,7 @@ export function DownloadSummary({ totalModels, downloadedModels, totalSizeMb }: 
   };
 
   return (
-    <div className="bg-gray-50 dark:bg-gray-950 rounded-lg p-3 text-sm">
+    <div className="bg-gray-50 dark:bg-gray-800/50 rounded-lg p-3 text-sm">
       <div className="flex items-center justify-between">
         <span className="text-gray-700 dark:text-gray-200">
           📦 {downloadedModels} of {totalModels} models available

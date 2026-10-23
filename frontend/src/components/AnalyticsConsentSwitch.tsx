@@ -163,7 +163,7 @@ export default function AnalyticsConsentSwitch() {
           </p>
         </div>
 
-        <div className="flex items-center justify-between p-3 bg-gray-50 dark:bg-gray-950 rounded-lg border border-gray-200 dark:border-gray-700">
+        <div className="flex items-center justify-between p-3 bg-gray-50 dark:bg-gray-800/50 rounded-lg border border-gray-200 dark:border-gray-800">
           <div>
             <h4 className="font-semibold text-gray-800 dark:text-gray-100">Enable Analytics</h4>
             <p className="text-sm text-gray-600 dark:text-gray-300">
@@ -184,7 +184,7 @@ export default function AnalyticsConsentSwitch() {
 
         {/* User ID Display */}
         {isAnalyticsOptedIn && userId && (
-          <div className="p-4 border rounded-lg bg-gray-50 dark:bg-gray-950">
+          <div className="p-4 border rounded-lg bg-gray-50 dark:bg-gray-800/50">
             <div className="flex items-start justify-between gap-4">
               <div className="flex-1 min-w-0">
                 <div className="font-medium text-gray-800 dark:text-gray-100 mb-1">Your User ID</div>

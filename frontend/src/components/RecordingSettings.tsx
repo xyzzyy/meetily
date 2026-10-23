@@ -188,14 +188,14 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
       {/* Folder Location - Only shown when auto_save is enabled */}
       {preferences.auto_save && (
         <div className="space-y-4">
-          <div className="p-4 border rounded-lg bg-gray-50 dark:bg-gray-950">
+          <div className="p-4 border rounded-lg bg-gray-50 dark:bg-gray-800/50">
             <div className="font-medium mb-2">Save Location</div>
             <div className="text-sm text-gray-600 dark:text-gray-300 mb-3 break-all">
               {preferences.save_folder || 'Default folder'}
             </div>
             <button
               onClick={handleOpenFolder}
-              className="flex items-center gap-2 px-3 py-2 text-sm border border-gray-300 dark:border-gray-600 rounded-md hover:bg-gray-50 dark:hover:bg-gray-950 transition-colors"
+              className="flex items-center gap-2 px-3 py-2 text-sm border border-gray-300 dark:border-gray-600 rounded-md hover:bg-gray-50 dark:hover:bg-gray-800/50 transition-colors"
             >
               <FolderOpen className="w-4 h-4" />
               Open Folder
@@ -254,7 +254,7 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
             </p>
           )}
 
-          <div className="border rounded-lg p-4 bg-gray-50 dark:bg-gray-950">
+          <div className="border rounded-lg p-4 bg-gray-50 dark:bg-gray-800/50">
             <DeviceSelection
               selectedDevices={{
                 micDevice: preferences.preferred_mic_device,

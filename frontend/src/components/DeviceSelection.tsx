@@ -346,7 +346,7 @@ export function DeviceSelection({ selectedDevices, onDeviceChange, disabled = fa
 
           {/* Audio Level Meters for Input Devices */}
           {showLevels && inputDevices.length > 0 && (
-            <div className="space-y-2 pt-2 border-t border-gray-100 dark:border-gray-700">
+            <div className="space-y-2 pt-2 border-t border-gray-100 dark:border-gray-800">
               <p className="text-xs text-gray-600 dark:text-gray-300 font-medium">Microphone Levels:</p>
               {inputDevices.map((device) => {
                 const levelData = audioLevels.get(device.name);
@@ -416,7 +416,7 @@ export function DeviceSelection({ selectedDevices, onDeviceChange, disabled = fa
 
           {/* Backend Selection - available on all platforms */}
           {!disabled && (
-            <div className="pt-3 border-t border-gray-100 dark:border-gray-700">
+            <div className="pt-3 border-t border-gray-100 dark:border-gray-800">
               <AudioBackendSelector disabled={disabled} />
             </div>
           )}

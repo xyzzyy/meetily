@@ -106,9 +106,11 @@
     --chart-5: 27 87% 67%;
   }
 
-  .dark {
+  /* BlockNote's shadcn theme ships its own near-black dark palette; keep editors on the app palette */
+  .dark,
+  .dark .bn-shadcn.dark {
     color-scheme: dark;
-    --background: 224 71.4% 4.1%;
+    --background: 221 39.3% 11%;
     --foreground: 210 20% 98%;
     --card: 221 39.3% 11%;
     --card-foreground: 210 20% 98%;
@@ -123,9 +125,9 @@
     --accent: 215 27.9% 16.9%;
     --accent-foreground: 210 20% 98%;
     --destructive: 0 90.6% 70.8%;
-    --destructive-foreground: 224 71.4% 4.1%;
+    --destructive-foreground: 221 39.3% 11%;
     --border: 215 27.9% 16.9%;
-    --input: 215 19.3% 34.5%;
+    --input: 216.9 19.1% 26.7%;
     --ring: 0 0% 83.1%;
     --chart-1: 220 70% 50%;
     --chart-2: 160 60% 45%;

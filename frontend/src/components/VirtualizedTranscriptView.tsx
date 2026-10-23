@@ -181,7 +181,7 @@ const TranscriptSegment = memo(function TranscriptSegment({
                         </div>
                     )}
                     {isStreaming ? (
-                        <div className="bg-gray-100 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg px-3 py-2">
+                        <div className="bg-gray-100 dark:bg-gray-800 border border-gray-200 dark:border-gray-800 rounded-lg px-3 py-2">
                             <p className="text-base text-gray-800 dark:text-gray-100 leading-relaxed">{displayText}</p>
                         </div>
                     ) : (

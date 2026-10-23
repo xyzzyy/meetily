@@ -62,7 +62,7 @@ function DownloadToastContent({
   const unitLabel = download.unitLabel ?? 'MB';
 
   return (
-    <div className="flex items-center gap-3 w-full max-w-sm bg-white dark:bg-gray-900 rounded-lg shadow-lg border border-gray-200 dark:border-gray-700 p-3 relative">
+    <div className="flex items-center gap-3 w-full max-w-sm bg-white dark:bg-gray-900 rounded-lg shadow-lg border border-gray-200 dark:border-gray-800 p-3 relative">
 
       {/* Icon */}
       <div className={`flex-shrink-0 w-8 h-8 rounded-full flex items-center justify-center ${isComplete ? 'bg-green-100 dark:bg-green-900/50' : hasError ? 'bg-red-100 dark:bg-red-900/50' : isCancelled ? 'bg-gray-100 dark:bg-gray-800' : 'bg-gray-100 dark:bg-gray-800'

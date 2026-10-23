@@ -114,7 +114,7 @@ export function MeetingDetailsSplitView({
       className="flex flex-1 min-h-0 min-w-0 flex-col overflow-hidden"
     >
       <div className="shrink-0 bg-white dark:bg-gray-900 px-2 md:hidden">
-        <TabsList className="relative h-auto w-full justify-center rounded-none border-b border-gray-200 dark:border-gray-700 bg-transparent p-0">
+        <TabsList className="relative h-auto w-full justify-center rounded-none border-b border-gray-200 dark:border-gray-800 bg-transparent p-0">
           {TABS.map((tab) => {
             const Icon = tab.icon;
             return (

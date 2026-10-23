@@ -16,7 +16,7 @@ export function SummaryLanguageSettings() {
   };
 
   return (
-    <div className="bg-white dark:bg-gray-900 rounded-lg border border-gray-200 dark:border-gray-700 p-6 shadow-sm relative">
+    <div className="bg-white dark:bg-gray-900 rounded-lg border border-gray-200 dark:border-gray-800 p-6 shadow-sm relative">
       <div className="flex items-center gap-2 mb-2">
         <Globe size={18} className="text-gray-500 dark:text-gray-400" />
         <h3 className="text-lg font-semibold text-gray-900 dark:text-gray-100">Summary Language</h3>
@@ -35,7 +35,7 @@ export function SummaryLanguageSettings() {
               className={`inline-flex items-center rounded-full border text-sm overflow-hidden ${
                 isPinned
                   ? 'bg-blue-50 dark:bg-blue-950/50 border-blue-200 dark:border-blue-800 text-blue-800 dark:text-blue-200'
-                  : 'bg-gray-100 dark:bg-gray-800 border-gray-200 dark:border-gray-700 text-gray-800 dark:text-gray-100'
+                  : 'bg-gray-100 dark:bg-gray-800 border-gray-200 dark:border-gray-800 text-gray-800 dark:text-gray-100'
               }`}
             >
               <button

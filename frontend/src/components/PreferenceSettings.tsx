@@ -151,7 +151,7 @@ export function PreferenceSettings() {
     <div className="space-y-6">
       <ThemeSettings />
       {/* Notifications Section */}
-      <div className="bg-white dark:bg-gray-900 rounded-lg border border-gray-200 dark:border-gray-700 p-6 shadow-sm">
+      <div className="bg-white dark:bg-gray-900 rounded-lg border border-gray-200 dark:border-gray-800 p-6 shadow-sm">
         <div className="flex items-center justify-between">
           <div>
             <h3 className="text-lg font-semibold text-gray-900 dark:text-gray-100 mb-2">Notifications</h3>
@@ -162,7 +162,7 @@ export function PreferenceSettings() {
       </div>
 
       {/* Data Storage Locations Section */}
-      <div className="bg-white dark:bg-gray-900 rounded-lg border border-gray-200 dark:border-gray-700 p-6 shadow-sm">
+      <div className="bg-white dark:bg-gray-900 rounded-lg border border-gray-200 dark:border-gray-800 p-6 shadow-sm">
         <h3 className="text-lg font-semibold text-gray-900 dark:text-gray-100 mb-4">Data Storage Locations</h3>
         <p className="text-sm text-gray-600 dark:text-gray-300 mb-6">
           View and access where Meetily stores your data
@@ -200,7 +200,7 @@ export function PreferenceSettings() {
           </div> */}
 
           {/* Recordings Location */}
-          <div className="p-4 border rounded-lg bg-gray-50 dark:bg-gray-950">
+          <div className="p-4 border rounded-lg bg-gray-50 dark:bg-gray-800/50">
             <div className="font-medium mb-2">Meeting Recordings</div>
             <div className="text-sm text-gray-600 dark:text-gray-300 mb-3 break-all font-mono text-xs">
               {storageLocations?.recordings || 'Loading...'}
@@ -223,7 +223,7 @@ export function PreferenceSettings() {
       </div>
 
       {/* Analytics Section */}
-      <div className="bg-white dark:bg-gray-900 rounded-lg border border-gray-200 dark:border-gray-700 p-6 shadow-sm">
+      <div className="bg-white dark:bg-gray-900 rounded-lg border border-gray-200 dark:border-gray-800 p-6 shadow-sm">
         <AnalyticsConsentSwitch />
       </div>
     </div>

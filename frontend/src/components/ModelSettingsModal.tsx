@@ -1335,7 +1335,7 @@ export function ModelSettingsModal({
 
                           {/* Progress bar for downloading models */}
                           {modelIsDownloading && progress !== undefined && (
-                            <div className="mt-3 pt-3 border-t border-gray-200 dark:border-gray-700">
+                            <div className="mt-3 pt-3 border-t border-gray-200 dark:border-gray-800">
                               <div className="flex items-center justify-between mb-2">
                                 <span className="text-sm font-medium text-blue-600 dark:text-blue-400">Downloading...</span>
                                 <span className="text-sm font-semibold text-blue-600 dark:text-blue-400">{Math.round(progress)}%</span>

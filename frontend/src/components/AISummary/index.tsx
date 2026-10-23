@@ -648,7 +648,7 @@ export const AISummary = ({ summary, status, error, onSummaryChange, onRegenerat
 
   if (!hasContent && status === 'completed') {
     return (
-      <div className="w-full p-4 bg-gray-50 dark:bg-gray-950 border border-gray-200 dark:border-gray-700 rounded-lg text-center">
+      <div className="w-full p-4 bg-gray-50 dark:bg-gray-800/50 border border-gray-200 dark:border-gray-800 rounded-lg text-center">
         <p className="text-gray-600 dark:text-gray-300">No summary content available.</p>
         <p className="text-gray-500 dark:text-gray-400 text-sm mt-1">Try generating a new summary.</p>
       </div>
@@ -672,7 +672,7 @@ export const AISummary = ({ summary, status, error, onSummaryChange, onRegenerat
       {/* Context Menu */}
       {contextMenu.visible && selectedBlocks.length > 0 && (
         <div
-          className="fixed z-50 bg-white dark:bg-gray-900 shadow-lg rounded-lg py-1 min-w-[160px] border border-gray-200 dark:border-gray-700
+          className="fixed z-50 bg-white dark:bg-gray-900 shadow-lg rounded-lg py-1 min-w-[160px] border border-gray-200 dark:border-gray-800
                      animate-in fade-in zoom-in-95 duration-150"
           style={{ 
             left: contextMenu.x, 

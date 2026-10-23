@@ -569,7 +569,7 @@ const Sidebar: React.FC = () => {
           className={`flex items-center transition-all duration-150 group ${item.type === 'folder' && depth === 0
             ? 'p-3 text-lg font-semibold h-10 mx-3 mt-3 rounded-lg'
             : `px-3 py-2 my-0.5 rounded-md text-sm ${isActive ? 'bg-blue-100 dark:bg-blue-900/50 text-blue-700 dark:text-blue-300 font-medium' :
-              hasTranscriptMatch ? 'bg-yellow-50 dark:bg-yellow-950/50' : 'hover:bg-gray-50 dark:hover:bg-gray-950'
+              hasTranscriptMatch ? 'bg-yellow-50 dark:bg-yellow-950/50' : 'hover:bg-gray-50 dark:hover:bg-gray-800/50'
             } cursor-pointer`
             }`}
           style={item.type === 'folder' && depth === 0 ? {} : { paddingLeft }}
@@ -772,7 +772,7 @@ const Sidebar: React.FC = () => {
         {/* Footer */}
         {!isCollapsed && (
 
-          <div className="flex-shrink-0 p-2 border-t border-gray-100 dark:border-gray-700">
+          <div className="flex-shrink-0 p-2 border-t border-gray-100 dark:border-gray-800">
             <button
               onClick={handleRecordingToggle}
               disabled={isRecording}

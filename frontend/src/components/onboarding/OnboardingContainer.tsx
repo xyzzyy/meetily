@@ -55,9 +55,9 @@ export function OnboardingContainer({
                   onClick={handlePrevious}
                   disabled={!canGoPrevious || step === 1}
                   className={cn(
-                    'pointer-events-auto w-8 h-8 rounded-full bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 shadow-sm flex items-center justify-center transition-all duration-200',
+                    'pointer-events-auto w-8 h-8 rounded-full bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 shadow-sm flex items-center justify-center transition-all duration-200',
                     canGoPrevious && step !== 1
-                      ? 'hover:bg-gray-50 dark:hover:bg-gray-950 hover:shadow-md hover:scale-110 text-gray-700 dark:text-gray-200'
+                      ? 'hover:bg-gray-50 dark:hover:bg-gray-800/50 hover:shadow-md hover:scale-110 text-gray-700 dark:text-gray-200'
                       : 'opacity-0 cursor-not-allowed'
                   )}
                 >
@@ -68,9 +68,9 @@ export function OnboardingContainer({
                   onClick={handleNext}
                   disabled={!canGoNext || step === totalSteps}
                   className={cn(
-                    'pointer-events-auto w-8 h-8 rounded-full bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 shadow-sm flex items-center justify-center transition-all duration-200',
+                    'pointer-events-auto w-8 h-8 rounded-full bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 shadow-sm flex items-center justify-center transition-all duration-200',
                     canGoNext && step !== totalSteps
-                      ? 'hover:bg-gray-50 dark:hover:bg-gray-950 hover:shadow-md hover:scale-110 text-gray-700 dark:text-gray-200'
+                      ? 'hover:bg-gray-50 dark:hover:bg-gray-800/50 hover:shadow-md hover:scale-110 text-gray-700 dark:text-gray-200'
                       : 'opacity-0 cursor-not-allowed'
                   )}
                 >

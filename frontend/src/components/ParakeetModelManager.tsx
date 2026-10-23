@@ -527,8 +527,8 @@ function ModelCard({
         ${isSelected && isAvailable
           ? 'border-blue-500 bg-blue-50 dark:bg-blue-950/50'
           : isAvailable
-            ? 'border-gray-200 dark:border-gray-700 hover:border-gray-300 dark:hover:border-gray-600 bg-white dark:bg-gray-900'
-            : 'border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-950'
+            ? 'border-gray-200 dark:border-gray-800 hover:border-gray-300 dark:hover:border-gray-600 bg-white dark:bg-gray-900'
+            : 'border-gray-200 dark:border-gray-800 bg-gray-50 dark:bg-gray-800/50'
         }
         ${isAvailable ? '' : 'cursor-default'}
       `}
@@ -651,7 +651,7 @@ function ModelCard({
             initial={{ opacity: 0, height: 0 }}
             animate={{ opacity: 1, height: 'auto' }}
             exit={{ opacity: 0, height: 0 }}
-            className="mt-3 pt-3 border-t border-gray-200 dark:border-gray-700"
+            className="mt-3 pt-3 border-t border-gray-200 dark:border-gray-800"
           >
             <div className="flex items-center justify-between mb-2">
               <div className="flex items-center gap-2">

@@ -282,7 +282,7 @@ export function ImportAudioDialog({
           {!isProcessing && !error && (
             <>
               {fileInfo ? (
-                <div className="bg-gray-50 dark:bg-gray-950 rounded-lg p-4 space-y-3">
+                <div className="bg-gray-50 dark:bg-gray-800/50 rounded-lg p-4 space-y-3">
                   <div className="flex items-start gap-3">
                     <FileAudio className="h-8 w-8 text-blue-600 dark:text-blue-400 flex-shrink-0" />
                     <div className="flex-1 min-w-0">
@@ -343,7 +343,7 @@ export function ImportAudioDialog({
                 <div className="border rounded-lg">
                   <button
                     onClick={() => setShowAdvanced(!showAdvanced)}
-                    className="w-full flex items-center justify-between p-3 text-sm font-medium text-gray-700 dark:text-gray-200 hover:bg-gray-50 dark:hover:bg-gray-950"
+                    className="w-full flex items-center justify-between p-3 text-sm font-medium text-gray-700 dark:text-gray-200 hover:bg-gray-50 dark:hover:bg-gray-800/50"
                   >
                     <span>Advanced Options</span>
                     {showAdvanced ? (

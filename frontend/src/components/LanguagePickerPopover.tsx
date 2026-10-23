@@ -81,11 +81,11 @@ export function LanguagePickerPopover({
   return (
     <div
       ref={containerRef}
-      className="w-72 rounded-lg bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 shadow-lg overflow-hidden"
+      className="w-72 rounded-lg bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 shadow-lg overflow-hidden"
       role="dialog"
       aria-label="Pick summary language"
     >
-      <div className="flex items-center gap-2 px-3 py-2.5 border-b border-gray-100 dark:border-gray-700">
+      <div className="flex items-center gap-2 px-3 py-2.5 border-b border-gray-100 dark:border-gray-800">
         <span className="text-gray-400 text-sm">🔍</span>
         <input
           ref={inputRef}
@@ -109,7 +109,7 @@ export function LanguagePickerPopover({
                 type="button"
                 aria-pressed={value === opt.code}
                 onClick={() => onChange(opt.code)}
-                className={`flex w-full items-center justify-between px-3 py-1.5 text-sm hover:bg-gray-50 dark:hover:bg-gray-950 text-left ${
+                className={`flex w-full items-center justify-between px-3 py-1.5 text-sm hover:bg-gray-50 dark:hover:bg-gray-800/50 text-left ${
                   value === opt.code ? "text-blue-600 dark:text-blue-400 font-medium" : "text-gray-800 dark:text-gray-100"
                 }`}
               >
@@ -129,7 +129,7 @@ export function LanguagePickerPopover({
             type="button"
             aria-pressed={value === null}
             onClick={() => onChange(null)}
-            className={`flex w-full items-center justify-between px-3 py-1.5 text-sm hover:bg-gray-50 dark:hover:bg-gray-950 text-left ${
+            className={`flex w-full items-center justify-between px-3 py-1.5 text-sm hover:bg-gray-50 dark:hover:bg-gray-800/50 text-left ${
               value === null ? "text-blue-600 dark:text-blue-400 font-medium" : "text-gray-800 dark:text-gray-100"
             }`}
           >
@@ -155,7 +155,7 @@ export function LanguagePickerPopover({
             type="button"
             aria-pressed={value === opt.code}
             onClick={() => onChange(opt.code)}
-            className={`flex w-full items-center justify-between px-3 py-1.5 text-sm hover:bg-gray-50 dark:hover:bg-gray-950 text-left ${
+            className={`flex w-full items-center justify-between px-3 py-1.5 text-sm hover:bg-gray-50 dark:hover:bg-gray-800/50 text-left ${
               value === opt.code ? "text-blue-600 dark:text-blue-400 font-medium" : "text-gray-800 dark:text-gray-100"
             }`}
           >

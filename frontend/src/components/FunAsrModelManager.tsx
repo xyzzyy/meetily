@@ -294,7 +294,7 @@ export function FunAsrModelManager({
             className={`rounded-lg border p-4 ${
               selectedModel === model.name
                 ? 'border-blue-500 bg-blue-50/40 dark:bg-blue-950/40'
-                : 'border-gray-200 dark:border-gray-700'
+                : 'border-gray-200 dark:border-gray-800'
             }`}
           >
             <div className="flex items-start justify-between gap-3">

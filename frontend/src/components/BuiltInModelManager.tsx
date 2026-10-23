@@ -319,11 +319,11 @@ export function BuiltInModelManager({
               className={cn(
                 'p-4 rounded-lg border transition-colors',
                 modelIsDownloading
-                  ? 'bg-white dark:bg-gray-900 border-gray-200 dark:border-gray-700'
+                  ? 'bg-white dark:bg-gray-900 border-gray-200 dark:border-gray-800'
                   : 'bg-card',
                 selectedModel === model.name
                   ? 'ring-2 ring-gray-800 dark:ring-gray-300 border-gray-800 dark:border-gray-300'
-                  : 'border-gray-200 dark:border-gray-700 hover:border-gray-300 dark:hover:border-gray-600',
+                  : 'border-gray-200 dark:border-gray-800 hover:border-gray-300 dark:hover:border-gray-600',
                 isAvailable && !modelIsDownloading && 'cursor-pointer'
               )}
               onClick={() => {
@@ -471,7 +471,7 @@ export function BuiltInModelManager({
 
               {/* Download progress bar */}
               {modelIsDownloading && progress !== undefined && (
-                <div className="mt-3 pt-3 border-t border-gray-200 dark:border-gray-700">
+                <div className="mt-3 pt-3 border-t border-gray-200 dark:border-gray-800">
                   <div className="flex items-center justify-between mb-1">
                     <span className="text-sm font-medium text-gray-900 dark:text-gray-100">Downloading...</span>
                     <span className="text-sm font-semibold text-gray-900 dark:text-gray-100">
