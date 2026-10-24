@@ -21,6 +21,7 @@ export interface RecordingStoppedPayload {
   folder_path?: string;
   meeting_name?: string;
   save_error?: string | null;
+  transcript_warning?: string | null;
 }
 
 // Bound the start invoke: > ~40s Bluetooth mic cold-start and ~90s worst-case
