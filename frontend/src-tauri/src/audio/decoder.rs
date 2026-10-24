@@ -593,24 +593,14 @@ pub fn decode_audio_file_with_progress(
 mod tests {
     use super::*;
 
-    #[cfg(unix)]
+    /// Imported files can sit on read-only media, so conversion must not write
+    /// anything next to the source. Checked directly by watching the source
+    /// folder while the converted file exists, rather than by simulating
+    /// read-only media with permissions, which privileged processes bypass.
     #[test]
-    fn ffmpeg_conversion_reads_from_a_read_only_directory() {
-        use std::os::unix::fs::PermissionsExt;
-
-        struct SourceDirectory(tempfile::TempDir);
-        impl Drop for SourceDirectory {
-            fn drop(&mut self) {
-                // Restore directory access before TempDir removes the fixture.
-                let _ = std::fs::set_permissions(
-                    self.0.path(),
-                    std::fs::Permissions::from_mode(0o700),
-                );
-            }
-        }
-
-        let directory = SourceDirectory(tempfile::tempdir().unwrap());
-        let source = directory.0.path().join("recording.mkv");
+    fn ffmpeg_conversion_writes_nothing_next_to_the_source() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("recording.mkv");
         let output = Command::new(find_ffmpeg_path().expect("ffmpeg is required for this test"))
             .args(["-loglevel", "error", "-f", "lavfi", "-i", "sine=duration=0.2", "-c:a", "pcm_s16le"])
             .arg(&source)
@@ -618,19 +608,27 @@ mod tests {
             .unwrap();
         assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
         let original = std::fs::read(&source).unwrap();
-        std::fs::set_permissions(directory.0.path(), std::fs::Permissions::from_mode(0o500)).unwrap();
-        assert!(tempfile::NamedTempFile::new_in(directory.0.path()).is_err(), "fixture directory must reject writes");
+        let listing = || {
+            let mut names: Vec<_> = std::fs::read_dir(directory.path())
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name())
+                .collect();
+            names.sort();
+            names
+        };
+        let before = listing();
 
         let converted = convert_to_wav_with_ffmpeg(&source, None).unwrap();
         let converted_path = converted.to_path_buf();
-        assert_ne!(converted_path.parent(), source.parent());
+        assert_eq!(listing(), before, "nothing is written next to the source");
         let decoded = decode_audio_file(&converted_path).unwrap();
         assert!((decoded.duration_seconds - 0.2).abs() < 0.01);
         assert!(!decoded.samples.is_empty());
         assert_eq!(std::fs::read(&source).unwrap(), original);
-        assert_eq!(std::fs::read_dir(directory.0.path()).unwrap().count(), 1);
+
         drop(converted);
         assert!(!converted_path.exists(), "temporary WAV must be removed after use");
+        assert_eq!(listing(), before);
     }
 
     #[test]

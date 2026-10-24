@@ -37,12 +37,34 @@ pub async fn prepare_upstream_compatible_core(core_path: &Path) -> Result<(), St
     }
     let url = core_path.to_string_lossy().to_string();
     let pool = SqlitePool::connect(&url).await.map_err(stringify)?;
-    if !has_legacy_feature_schema(&pool).await? {
-        pool.close().await;
+    // Close the pool on every path, including errors. A connection left to close
+    // in the background could still hold the file open while the caller inspects
+    // or repairs it after a failed open.
+    let result = separate_legacy_speaker_data(
+        core_path,
+        parent,
+        &marker_path,
+        &temp_feature_path,
+        &feature_path,
+        &pool,
+    )
+    .await;
+    pool.close().await;
+    result
+}
+
+async fn separate_legacy_speaker_data(
+    core_path: &Path,
+    parent: &Path,
+    marker_path: &Path,
+    temp_feature_path: &Path,
+    feature_path: &Path,
+    pool: &SqlitePool,
+) -> Result<(), String> {
+    if !has_legacy_feature_schema(pool).await? {
         return Ok(());
     }
     if feature_path.exists() {
-        pool.close().await;
         return Err(format!(
             "The branch core database still contains legacy speaker data, but {} already exists. No automatic merge was attempted.",
             feature_path.display()
@@ -50,17 +72,17 @@ pub async fn prepare_upstream_compatible_core(core_path: &Path) -> Result<(), St
     }
 
     sqlx::query("PRAGMA wal_checkpoint(FULL)")
-        .execute(&pool)
+        .execute(pool)
         .await
         .map_err(stringify)?;
-    let meeting_count = count(&pool, "meetings").await?;
-    let transcript_count = count(&pool, "transcripts").await?;
+    let meeting_count = count(pool, "meetings").await?;
+    let transcript_count = count(pool, "transcripts").await?;
     let source_database_hash = hash_file(core_path)?;
     let timestamp = chrono::Utc::now().format("%Y%m%d-%H%M%S");
     let backup_path = parent.join(format!(
         "meeting_minutes.before-speaker-separation-{timestamp}.sqlite"
     ));
-    online_backup(&pool, &backup_path).await?;
+    online_backup(pool, &backup_path).await?;
     verify_database(&backup_path).await?;
 
     let mut marker = MigrationMarker {
@@ -71,16 +93,16 @@ pub async fn prepare_upstream_compatible_core(core_path: &Path) -> Result<(), St
         feature_row_counts: BTreeMap::new(),
         phase: "backup_verified".to_string(),
     };
-    write_marker(&marker_path, &marker)?;
+    write_marker(marker_path, &marker)?;
 
     if temp_feature_path.exists() {
-        std::fs::remove_file(&temp_feature_path).map_err(stringify)?;
+        std::fs::remove_file(temp_feature_path).map_err(stringify)?;
     }
-    let feature_store = super::speaker_store::SpeakerFeatureStore::new(&temp_feature_path)
+    let feature_store = super::speaker_store::SpeakerFeatureStore::new(temp_feature_path)
         .await
         .map_err(stringify)?;
-    let expected_feature_counts = expected_legacy_feature_counts(&pool).await?;
-    copy_legacy_feature_data(&pool, feature_store.pool()).await?;
+    let expected_feature_counts = expected_legacy_feature_counts(pool).await?;
+    copy_legacy_feature_data(pool, feature_store.pool()).await?;
     marker.feature_row_counts = feature_counts(feature_store.pool()).await?;
     if marker.feature_row_counts != expected_feature_counts {
         return Err(format!(
@@ -93,29 +115,29 @@ pub async fn prepare_upstream_compatible_core(core_path: &Path) -> Result<(), St
     verify_pool(feature_store.pool()).await?;
     feature_store.pool().close().await;
     marker.phase = "feature_verified".to_string();
-    write_marker(&marker_path, &marker)?;
+    write_marker(marker_path, &marker)?;
 
-    clean_core_schema(&pool).await?;
+    clean_core_schema(pool).await?;
     sqlx::migrate!("./migrations")
-        .run(&pool)
+        .run(pool)
         .await
         .map_err(|error| format!("Official Meetily migration verification failed: {error}"))?;
-    verify_pool(&pool).await?;
-    if count(&pool, "meetings").await? != marker.meeting_count
-        || count(&pool, "transcripts").await? != marker.transcript_count
+    verify_pool(pool).await?;
+    if count(pool, "meetings").await? != marker.meeting_count
+        || count(pool, "transcripts").await? != marker.transcript_count
     {
         pool.close().await;
         restore_backup(core_path, &marker.backup_path)?;
         return Err("Core row counts changed during speaker-data separation; the verified backup was restored.".to_string());
     }
     marker.phase = "core_cleaned".to_string();
-    write_marker(&marker_path, &marker)?;
+    write_marker(marker_path, &marker)?;
     pool.close().await;
 
-    install_database(&temp_feature_path, &feature_path, &marker.feature_row_counts).await?;
+    install_database(temp_feature_path, feature_path, &marker.feature_row_counts).await?;
     marker.phase = "installed".to_string();
-    write_marker(&marker_path, &marker)?;
-    std::fs::remove_file(&marker_path).map_err(stringify)?;
+    write_marker(marker_path, &marker)?;
+    std::fs::remove_file(marker_path).map_err(stringify)?;
     Ok(())
 }
 

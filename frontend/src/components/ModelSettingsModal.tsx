@@ -1,4 +1,3 @@
-import { redactSecrets } from '@/lib/redact-secrets';
 import { useState, useEffect, useRef } from 'react';
 import { useSidebar } from './Sidebar/SidebarProvider';
 import { invoke } from '@tauri-apps/api/core';
@@ -352,8 +351,8 @@ export function ModelSettingsModal({
   useEffect(() => {
     if (modelConfig.provider === 'custom-openai') {
       console.log('Syncing custom OpenAI fields from ConfigContext:', {
-        endpoint: modelConfig.customOpenAIEndpoint,
         model: modelConfig.customOpenAIModel,
+        hasEndpoint: !!modelConfig.customOpenAIEndpoint,
         hasApiKey: !!modelConfig.customOpenAIApiKey,
       });
 
@@ -667,7 +666,7 @@ export function ModelSettingsModal({
       model: selectedModel,
     };
     setModelConfig(updatedConfig);
-    console.log('ModelSettingsModal - handleSave - Updated ModelConfig:', redactSecrets(updatedConfig));
+    console.log('ModelSettingsModal - handleSave - Updated ModelConfig:', updatedConfig.provider, updatedConfig.model);
 
     // Persist confirmed model choice to per-provider cache
     if (updatedConfig.model) {

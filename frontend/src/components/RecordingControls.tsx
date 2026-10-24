@@ -2,15 +2,15 @@
 
 import { invoke } from '@tauri-apps/api/core';
 import { appDataDir } from '@tauri-apps/api/path';
-import { useCallback, useEffect, useState, useRef } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { Play, Pause, Square, Mic, AlertCircle, X } from 'lucide-react';
 import { ProcessRequest, SummaryResponse } from '@/types/summary';
-import { listen } from '@tauri-apps/api/event';
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 import Analytics from '@/lib/analytics';
 import { useRecordingState } from '@/contexts/RecordingStateContext';
 import type { TranscriptionErrorPayload } from '@/services/transcriptService';
+import { useTauriEvent } from '@/hooks/useTauriEvent';
 
 interface RecordingControlsProps {
   isRecording: boolean;
@@ -18,7 +18,6 @@ interface RecordingControlsProps {
   onRecordingStop: (callApi?: boolean) => void;
   onRecordingStart: () => void;
   onTranscriptReceived: (summary: SummaryResponse) => void;
-  onTranscriptionError?: (message: string) => void;
   onStopInitiated?: () => void; // Called immediately when stop button is clicked
   onStopRequestFinished?: () => void;
   isRecordingDisabled: boolean;
@@ -36,7 +35,6 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
   onRecordingStop,
   onRecordingStart,
   onTranscriptReceived,
-  onTranscriptionError,
   onStopInitiated,
   onStopRequestFinished,
   isRecordingDisabled,
@@ -58,7 +56,6 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
   const [isPausing, setIsPausing] = useState(false);
   const [isResuming, setIsResuming] = useState(false);
   const MIN_RECORDING_DURATION = 2000; // 2 seconds minimum recording time
-  const [transcriptionErrors, setTranscriptionErrors] = useState(0);
   const [isValidatingModel, setIsValidatingModel] = useState(false);
   const [speechDetected, setSpeechDetected] = useState(false);
   const [deviceError, setDeviceError] = useState<{ title: string, message: string } | null>(null);
@@ -250,108 +247,20 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
     };
   }, []);
 
-  // The listeners below must be registered once. Read the latest callbacks through
-  // refs so a new function identity from the parent never re-subscribes them.
-  const onRecordingStopRef = useRef(onRecordingStop);
-  const onTranscriptionErrorRef = useRef(onTranscriptionError);
-  useEffect(() => {
-    onRecordingStopRef.current = onRecordingStop;
-    onTranscriptionErrorRef.current = onTranscriptionError;
+  // Analytics and the stop spinner react to transcription errors here. The
+  // message itself is shown by the app-wide handler in useModalState. After a
+  // fatal worker error the backend stops capture, so post-processing waits for
+  // its stop result; chunk errors can be nonfatal.
+  useTauriEvent<TranscriptionErrorPayload>('transcription-error', (event) => {
+    console.error('Transcription error received:', event.payload);
+    Analytics.trackTranscriptionError(event.payload.userMessage || event.payload.error);
+    setIsProcessing(false);
   });
 
-  useEffect(() => {
-    console.log('Setting up recording event listeners');
-    // Set by cleanup. Registration is async, so listeners that resolve after
-    // cleanup must unsubscribe themselves or they leak for the app's lifetime.
-    let cancelled = false;
-    let unsubscribes: (() => void)[] = [];
-
-    const setupListeners = async () => {
-      try {
-        // Transcript error listener - handles both regular and actionable errors
-        const transcriptErrorUnsubscribe = await listen('transcript-error', (event) => {
-          if (cancelled) return;
-          console.log('transcript-error event received:', event);
-          console.error('Transcription error received:', event.payload);
-          const errorMessage = event.payload as string;
-
-          Analytics.trackTranscriptionError(errorMessage);
-          console.log('Tracked transcription error:', errorMessage);
-
-          setTranscriptionErrors(prev => {
-            const newCount = prev + 1;
-            console.log('Transcription error count incremented:', newCount);
-            return newCount;
-          });
-          setIsProcessing(false);
-          console.log('Calling onRecordingStop(false) due to transcript error');
-          onRecordingStopRef.current(false);
-          onTranscriptionErrorRef.current?.(errorMessage);
-        });
-
-        // Transcription error listener - handles structured error objects with actionable flag
-        const transcriptionErrorUnsubscribe = await listen<TranscriptionErrorPayload>('transcription-error', (event) => {
-          if (cancelled) return;
-          console.log('transcription-error event received:', event);
-          console.error('Transcription error received:', event.payload);
-
-          const errorMessage = event.payload.userMessage || event.payload.error;
-
-          Analytics.trackTranscriptionError(errorMessage);
-          console.log('Tracked transcription error:', errorMessage);
-
-          setTranscriptionErrors(prev => {
-            const newCount = prev + 1;
-            console.log('Transcription error count incremented:', newCount);
-            return newCount;
-          });
-          setIsProcessing(false);
-
-          // The backend stops capture after a fatal worker error. Wait for its
-          // stop result before post-processing. Chunk errors can be nonfatal.
-
-          // For actionable errors (like model loading failures), the main page will handle showing the model selector
-          // For regular errors, they are handled by useModalState global listener which shows a toast
-        });
-
-        // Pause/Resume events are now handled by RecordingStateContext
-        // No need for duplicate listeners here
-
-        // Speech detected listener - for UX feedback when VAD detects speech
-        const speechDetectedUnsubscribe = await listen('speech-detected', (event) => {
-          if (cancelled) return;
-          console.log('speech-detected event received:', event);
-          setSpeechDetected(true);
-        });
-
-        const registered = [
-          transcriptErrorUnsubscribe,
-          transcriptionErrorUnsubscribe,
-          speechDetectedUnsubscribe
-        ];
-        if (cancelled) {
-          registered.forEach(unsubscribe => unsubscribe());
-          return;
-        }
-        unsubscribes = registered;
-        console.log('Recording event listeners set up successfully');
-      } catch (error) {
-        console.error('Failed to set up recording event listeners:', error);
-      }
-    };
-
-    setupListeners();
-
-    return () => {
-      console.log('Cleaning up recording event listeners');
-      cancelled = true;
-      unsubscribes.forEach(unsubscribe => {
-        if (unsubscribe && typeof unsubscribe === 'function') {
-          unsubscribe();
-        }
-      });
-    };
-  }, []);
+  // UX feedback when voice activity detection first hears speech.
+  useTauriEvent('speech-detected', () => {
+    setSpeechDetected(true);
+  });
 
   return (
     <TooltipProvider>

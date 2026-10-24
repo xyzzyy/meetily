@@ -37,7 +37,6 @@ async function mount(config) {
         isDownloading: () => false, getProgress: () => 0, downloadingModels: new Set(),
       }) };
       if (name === '@/lib/utils') return { cn: (...values) => values.filter(Boolean).join(' ') };
-      if (name === '@/lib/redact-secrets') return { redactSecrets: () => ({}) };
       if (name === 'sonner') return { toast: { error() {} } };
       if (name === 'lucide-react') return new Proxy({}, { get: () => () => null });
       if (name === '@/components/ui/button') return { Button: props => React.createElement('button', props) };

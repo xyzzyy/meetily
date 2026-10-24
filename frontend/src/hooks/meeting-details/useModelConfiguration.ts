@@ -1,4 +1,3 @@
-import { redactSecrets } from '@/lib/redact-secrets';
 import { useState, useEffect, useCallback } from 'react';
 import { ModelConfig } from '@/components/ModelSettingsModal';
 import { invoke as invokeTauri } from '@tauri-apps/api/core';
@@ -91,7 +90,7 @@ export function useModelConfiguration({ serverAddress }: UseModelConfigurationPr
     const setupListener = async () => {
       const { listen } = await import('@tauri-apps/api/event');
       const unlisten = await listen<ModelConfig>('model-config-updated', (event) => {
-        console.log('Meeting details received model-config-updated event:', redactSecrets(event.payload));
+        console.log('Meeting details received model-config-updated event:', event.payload);
         setModelConfig(event.payload);
       });
 
@@ -117,7 +116,7 @@ export function useModelConfiguration({ serverAddress }: UseModelConfigurationPr
         apiKey: configToSave.apiKey ?? null,
         ollamaEndpoint: configToSave.ollamaEndpoint ?? null
       };
-      console.log('Saving model config with payload:', redactSecrets(payload));
+      console.log('Saving model config with payload:', payload);
 
       // Track model configuration change
       if (updatedConfig && (

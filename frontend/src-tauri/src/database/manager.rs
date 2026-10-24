@@ -2,38 +2,7 @@ use sqlx::{migrate::MigrateDatabase, Result, Sqlite, SqlitePool, Transaction};
 use std::fs;
 use std::path::Path;
 
-/// Keep a copy of the database and move its WAL/SHM files aside, named with
-/// a unique `.corrupt-<timestamp>-<id>` suffix, so earlier backups are preserved.
-fn quarantine_database_files(
-    db_path: &Path,
-    wal_path: &Path,
-    shm_path: &Path,
-) -> std::io::Result<()> {
-    let stamp = format!(
-        "{}-{}",
-        chrono::Local::now().format("%Y%m%d-%H%M%S"),
-        uuid::Uuid::new_v4()
-    );
-    let with_suffix = |path: &Path| {
-        let mut name = path.as_os_str().to_owned();
-        name.push(format!(".corrupt-{stamp}"));
-        std::path::PathBuf::from(name)
-    };
-
-    if db_path.exists() {
-        let backup = with_suffix(db_path);
-        fs::copy(db_path, &backup)?;
-        log::warn!("Copied database to {}", backup.display());
-    }
-    for path in [wal_path, shm_path] {
-        if path.exists() {
-            let moved = with_suffix(path);
-            fs::rename(path, &moved)?;
-            log::warn!("Moved {} to {}", path.display(), moved.display());
-        }
-    }
-    Ok(())
-}
+use super::recovery;
 
 #[derive(Clone)]
 pub struct DatabaseManager {
@@ -49,6 +18,16 @@ impl DatabaseManager {
         }
 
         if !Path::new(tauri_db_path).exists() {
+            // A WAL next to a missing database belongs to an earlier file. SQLite
+            // would apply it to the new one, so move it aside first.
+            if let Some(moved) = recovery::set_aside_orphaned_wal(Path::new(tauri_db_path))
+                .map_err(sqlx::Error::Io)?
+            {
+                log::warn!(
+                    "Moved a WAL left from an earlier database file to {}",
+                    moved.display()
+                );
+            }
             if Path::new(backend_db_path).exists() {
                 log::info!(
                     "Copying database from {} to {}",
@@ -68,9 +47,41 @@ impl DatabaseManager {
 
         let pool = SqlitePool::connect(tauri_db_path).await?;
 
-        sqlx::migrate!("./migrations").run(&pool).await?;
+        if let Err(error) = sqlx::migrate!("./migrations").run(&pool).await {
+            // Close before returning so no connection still has the file open if
+            // the caller goes on to inspect or repair it.
+            pool.close().await;
+            return Err(error.into());
+        }
 
         Ok(DatabaseManager { pool })
+    }
+
+    /// Open the core database. When that fails, check a copy of the files to
+    /// tell a damaged database apart from other failures.
+    pub(crate) async fn open(database: &Path, backend_db_path: &str) -> Result<Self> {
+        let database_path = database.to_string_lossy().to_string();
+        let open_error = match Self::new(&database_path, backend_db_path).await {
+            Ok(manager) => return Ok(manager),
+            Err(error) => error,
+        };
+        if !database.exists() {
+            return Err(open_error);
+        }
+        match recovery::is_readable(database).await {
+            Ok(true) => {
+                log::error!("Database connection failed; the database files are readable: {}", open_error);
+                Err(open_error)
+            }
+            Ok(false) => {
+                log::error!("The database file is damaged: {}", open_error);
+                Err(sqlx::Error::Protocol(recovery::damaged_message(database, &open_error)))
+            }
+            Err(check_error) => {
+                log::error!("Could not check the database files ({}): {}", check_error, open_error);
+                Err(open_error)
+            }
+        }
     }
 
     // NOTE: So for the first time users they needs to start the application
@@ -96,59 +107,12 @@ impl DatabaseManager {
             .to_string_lossy()
             .to_string();
 
-        // WAL file paths, set aside if the database cannot be opened
-        let wal_path = app_data_dir.join("meeting_minutes.sqlite-wal");
-        let shm_path = app_data_dir.join("meeting_minutes.sqlite-shm");
-
         log::info!("Tauri DB path: {}", tauri_db_path);
         log::info!("Legacy backend DB path: {}", backend_db_path);
 
-        // Try to open database with defensive WAL handling
-        match Self::new(&tauri_db_path, &backend_db_path).await {
-            Ok(db_manager) => {
-                log::info!("Database opened successfully");
-                Ok(db_manager)
-            }
-            Err(e) => {
-                // Check if error is due to corrupted WAL file
-                let error_msg = e.to_string();
-                if error_msg.contains("malformed") || error_msg.contains("corrupt") {
-                    log::warn!("Database appears corrupted. Attempting recovery...");
-                    log::warn!("Error details: {}", error_msg);
-
-                    // The WAL can hold committed changes that were never checkpointed,
-                    // so move it aside instead of deleting it.
-                    if let Err(quarantine_err) = quarantine_database_files(
-                        Path::new(&tauri_db_path),
-                        &wal_path,
-                        &shm_path,
-                    ) {
-                        log::error!(
-                            "Could not finish setting the database files aside; stopping recovery: {}",
-                            quarantine_err
-                        );
-                        return Err(e);
-                    }
-
-                    // Retry connection without WAL files
-                    log::info!("Retrying database connection without the WAL...");
-                    match Self::new(&tauri_db_path, &backend_db_path).await {
-                        Ok(db_manager) => {
-                            log::info!("Database opened successfully after WAL recovery (original files kept alongside)");
-                            Ok(db_manager)
-                        }
-                        Err(retry_err) => {
-                            log::error!("Database connection failed even without the WAL: {}", retry_err);
-                            Err(retry_err)
-                        }
-                    }
-                } else {
-                    // Not a WAL-related error, propagate original error
-                    log::error!("Database connection failed: {}", error_msg);
-                    Err(e)
-                }
-            }
-        }
+        let manager = Self::open(Path::new(&tauri_db_path), &backend_db_path).await?;
+        log::info!("Database opened successfully");
+        Ok(manager)
     }
 
     /// Check if this is the first launch (sqlite database doesn't exist yet)
@@ -240,65 +204,169 @@ impl DatabaseManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sqlx::sqlite::{SqliteConnectOptions, SqliteConnection};
+    use sqlx::{ConnectOptions, Connection};
+    use std::path::PathBuf;
 
-    #[test]
-    fn quarantine_keeps_every_database_file() {
-        let dir = tempfile::tempdir().unwrap();
-        let db = dir.path().join("meeting_minutes.sqlite");
-        let wal = dir.path().join("meeting_minutes.sqlite-wal");
-        let shm = dir.path().join("meeting_minutes.sqlite-shm");
-        fs::write(&db, b"main").unwrap();
-        fs::write(&wal, b"unflushed changes").unwrap();
-        fs::write(&shm, b"index").unwrap();
+    async fn connect(path: &Path) -> SqliteConnection {
+        SqliteConnectOptions::new().filename(path).connect().await.unwrap()
+    }
 
-        quarantine_database_files(&db, &wal, &shm).unwrap();
+    async fn run(connection: &mut SqliteConnection, sql: &str) {
+        sqlx::query(sql).execute(&mut *connection).await.unwrap();
+    }
 
-        assert!(db.exists(), "the database stays in place for the retry");
-        assert!(!wal.exists() && !shm.exists());
-        let saved: Vec<_> = fs::read_dir(dir.path())
+    async fn add_meetings(connection: &mut SqliteConnection, from: usize, count: usize) {
+        for index in from..from + count {
+            sqlx::query("INSERT INTO meetings (id, title, created_at, updated_at) VALUES (?, ?, '2026-01-01', '2026-01-01')")
+                .bind(format!("meeting-{index}"))
+                .bind(format!("Meeting {index} {}", "x".repeat(200)))
+                .execute(&mut *connection)
+                .await
+                .unwrap();
+        }
+    }
+
+    /// A migrated app database in WAL mode, as an upgraded install has.
+    async fn app_database(path: &Path) {
+        let missing_legacy = path.with_extension("missing");
+        let manager = DatabaseManager::new(&path.to_string_lossy(), &missing_legacy.to_string_lossy())
+            .await
+            .unwrap();
+        manager.pool.close().await;
+        let mut connection = connect(path).await;
+        run(&mut connection, "PRAGMA journal_mode=WAL").await;
+        connection.close().await.unwrap();
+    }
+
+    async fn meeting_count(manager: &DatabaseManager) -> i64 {
+        sqlx::query_scalar("SELECT COUNT(*) FROM meetings").fetch_one(manager.pool()).await.unwrap()
+    }
+
+    async fn quick_check(manager: &DatabaseManager) -> String {
+        sqlx::query_scalar("PRAGMA quick_check").fetch_one(manager.pool()).await.unwrap()
+    }
+
+    fn file_names(dir: &Path) -> Vec<String> {
+        let mut names: Vec<String> = fs::read_dir(dir)
             .unwrap()
             .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
-            .filter(|name| name.contains(".corrupt-"))
             .collect();
-        assert_eq!(saved.len(), 3, "main, wal and shm are all preserved: {saved:?}");
-        let wal_copy = saved.iter().find(|name| name.contains("-wal.corrupt-")).unwrap();
-        assert_eq!(fs::read(dir.path().join(wal_copy)).unwrap(), b"unflushed changes");
+        names.sort();
+        names
     }
 
-    #[test]
-    fn quarantine_tolerates_missing_wal_and_shm() {
-        let dir = tempfile::tempdir().unwrap();
-        let db = dir.path().join("meeting_minutes.sqlite");
-        fs::write(&db, b"main").unwrap();
-
-        quarantine_database_files(
-            &db,
-            &dir.path().join("meeting_minutes.sqlite-wal"),
-            &dir.path().join("meeting_minutes.sqlite-shm"),
-        )
-        .unwrap();
+    /// Leaves `database` deleted with its uncheckpointed WAL still next to it, as
+    /// happens when a user deletes the file to start over or to re-import.
+    async fn delete_database_leaving_its_wal(database: &Path) -> Vec<u8> {
+        app_database(database).await;
+        let mut connection = connect(database).await;
+        add_meetings(&mut connection, 0, 50).await;
+        run(&mut connection, "PRAGMA wal_autocheckpoint=0").await;
+        run(&mut connection, "PRAGMA wal_checkpoint(TRUNCATE)").await;
+        run(&mut connection, "CREATE TABLE added_later (value TEXT)").await;
+        add_meetings(&mut connection, 50, 300).await;
+        let wal = fs::read(recovery::wal_path(database)).unwrap();
+        connection.close().await.unwrap();
+        fs::remove_file(database).unwrap();
+        fs::write(recovery::wal_path(database), &wal).unwrap();
+        fs::write(PathBuf::from(format!("{}-shm", database.display())), b"stale index").unwrap();
+        wal
     }
 
-    #[test]
-    fn repeated_quarantine_preserves_each_backup() {
+    fn orphaned_wal(dir: &Path) -> PathBuf {
+        let names = file_names(dir);
+        let name = names
+            .iter()
+            .find(|name| name.starts_with("meeting_minutes.orphaned-") && name.ends_with(".sqlite-wal"))
+            .unwrap_or_else(|| panic!("the old WAL is kept: {names:?}"));
+        dir.join(name)
+    }
+
+    #[tokio::test]
+    async fn a_wal_from_a_deleted_database_is_not_applied_to_the_imported_copy() {
         let dir = tempfile::tempdir().unwrap();
-        let db = dir.path().join("meeting_minutes.sqlite");
-        let wal = dir.path().join("meeting_minutes.sqlite-wal");
-        let shm = dir.path().join("meeting_minutes.sqlite-shm");
-        for contents in [b"first", b"later"] {
-            for path in [&db, &wal, &shm] {
-                fs::write(path, contents).unwrap();
-            }
-            quarantine_database_files(&db, &wal, &shm).unwrap();
+        let database = dir.path().join("meeting_minutes.sqlite");
+        let legacy = dir.path().join("meeting_minutes.db");
+        let old_wal = delete_database_leaving_its_wal(&database).await;
+        app_database(&legacy).await;
+        let mut connection = connect(&legacy).await;
+        add_meetings(&mut connection, 0, 3).await;
+        connection.close().await.unwrap();
+
+        let manager = DatabaseManager::open(&database, &legacy.to_string_lossy()).await.unwrap();
+        assert_eq!(quick_check(&manager).await, "ok");
+        assert_eq!(meeting_count(&manager).await, 3, "the database is the imported copy");
+        manager.pool.close().await;
+
+        assert_eq!(fs::read(orphaned_wal(dir.path())).unwrap(), old_wal, "the old WAL is kept unchanged");
+        assert!(!dir.path().join("meeting_minutes.sqlite-shm").exists() || {
+            // A new connection may create its own index; it must not be the stale one.
+            fs::read(dir.path().join("meeting_minutes.sqlite-shm")).unwrap() != b"stale index"
+        });
+    }
+
+    #[tokio::test]
+    async fn a_wal_from_a_deleted_database_is_not_applied_to_a_new_database() {
+        let dir = tempfile::tempdir().unwrap();
+        let database = dir.path().join("meeting_minutes.sqlite");
+        let old_wal = delete_database_leaving_its_wal(&database).await;
+
+        let manager = DatabaseManager::open(&database, &dir.path().join("none.db").to_string_lossy())
+            .await
+            .unwrap();
+        assert_eq!(quick_check(&manager).await, "ok");
+        assert_eq!(meeting_count(&manager).await, 0);
+        manager.pool.close().await;
+        assert_eq!(fs::read(orphaned_wal(dir.path())).unwrap(), old_wal);
+    }
+
+    #[tokio::test]
+    async fn a_damaged_database_is_reported_and_nothing_is_added_on_any_launch() {
+        let dir = tempfile::tempdir().unwrap();
+        let database = dir.path().join("meeting_minutes.sqlite");
+        let backend = dir.path().join("meeting_minutes.db").to_string_lossy().to_string();
+        app_database(&database).await;
+        let mut connection = connect(&database).await;
+        add_meetings(&mut connection, 0, 300).await;
+        connection.close().await.unwrap();
+
+        // Damage the schema page, which every open reads.
+        let mut main = fs::read(&database).unwrap();
+        main[100..2048].fill(0xAB);
+        fs::write(&database, &main).unwrap();
+
+        let mut names = None;
+        for _ in 0..3 {
+            let error = DatabaseManager::open(&database, &backend)
+                .await
+                .err()
+                .expect("a damaged database cannot open");
+            let message = error.to_string();
+            assert!(message.contains("damaged") && message.contains("did not delete or replace it"), "{message}");
+            assert!(message.contains(&database.display().to_string()), "{message}");
+            assert!(database.exists());
+            let now = file_names(dir.path());
+            assert!(now.iter().all(|name| !name.contains("orphaned") && !name.contains("corrupt")), "{now:?}");
+            assert_eq!(names.get_or_insert_with(|| now.clone()), &now, "repeated launches add nothing");
         }
-        let backups: Vec<_> = fs::read_dir(dir.path())
-            .unwrap()
-            .map(|entry| entry.unwrap().path())
-            .filter(|path| path.file_name().unwrap().to_string_lossy().contains(".corrupt-"))
-            .map(|path| fs::read(path).unwrap())
-            .collect();
-        assert_eq!(backups.len(), 6);
-        assert_eq!(backups.iter().filter(|contents| *contents == b"first").count(), 3);
-        assert_eq!(backups.iter().filter(|contents| *contents == b"later").count(), 3);
+    }
+
+    #[tokio::test]
+    async fn a_readable_database_that_fails_for_another_reason_reports_that_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let database = dir.path().join("meeting_minutes.sqlite");
+        let backend = dir.path().join("meeting_minutes.db").to_string_lossy().to_string();
+        app_database(&database).await;
+        let mut connection = connect(&database).await;
+        run(&mut connection, "UPDATE _sqlx_migrations SET checksum = X'00' WHERE version = (SELECT MIN(version) FROM _sqlx_migrations)").await;
+        connection.close().await.unwrap();
+        let main = fs::read(&database).unwrap();
+        let before = file_names(dir.path());
+
+        let error = DatabaseManager::open(&database, &backend).await.err().unwrap();
+        assert!(!error.to_string().contains("damaged"), "{error}");
+        assert_eq!(fs::read(&database).unwrap(), main);
+        assert_eq!(file_names(dir.path()), before);
     }
 }

@@ -6,33 +6,37 @@ import ts from 'typescript';
 import React from 'react';
 import { act, create } from 'react-test-renderer';
 
-/** Mount the real RecordingControls with a controllable Tauri `listen`. */
-function load() {
-  const live = new Set();
-  const pending = [];
-  const registered = [];
-  const state = { manual: false };
-  const listen = (event, handler) => {
-    const token = { event, handler };
-    registered.push(token);
-    return new Promise(resolve => {
-      const finish = () => { live.add(token); resolve(() => live.delete(token)); };
-      if (state.manual) pending.push(finish); else finish();
-    });
-  };
-  const anything = () => new Proxy(function () {}, { get: () => anything(), apply: () => undefined });
-  const passthrough = ({ children }) => children ?? null;
-  const source = fs.readFileSync(new URL('../../src/components/RecordingControls.tsx', import.meta.url), 'utf8');
-  const compiled = ts.transpileModule(source, {
+function compile(file) {
+  const source = fs.readFileSync(new URL(`../../src/${file}`, import.meta.url), 'utf8');
+  return ts.transpileModule(source, {
     compilerOptions: { module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.React, esModuleInterop: true },
   }).outputText;
+}
+
+/** Mount the real RecordingControls and its real useTauriEvent hook with a fake Tauri `listen`. */
+function load() {
+  const live = new Map();
+  const registered = [];
+  const calls = { stopped: [], errors: [] };
+  const listen = async (event, handler) => {
+    registered.push(event);
+    live.set(event, handler);
+    return () => live.delete(event);
+  };
+  const hook = { exports: {} };
+  vm.runInNewContext(compile('hooks/useTauriEvent.ts'), {
+    module: hook, exports: hook.exports, console,
+    require: name => (name === 'react' ? React : { listen }),
+  });
+  const anything = () => new Proxy(function () {}, { get: () => anything(), apply: () => undefined });
+  const passthrough = ({ children }) => children ?? null;
   const module = { exports: {} };
-  vm.runInNewContext(compiled, {
+  vm.runInNewContext(compile('components/RecordingControls.tsx'), {
     module, exports: module.exports, React, console: { log() {}, error() {}, warn() {} },
     setTimeout, clearTimeout, setInterval, clearInterval,
     require: name => {
       if (name === 'react') return React;
-      if (name === '@tauri-apps/api/event') return { listen };
+      if (name === '@/hooks/useTauriEvent') return hook.exports;
       if (name === '@tauri-apps/api/core') return { invoke: async () => undefined };
       if (name === '@tauri-apps/api/path') return { appDataDir: async () => '/tmp' };
       if (name === 'lucide-react') return new Proxy({}, { get: () => () => null });
@@ -40,63 +44,59 @@ function load() {
       if (name === '@/components/ui/tooltip') {
         return { Tooltip: passthrough, TooltipContent: () => null, TooltipProvider: passthrough, TooltipTrigger: passthrough };
       }
-      if (name === '@/lib/analytics') return { default: anything(), __esModule: true };
+      if (name === '@/lib/analytics') {
+        return { __esModule: true, default: new Proxy({}, {
+          get: (_, method) => (method === 'trackTranscriptionError' ? message => calls.errors.push(message) : anything()),
+        }) };
+      }
       if (name === '@/contexts/RecordingStateContext') {
         return { useRecordingState: () => ({ isPaused: false, isStartingRecording: false, isRecording: false }) };
       }
       return {};
     },
   });
-  const flush = () => act(async () => { await new Promise(resolve => setImmediate(resolve)); });
-  const props = overrides => ({
-    isRecording: false, barHeights: [], onRecordingStart() {}, onTranscriptReceived() {},
-    isRecordingDisabled: false, isParentProcessing: false, onRecordingStop() {}, ...overrides,
+  const props = () => ({
+    isRecording: true, barHeights: [], onRecordingStart() {}, onTranscriptReceived() {},
+    isRecordingDisabled: false, isParentProcessing: false, onRecordingStop: value => calls.stopped.push(value),
   });
-  return { live, pending, registered, state, flush, props, Controls: module.exports.RecordingControls };
+  const flush = () => act(async () => { await new Promise(resolve => setImmediate(resolve)); });
+  return { live, registered, calls, props, flush, Controls: module.exports.RecordingControls };
 }
 
-async function drain(app) {
-  while (app.pending.length) {
-    app.pending.shift()();
-    await app.flush();
-  }
-}
-
-test('re-rendering with new callback functions does not add listeners', async () => {
+async function mount() {
   const app = load();
-  let renderer;
-  await act(async () => { renderer = create(React.createElement(app.Controls, app.props({ onRecordingStop() {} }))); });
-  await app.flush();
-  for (let render = 0; render < 5; render++) {
-    await act(async () => { renderer.update(React.createElement(app.Controls, app.props({ onRecordingStop() {} }))); });
-    await app.flush();
-  }
-  assert.equal(app.registered.length, 3, 'one registration per event, however often the parent renders');
-  assert.equal(app.live.size, 3);
-  await act(async () => renderer.unmount());
-  assert.equal(app.live.size, 0, 'unmounting removes every listener');
-});
-
-test('listeners that finish registering after unmount remove themselves', async () => {
-  const app = load();
-  app.state.manual = true;
   let renderer;
   await act(async () => { renderer = create(React.createElement(app.Controls, app.props())); });
-  await act(async () => renderer.unmount());
-  await drain(app);
   await app.flush();
-  assert.equal(app.live.size, 0, 'no listener is left running after the component is gone');
+  return { ...app, rerender: () => act(async () => renderer.update(React.createElement(app.Controls, app.props()))), unmount: () => act(async () => renderer.unmount()) };
+}
+
+test('listens once for transcription errors and speech, however often the parent renders', async () => {
+  const app = await mount();
+  for (let render = 0; render < 5; render++) await app.rerender();
+  await app.flush();
+  assert.deepEqual([...app.registered].sort(), ['speech-detected', 'transcription-error']);
+  await app.unmount();
+  assert.equal(app.live.size, 0, 'unmounting removes both listeners');
 });
 
-test('a transcript error calls the latest stop handler', async () => {
-  const app = load();
-  const stops = [];
-  let renderer;
-  await act(async () => { renderer = create(React.createElement(app.Controls, app.props({ onRecordingStop: () => stops.push('first') }))); });
-  await app.flush();
-  await act(async () => { renderer.update(React.createElement(app.Controls, app.props({ onRecordingStop: () => stops.push('second') }))); });
-  const handler = app.registered.find(token => token.event === 'transcript-error').handler;
-  await act(async () => handler({ payload: 'boom' }));
-  assert.deepEqual(stops, ['second']);
-  await act(async () => renderer.unmount());
+test('a fatal worker error waits for native stop completion before post-processing', async () => {
+  const app = await mount();
+  await act(async () => app.live.get('transcription-error')({ payload: {
+    phase: 'active', actionable: true, error: 'Engine initialization failed',
+    userMessage: 'Speech recognition failed. Recording is stopping.',
+  } }));
+  assert.deepEqual(app.calls.stopped, []);
+  assert.deepEqual(app.calls.errors, ['Speech recognition failed. Recording is stopping.']);
+  await app.unmount();
+});
+
+test('a nonfatal chunk error does not end the recording in the interface', async () => {
+  const app = await mount();
+  await act(async () => app.live.get('transcription-error')({ payload: {
+    phase: 'active', actionable: false, error: 'One chunk failed', userMessage: 'One chunk failed',
+  } }));
+  assert.deepEqual(app.calls.stopped, []);
+  assert.deepEqual(app.calls.errors, ['One chunk failed']);
+  await app.unmount();
 });
