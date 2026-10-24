@@ -9,6 +9,7 @@ use tokio::sync::RwLock;
 use futures_util::StreamExt;
 use once_cell::sync::Lazy;
 use crate::ollama::metadata::ModelMetadataCache;
+use crate::http_error::{request_error, status_error};
 
 // Global set to track models currently being downloaded
 static DOWNLOADING_MODELS: Lazy<Arc<RwLock<HashSet<String>>>> = Lazy::new(|| {
@@ -168,26 +169,18 @@ async fn get_models_via_http_async(endpoint: Option<&str>) -> Result<Vec<OllamaM
         .timeout(Duration::from_secs(3)) // Per-request timeout
         .send()
         .await
-        .map_err(|e| {
-            if e.is_timeout() {
-                OllamaError::NetworkError("Connection timed out".to_string()).to_string()
-            } else if e.is_connect() {
-                OllamaError::NetworkError(format!("Cannot connect to {}. Please check if the server is running.", base_url)).to_string()
-            } else {
-                OllamaError::NetworkError(e.to_string()).to_string()
-            }
-        })?;
+        .map_err(|e| OllamaError::NetworkError(request_error(&e).to_string()).to_string())?;
 
     if !response.status().is_success() {
         return Err(OllamaError::ServerError(
-            format!("HTTP {}: Server returned an error", response.status())
+            status_error(response.status())
         ).to_string());
     }
 
     let api_response: OllamaApiResponse = response
         .json()
         .await
-        .map_err(|e| OllamaError::ParseError(e.to_string()).to_string())?;
+        .map_err(|e| OllamaError::ParseError(request_error(&e).to_string()).to_string())?;
 
     Ok(api_response.models.into_iter().map(|m| OllamaModel {
         name: m.name,
@@ -208,9 +201,8 @@ fn get_models_via_cli() -> Result<Vec<OllamaModel>, String> {
         })?;
 
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(OllamaError::ServerError(
-            format!("Ollama CLI error: {}", stderr)
+            "The Ollama CLI could not list models. Check the server status.".to_string()
         ).to_string());
     }
 
@@ -297,15 +289,15 @@ pub async fn pull_ollama_model<R: Runtime>(
             if e.is_timeout() {
                 format!("Download timed out. The model may be large, please try using the Ollama CLI: ollama pull {}", model_name)
             } else if e.is_connect() {
-                format!("Cannot connect to {}. Please check if the Ollama server is running.", base_url)
+                request_error(&e).to_string()
             } else {
-                format!("Failed to download model: {}", e)
+                format!("Failed to download model: {}", request_error(&e))
             }
         })?;
 
     if !response.status().is_success() {
         let status = response.status();
-        let error_text = response.text().await.unwrap_or_else(|_| "Unknown error".to_string());
+        let error_message = status_error(status);
 
         // Remove from downloading set on error
         {
@@ -318,11 +310,11 @@ pub async fn pull_ollama_model<R: Runtime>(
             "ollama-model-download-error",
             serde_json::json!({
                 "modelName": model_name,
-                "error": format!("HTTP {}: {}", status, error_text)
+                "error": error_message
             }),
         );
 
-        return Err(format!("Failed to pull model (HTTP {}): {}", status, error_text));
+        return Err(format!("Failed to pull model: {error_message}"));
     }
 
     // Process streaming response (NDJSON format)
@@ -332,7 +324,7 @@ pub async fn pull_ollama_model<R: Runtime>(
 
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.map_err(|e| {
-            let error_msg = format!("Failed to read stream: {}", e);
+            let error_msg = format!("Failed to read stream: {}", request_error(&e));
 
             // Remove from downloading set on stream error
             let model_name_clone = model_name.clone();
@@ -390,8 +382,8 @@ pub async fn pull_ollama_model<R: Runtime>(
                 }
 
                 // Check for error status
-                if let Some(error) = json.get("error").and_then(|v| v.as_str()) {
-                    let error_msg = format!("Ollama error: {}", error);
+                if json.get("error").and_then(|v| v.as_str()).is_some() {
+                    let error_msg = "Ollama reported a model download error. Check the model name and server status.".to_string();
 
                     // Remove from downloading set on Ollama error
                     {
@@ -457,16 +449,14 @@ pub async fn delete_ollama_model(
             if e.is_timeout() {
                 format!("Delete request timed out for model: {}", model_name)
             } else if e.is_connect() {
-                format!("Cannot connect to {}. Please check if the Ollama server is running.", base_url)
+                request_error(&e).to_string()
             } else {
-                format!("Failed to delete model: {}", e)
+                format!("Failed to delete model: {}", request_error(&e))
             }
         })?;
 
     if !response.status().is_success() {
-        let status = response.status();
-        let error_text = response.text().await.unwrap_or_else(|_| "Unknown error".to_string());
-        return Err(format!("Failed to delete model (HTTP {}): {}", status, error_text));
+        return Err(format!("Failed to delete model: {}", status_error(response.status())));
     }
 
     log::info!("Successfully deleted Ollama model: {}", model_name);
@@ -510,5 +500,63 @@ pub async fn get_ollama_model_context(
             // Return default instead of error for better UX
             Ok(4000)
         }
+    }
+}
+
+#[cfg(test)]
+mod privacy_tests {
+    use super::*;
+    use crate::http_error::test_support::{assert_private, closed_endpoint, respond_once};
+
+    #[tokio::test]
+    async fn connection_errors_do_not_expose_endpoint_credentials() {
+        let endpoint = closed_endpoint();
+        let error = get_models_via_http_async(Some(&endpoint))
+            .await
+            .unwrap_err();
+        assert!(error.contains("Cannot connect"));
+        assert_private(&error);
+        let error = delete_ollama_model("model".into(), Some(endpoint))
+            .await
+            .unwrap_err();
+        assert_private(&error);
+    }
+
+    #[tokio::test]
+    async fn model_response_decode_errors_do_not_echo_server_text() {
+        let (endpoint, server) =
+            respond_once("200 OK", r#"{"models":"review-header-secret"}"#).await;
+        let error = get_models_via_http_async(Some(&endpoint))
+            .await
+            .unwrap_err();
+        server.await.unwrap();
+        assert!(error.contains("decoded"));
+        assert_private(&error);
+    }
+
+    #[tokio::test]
+    async fn delete_errors_keep_the_status_without_echoing_response_credentials() {
+        let (endpoint, server) = respond_once(
+            "401 Unauthorized",
+            "review-password review-query-secret review-header-secret",
+        )
+        .await;
+        let error = delete_ollama_model("model".into(), Some(endpoint))
+            .await
+            .unwrap_err();
+        server.await.unwrap();
+        assert!(error.contains("HTTP 401"));
+        assert_private(&error);
+    }
+
+    #[tokio::test]
+    async fn credential_endpoints_still_reach_the_server() {
+        let body =
+            r#"{"models":[{"name":"model","model":"model","modified_at":"now","size":1000}]}"#;
+        let (endpoint, server) = respond_once("200 OK", body).await;
+        let models = get_models_via_http_async(Some(&endpoint)).await.unwrap();
+        let request = server.await.unwrap();
+        assert_eq!(models[0].name, "model");
+        assert!(String::from_utf8_lossy(&request).contains("review-query-secret"));
     }
 }
