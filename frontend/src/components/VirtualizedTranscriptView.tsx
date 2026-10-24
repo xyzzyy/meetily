@@ -335,7 +335,10 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
     const cancelLoadMoreRetryRef = useRef<(() => void) | null>(null);
     // Latest pagination state, so the retry timer never acts on a stale closure
     const paginationRef = useRef({ hasMore, isLoadingMore, onLoadMore });
-    paginationRef.current = { hasMore, isLoadingMore, onLoadMore };
+    // Declared before the jump effect so it runs first on each commit; writing during render could leak uncommitted values
+    useEffect(() => {
+        paginationRef.current = { hasMore, isLoadingMore, onLoadMore };
+    }, [hasMore, isLoadingMore, onLoadMore]);
     // Request key whose pagination retries were exhausted; jump to the nearest loaded segment instead
     const gaveUpKeyRef = useRef(0);
     const [retryExhaustedTick, setRetryExhaustedTick] = useState(0);
