@@ -399,7 +399,7 @@ impl RecordingManager {
         if let Some(error) = &capture_error {
             error!("Error stopping audio streams: {error:#}");
         }
-        let (pipeline_error, transcript_error) = match self.pipeline_manager.force_flush_and_stop().await {
+        let (pipeline_error, transcript_error) = match self.pipeline_manager.stop().await {
             Ok(()) => (None, None),
             Err(PipelineStopError::Pipeline(error)) => {
                 error!("Audio pipeline failed before stop: {error:#}");

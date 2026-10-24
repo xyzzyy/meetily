@@ -172,9 +172,8 @@ impl RecordingState {
         self.is_paused.store(false, Ordering::SeqCst);
         // Clear pause tracking when stopping
         *self.pause_start.lock().unwrap() = None;
-        // CRITICAL: Clear audio sender to close the pipeline channel
-        // This ensures the pipeline loop exits properly after processing all chunks
-        *self.audio_sender.lock().unwrap() = None;
+        // The audio sender stays open so captures can drain their final audio.
+        // AudioPipelineManager::stop() closes it after the streams stop.
         // CRITICAL: Clear device references to release microphone/speaker
         // Without this, Arc<AudioDevice> references persist and keep the mic active
         *self.microphone_device.lock().unwrap() = None;
@@ -252,28 +251,32 @@ impl RecordingState {
         *self.audio_sender.lock().unwrap() = Some(sender);
     }
 
-    pub fn send_audio_chunk(&self, chunk: AudioChunk) -> Result<()> {
-        // Don't send audio chunks when paused
-        if self.is_paused() {
-            return Ok(()); // Silently discard chunks while paused
-        }
+    /// Close the pipeline channel. Captures still holding this state cannot reopen it.
+    pub(super) fn close_audio_sender(&self) {
+        *self.audio_sender.lock().unwrap() = None;
+    }
 
-        if let Some(sender) = self.audio_sender.lock().unwrap().as_ref() {
-            sender
-                .send(chunk)
-                .map_err(|_| anyhow::anyhow!("Failed to send audio chunk"))?;
-
-            // Update statistics
-            let mut stats = self.stats.lock().unwrap();
-            stats.chunks_processed += 1;
-            stats.last_activity = Some(Instant::now());
-            Ok(())
-        } else {
-            // Return an error when no sender is available (pipeline not ready)
-            Err(anyhow::anyhow!(
+    /// Send a chunk that capture already accepted. Pause does not drop it.
+    pub(super) fn send_captured_chunk(&self, chunk: AudioChunk) -> Result<()> {
+        let mut sender = self.audio_sender.lock().unwrap();
+        let Some(channel) = sender.as_ref() else {
+            // Return an error when no sender is available (pipeline not ready or closed)
+            return Err(anyhow::anyhow!(
                 "Audio pipeline not ready - no sender available"
-            ))
+            ));
+        };
+        if channel.send(chunk).is_err() {
+            // The receiver is gone. Later chunks have nowhere to go, so report once.
+            *sender = None;
+            return Err(anyhow::anyhow!("Failed to send audio chunk: channel closed"));
         }
+        drop(sender);
+
+        // Update statistics
+        let mut stats = self.stats.lock().unwrap();
+        stats.chunks_processed += 1;
+        stats.last_activity = Some(Instant::now());
+        Ok(())
     }
 
     // Error handling

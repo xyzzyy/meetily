@@ -96,43 +96,14 @@ pub fn normalize_v2(audio: &[f32]) -> Vec<f32> {
         .collect()
 }
 
-/// True peak limiter with lookahead buffer (prevents clipping)
-struct TruePeakLimiter {
-    lookahead_samples: usize,
-    buffer: Vec<f32>,
-    gain_reduction: Vec<f32>,
-    current_position: usize,
-}
-
-impl TruePeakLimiter {
-    fn new(sample_rate: u32) -> Self {
-        const LIMITER_LOOKAHEAD_MS: usize = 10;
-        let lookahead_samples = ((sample_rate as usize * LIMITER_LOOKAHEAD_MS) / 1000).max(1);
-
-        Self {
-            lookahead_samples,
-            buffer: vec![0.0; lookahead_samples],
-            gain_reduction: vec![1.0; lookahead_samples],
-            current_position: 0,
-        }
-    }
-
-    fn process(&mut self, sample: f32, true_peak_limit: f32) -> f32 {
-        self.buffer[self.current_position] = sample;
-
-        let sample_abs = sample.abs();
-        if sample_abs > true_peak_limit {
-            let reduction = true_peak_limit / sample_abs;
-            self.gain_reduction[self.current_position] = reduction;
-        } else {
-            self.gain_reduction[self.current_position] = 1.0;
-        }
-
-        let output_position = (self.current_position + 1) % self.lookahead_samples;
-        let output_sample = self.buffer[output_position] * self.gain_reduction[output_position];
-
-        self.current_position = output_position;
-        output_sample
+/// Scale a sample down so it does not exceed the true peak limit.
+/// Each output sample depends only on its own input, so the limiter has no latency or tail.
+fn limit_true_peak(sample: f32, true_peak_limit: f32) -> f32 {
+    let sample_abs = sample.abs();
+    if sample_abs > true_peak_limit {
+        sample * (true_peak_limit / sample_abs)
+    } else {
+        sample
     }
 }
 
@@ -146,7 +117,6 @@ impl TruePeakLimiter {
 ///
 pub struct LoudnessNormalizer {
     ebur128: ebur128::EbuR128,
-    limiter: TruePeakLimiter,
     gain_linear: f32,
     loudness_buffer: Vec<f32>,
     true_peak_limit: f32,
@@ -169,7 +139,6 @@ impl LoudnessNormalizer {
 
         Ok(Self {
             ebur128,
-            limiter: TruePeakLimiter::new(sample_rate),
             gain_linear: 1.0,
             loudness_buffer: Vec::with_capacity(ANALYZE_CHUNK_SIZE),
             true_peak_limit,
@@ -182,7 +151,7 @@ impl LoudnessNormalizer {
     /// resulting in consistent normalization that sounds natural.
     ///
     /// Target: -23 LUFS (professional broadcast standard for speech/dialog)
-    /// Applies sample-by-sample with 10ms lookahead limiter to prevent clipping
+    /// Applies sample-by-sample with a true peak limiter to prevent clipping
     pub fn normalize_loudness(&mut self, samples: &[f32]) -> Vec<f32> {
         if samples.is_empty() {
             return Vec::new();
@@ -215,9 +184,7 @@ impl LoudnessNormalizer {
 
             // Apply gain and true peak limiting
             let amplified = sample * self.gain_linear;
-            let limited = self.limiter.process(amplified, self.true_peak_limit);
-
-            normalized_samples.push(limited);
+            normalized_samples.push(limit_true_peak(amplified, self.true_peak_limit));
         }
 
         normalized_samples
@@ -736,4 +703,26 @@ pub fn write_transcript_json_to_file(
     std::fs::write(&file_path, json_string)?;
 
     Ok(file_path.to_string_lossy().to_string())
+}
+
+#[cfg(test)]
+mod terminal_drain_tests {
+    use super::*;
+
+    #[test]
+    fn limiter_keeps_every_sample_without_delay() {
+        let input: Vec<f32> = (0..1457).map(|i| if i % 3 == 0 { 0.75 } else { -0.25 }).collect();
+        let output: Vec<f32> = input.iter().map(|sample| limit_true_peak(*sample, 0.5)).collect();
+        let expected: Vec<f32> = input.iter().map(|sample| sample.clamp(-0.5, 0.5)).collect();
+        assert_eq!(output, expected);
+    }
+
+    #[test]
+    fn normalizer_returns_one_output_sample_per_input_sample() {
+        let mut normalizer = LoudnessNormalizer::new(1, 48000).unwrap();
+        for length in [1, 127, 480, 1457] {
+            let input = vec![0.25; length];
+            assert_eq!(normalizer.normalize_loudness(&input).len(), length);
+        }
+    }
 }
