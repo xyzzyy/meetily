@@ -20,6 +20,7 @@ interface RecordingControlsProps {
   onTranscriptReceived: (summary: SummaryResponse) => void;
   onTranscriptionError?: (message: string) => void;
   onStopInitiated?: () => void; // Called immediately when stop button is clicked
+  onStopRequestFinished?: () => void;
   isRecordingDisabled: boolean;
   isParentProcessing: boolean;
   selectedDevices?: {
@@ -37,6 +38,7 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
   onTranscriptReceived,
   onTranscriptionError,
   onStopInitiated,
+  onStopRequestFinished,
   isRecordingDisabled,
   isParentProcessing,
   selectedDevices,
@@ -161,8 +163,6 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
       setRecordingPath(savePath);
       // setShowPlayback(true);
       setIsProcessing(false);
-      // Track successful transcription
-      Analytics.trackTranscriptionSuccess();
       onRecordingStop(true);
     } catch (error) {
       console.error('Failed to stop recording:', error);
@@ -186,8 +186,9 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
       onRecordingStop(false);
     } finally {
       setIsStopping(false);
+      onStopRequestFinished?.();
     }
-  }, [onRecordingStop]);
+  }, [onRecordingStop, onStopRequestFinished]);
 
   const handleStopRecording = useCallback(async () => {
     console.log('handleStopRecording called - isRecording:', isRecording, 'isStarting:', isStarting, 'isStopping:', isStopping, 'isStartingRecording:', isStartingRecording);
@@ -294,10 +295,8 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
           });
           setIsProcessing(false);
 
-          if (event.payload.phase === 'active') {
-            console.log('Calling onRecordingStop(false) due to active transcription error');
-            onRecordingStop(false);
-          }
+          // The backend stops capture after a fatal worker error. Wait for its
+          // stop result before post-processing. Chunk errors can be nonfatal.
 
           // For actionable errors (like model loading failures), the main page will handle showing the model selector
           // For regular errors, they are handled by useModalState global listener which shows a toast

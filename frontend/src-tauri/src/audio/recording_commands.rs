@@ -14,7 +14,7 @@ use tauri::{AppHandle, Emitter, Manager, Runtime};
 use tokio::task::JoinHandle;
 
 use super::{
-    recording_manager::RecordingStartError,
+    recording_manager::{RecordingStartError, RecordingStopOutcome},
     parse_audio_device,
     default_input_device,   // Get default microphone
     default_output_device,  // Get default system audio
@@ -101,7 +101,7 @@ fn finalize_recording_start() {
 
 // Global recording manager and transcription task to keep them alive during recording
 static RECORDING_MANAGER: Mutex<Option<RecordingManager>> = Mutex::new(None);
-static TRANSCRIPTION_TASK: Mutex<Option<JoinHandle<()>>> = Mutex::new(None);
+static TRANSCRIPTION_TASK: Mutex<Option<JoinHandle<Result<(), String>>>> = Mutex::new(None);
 
 // Listener ID for proper cleanup - prevents microphone from staying active after recording stops
 static TRANSCRIPT_LISTENER_ID: Mutex<Option<tauri::EventId>> = Mutex::new(None);
@@ -425,20 +425,12 @@ pub async fn start_recording_with_meeting_name<R: Runtime>(
 
     // Spawn background device event processor (mic-disconnect fallback).
     if let Some(receiver) = device_event_receiver {
-        spawn_device_event_processor(app.clone(), receiver, session);
+        spawn_device_event_processor(app.clone(), receiver, session.clone());
     }
 
     // Flip recording live + reset per-session flags (speech-detected latch,
     // mic-recovery budget). Shared with the other start path — see helper.
     finalize_recording_start();
-    drop(engine_lifecycle_guard);
-
-    // Start optimized parallel transcription task and store handle
-    let task_handle = transcription::start_transcription_task(app.clone(), transcription_receiver);
-    {
-        let mut global_task = TRANSCRIPTION_TASK.lock().unwrap();
-        *global_task = Some(task_handle);
-    }
 
     // CRITICAL: Listen for transcript-update events and save to recording manager
     // This enables transcript history persistence for page reload sync
@@ -465,7 +457,7 @@ pub async fn start_recording_with_meeting_name<R: Runtime>(
     }
 
     // Emit success event
-    app.emit(
+    let start_event_result = app.emit(
         "recording-started",
         serde_json::json!({
             "message": "Recording started successfully with parallel processing",
@@ -473,10 +465,17 @@ pub async fn start_recording_with_meeting_name<R: Runtime>(
             "workers": 3
         }),
     )
-    .map_err(|e| e.to_string())?;
+    .map_err(|e| e.to_string());
 
     // Update tray menu to reflect recording state
     crate::tray::update_tray_menu(&app);
+
+    // Keep every resource under shutdown control before returning a start error.
+    start_managed_transcription(app.clone(), transcription_receiver, session.clone());
+    drop(engine_lifecycle_guard);
+    complete_recording_start(start_event_result, || {
+        stop_recording_session(app, Some(session), None)
+    }).await?;
 
     info!("✅ Recording started successfully with async-first approach");
 
@@ -612,20 +611,12 @@ pub async fn start_recording_with_devices_and_meeting<R: Runtime>(
 
     // Spawn background device event processor (mic-disconnect fallback).
     if let Some(receiver) = device_event_receiver {
-        spawn_device_event_processor(app.clone(), receiver, session);
+        spawn_device_event_processor(app.clone(), receiver, session.clone());
     }
 
     // Flip recording live + reset per-session flags (speech-detected latch,
     // mic-recovery budget). Shared with the other start path — see helper.
     finalize_recording_start();
-    drop(engine_lifecycle_guard);
-
-    // Start optimized parallel transcription task and store handle
-    let task_handle = transcription::start_transcription_task(app.clone(), transcription_receiver);
-    {
-        let mut global_task = TRANSCRIPTION_TASK.lock().unwrap();
-        *global_task = Some(task_handle);
-    }
 
     // CRITICAL: Listen for transcript-update events and save to recording manager
     // This enables transcript history persistence for page reload sync
@@ -652,7 +643,7 @@ pub async fn start_recording_with_devices_and_meeting<R: Runtime>(
     }
 
     // Emit success event
-    app.emit(
+    let start_event_result = app.emit(
         "recording-started",
         serde_json::json!({
             "message": "Recording started with custom devices and parallel processing",
@@ -663,14 +654,98 @@ pub async fn start_recording_with_devices_and_meeting<R: Runtime>(
             "workers": 3
         }),
     )
-    .map_err(|e| e.to_string())?;
+    .map_err(|e| e.to_string());
 
     // Update tray menu to reflect recording state
     crate::tray::update_tray_menu(&app);
 
+    // Keep every resource under shutdown control before returning a start error.
+    start_managed_transcription(app.clone(), transcription_receiver, session.clone());
+    drop(engine_lifecycle_guard);
+    complete_recording_start(start_event_result, || {
+        stop_recording_session(app, Some(session), None)
+    }).await?;
+
     info!("✅ Recording started with custom devices using async-first approach");
 
     Ok(())
+}
+
+/// Keep worker failure handling outside the worker: shutdown joins the worker.
+/// Store its handle before starting the failure monitor.
+fn start_managed_transcription<R: Runtime>(
+    app: AppHandle<R>,
+    receiver: tokio::sync::mpsc::UnboundedReceiver<super::AudioChunk>,
+    session: Arc<super::RecordingState>,
+) {
+    let (worker, init_result) = transcription::start_transcription_task(app.clone(), receiver);
+    *TRANSCRIPTION_TASK.lock().unwrap() = Some(worker);
+    tokio::spawn(async move {
+        if let Err(error) = wait_for_transcription_init(init_result).await {
+            if let Err(error) = stop_recording_session(app, Some(session), Some(error)).await {
+                error!("Recording shutdown after a transcription failure failed: {error}");
+            }
+        }
+    });
+}
+
+/// Roll back native capture before returning a failed startup notification.
+async fn complete_recording_start<F, S>(
+    result: Result<(), String>,
+    stop: F,
+) -> Result<(), String>
+where
+    F: FnOnce() -> S,
+    S: std::future::Future<Output = Result<bool, String>>,
+{
+    if let Err(start_error) = result {
+        return match stop().await {
+            Ok(_) => Err(format!("Could not report recording start: {start_error}")),
+            Err(stop_error) => Err(format!(
+                "Could not report recording start: {start_error}. {stop_error}"
+            )),
+        };
+    }
+    Ok(())
+}
+
+/// Claim shutdown and its manager before sending any failure event.
+fn claim_recording_stop<'a>(
+    recording: &AtomicBool,
+    stopping: &'a AtomicBool,
+    manager: &Mutex<Option<RecordingManager>>,
+    expected: Option<&Arc<super::RecordingState>>,
+) -> Option<(StoppingGuard<'a>, Option<RecordingManager>)> {
+    if !recording.load(Ordering::SeqCst) {
+        return None;
+    }
+    let guard = StoppingGuard::try_acquire(stopping)?;
+    let mut manager = manager.lock().unwrap();
+    if !recording.load(Ordering::SeqCst)
+        || !matches_stop_session(manager.as_ref().map(|manager| manager.get_state()), expected)
+    {
+        return None;
+    }
+    Some((guard, manager.take()))
+}
+
+/// Require a success signal. An unexpected worker exit must stop capture too.
+async fn wait_for_transcription_init(
+    result: tokio::sync::oneshot::Receiver<Result<(), String>>,
+) -> Result<(), String> {
+    result.await.unwrap_or_else(|_| {
+        Err("The speech recognition worker exited before initialization finished. Restart Meetily.".to_string())
+    })
+}
+
+/// A delayed worker failure can stop only the recording that owns the worker.
+fn matches_stop_session(
+    current: Option<&Arc<super::RecordingState>>,
+    expected: Option<&Arc<super::RecordingState>>,
+) -> bool {
+    expected.map_or(true, |expected| {
+        current.map_or(false, |current| Arc::ptr_eq(current, expected))
+    })
 }
 
 /// Local engine to release after a recording stops.
@@ -697,29 +772,84 @@ fn model_to_unload(provider: Option<&str>) -> ModelUnload {
     }
 }
 
+/// Return true when queued transcript chunks may not have been processed.
+fn transcription_wait_lost_chunks(
+    result: Result<Result<Result<(), String>, tokio::task::JoinError>, tokio::time::error::Elapsed>,
+) -> bool {
+    match result {
+        Ok(Ok(Ok(()))) => {
+            info!("✅ ALL transcription chunks processed successfully - no data lost");
+            false
+        }
+        Ok(Ok(Err(error))) => {
+            warn!("Transcription finished with missing chunks or a failed worker: {error}");
+            true
+        }
+        Ok(Err(e)) => {
+            // Continue anyway, but queued final chunks may not have been transcribed.
+            warn!("⚠️ Transcription task completed with error: {:?}", e);
+            true
+        }
+        Err(_) => {
+            // Continue shutdown even on timeout - better to lose some chunks than hang forever
+            warn!("⏱️ Transcription timeout (10 minutes) reached, continuing shutdown to prevent indefinite hang");
+            true
+        }
+    }
+}
+
+/// Report audio failures as save errors and final transcript failures as
+/// warnings. The manager has already logged both.
+fn recording_stop_errors(outcome: RecordingStopOutcome) -> (Option<String>, bool) {
+    let shutdown_error = outcome.audio_error.map(|error| {
+        format!("Recording shutdown failed: {error:#}. Audio may be incomplete.")
+    });
+    (shutdown_error, outcome.transcript_error.is_some())
+}
+
 /// Stop and save one recording. Return false for an inactive recording or a
 /// duplicate stop. Only the owning call may trigger frontend post-processing.
 pub async fn stop_recording<R: Runtime>(
     app: AppHandle<R>,
     _args: RecordingArgs,
 ) -> Result<bool, String> {
+    stop_recording_session(app, None, None).await
+}
+
+async fn stop_recording_session<R: Runtime>(
+    app: AppHandle<R>,
+    expected_session: Option<Arc<super::RecordingState>>,
+    fatal_error: Option<String>,
+) -> Result<bool, String> {
     info!(
         "🛑 Starting optimized recording shutdown - ensuring ALL transcript chunks are preserved"
     );
 
-    // Check if recording is active
-    if !IS_RECORDING.load(Ordering::SeqCst) {
-        info!("Recording was not active");
-        return Ok(false);
-    }
+    // Wait for start to store the manager, worker, and listener together.
+    let engine_lifecycle_guard = super::common::acquire_engine_lifecycle_lock().await;
 
-    // Claim the stop before taking the manager or emitting lifecycle events.
-    let Some(_stopping_guard) = StoppingGuard::try_acquire(&IS_RECORDING_STOPPING) else {
+    let Some((_stopping_guard, manager_for_cleanup)) = claim_recording_stop(
+        &IS_RECORDING,
+        &IS_RECORDING_STOPPING,
+        &RECORDING_MANAGER,
+        expected_session.as_ref(),
+    ) else {
         return Ok(false);
     };
-    if !IS_RECORDING.load(Ordering::SeqCst) {
-        return Ok(false);
+
+    // Only the owner may report this fatal error. A delayed failure must not
+    // open the model selector after its recording stopped or a new one started.
+    if let Some(error) = fatal_error {
+        let _ = app.emit("transcription-error", serde_json::json!({
+            "error": error,
+            "userMessage": "Speech recognition failed. Recording is stopping. Check your model settings.",
+            "actionable": true,
+            "phase": "active"
+        }));
     }
+    // Model unload below can acquire this lock. Release it before waiting for
+    // worker completion or doing any engine cleanup.
+    drop(engine_lifecycle_guard);
 
     // Emit shutdown progress to frontend
     let _ = app.emit(
@@ -732,11 +862,6 @@ pub async fn stop_recording<R: Runtime>(
     );
 
     // Step 1: Stop audio capture immediately (no more new chunks) with proper error handling
-    let manager_for_cleanup = {
-        let mut global_manager = RECORDING_MANAGER.lock().unwrap();
-        global_manager.take()
-    };
-
     let stop_result = if let Some(mut manager) = manager_for_cleanup {
         // Use FORCE FLUSH to immediately process all accumulated audio - eliminates 30s delay!
         info!("🚀 Using FORCE FLUSH to eliminate pipeline accumulation delays");
@@ -746,20 +871,12 @@ pub async fn stop_recording<R: Runtime>(
         (result, manager_for_cleanup)
     } else {
         warn!("No recording manager found to stop");
-        (Ok(()), None)
+        (RecordingStopOutcome::default(), None)
     };
 
     let (stop_result, manager_for_cleanup) = stop_result;
 
-    match stop_result {
-        Ok(_) => {
-            info!("✅ Audio streams stopped successfully - no more chunks will be created");
-        }
-        Err(e) => {
-            error!("❌ Failed to stop audio streams: {}", e);
-            return Err(format!("Failed to stop audio streams: {}", e)); // _stopping_guard clears on return
-        }
-    }
+    let (shutdown_error, mut transcript_incomplete) = recording_stop_errors(stop_result);
 
     // Step 1.5: Clean up transcript listener to release microphone
     // Unlisten transcript-update event to prevent lingering references
@@ -814,23 +931,13 @@ pub async fn stop_recording<R: Runtime>(
         });
 
         // Wait up to 10 minutes for transcription completion to prevent indefinite hangs
-        match tokio::time::timeout(
+        let wait_result = tokio::time::timeout(
             tokio::time::Duration::from_secs(600), // 10 minutes max
             task_handle,
         )
-        .await
-        {
-            Ok(Ok(())) => {
-                info!("✅ ALL transcription chunks processed successfully - no data lost");
-            }
-            Ok(Err(e)) => {
-                warn!("⚠️ Transcription task completed with error: {:?}", e);
-                // Continue anyway - the worker may have processed most chunks
-            }
-            Err(_) => {
-                warn!("⏱️ Transcription timeout (10 minutes) reached, continuing shutdown to prevent indefinite hang");
-                // Continue shutdown even on timeout - better to lose some chunks than hang forever
-            }
+        .await;
+        if transcription_wait_lost_chunks(wait_result) {
+            transcript_incomplete = true;
         }
 
         // Stop progress monitoring
@@ -876,7 +983,7 @@ pub async fn stop_recording<R: Runtime>(
             let engine_clone = {
                 let engine_guard = crate::parakeet_engine::commands::PARAKEET_ENGINE
                     .lock()
-                    .unwrap();
+                    .unwrap_or_else(|error| error.into_inner());
                 engine_guard.as_ref().cloned()
             };
 
@@ -927,7 +1034,7 @@ pub async fn stop_recording<R: Runtime>(
             let engine_clone = {
                 let engine_guard = crate::whisper_engine::commands::WHISPER_ENGINE
                     .lock()
-                    .unwrap();
+                    .unwrap_or_else(|error| error.into_inner());
                 engine_guard.as_ref().cloned()
             };
 
@@ -1100,6 +1207,11 @@ pub async fn stop_recording<R: Runtime>(
         (None, None, Some("Recording save failed: recording manager is missing".to_string()))
     };
 
+    let save_error = match (shutdown_error, save_error) {
+        (Some(shutdown), Some(save)) => Some(format!("{shutdown} {save}")),
+        (shutdown, save) => shutdown.or(save),
+    };
+
     // Set recording flag to false
     info!("🔍 Setting IS_RECORDING to false");
     IS_RECORDING.store(false, Ordering::SeqCst);
@@ -1120,12 +1232,22 @@ pub async fn stop_recording<R: Runtime>(
     // Database save removed - frontend will handle this after receiving all transcripts
     info!("ℹ️ Skipping database save in Rust - frontend will save after all transcripts received");
 
+    let transcript_warning = transcript_incomplete.then(|| {
+        let location = meeting_folder.as_ref()
+            .map(|folder| format!(" Recording folder: {}.", folder.display()))
+            .unwrap_or_default();
+        format!(
+            "The final transcript may be incomplete. If saved audio is available, use Enhance in the meeting to transcribe it again.{location}"
+        )
+    });
+
     // Step 5: Complete shutdown
     let _ = app.emit(
         "recording-shutdown-progress",
         serde_json::json!({
-            "stage": if save_error.is_some() { "error" } else { "complete" },
-            "message": save_error.as_deref().unwrap_or("Recording stopped successfully"),
+            "stage": if save_error.is_some() { "error" } else if transcript_warning.is_some() { "warning" } else { "complete" },
+            "message": save_error.as_deref().or(transcript_warning.as_deref())
+                .unwrap_or("Recording stopped successfully"),
             "progress": 100
         }),
     );
@@ -1134,10 +1256,12 @@ pub async fn stop_recording<R: Runtime>(
     app.emit(
         "recording-stopped",
         serde_json::json!({
-            "message": "Recording stopped - frontend will save after all transcripts received",
+            "message": save_error.as_deref().or(transcript_warning.as_deref())
+                .unwrap_or("Recording stopped"),
             "folder_path": folder_path_str,
             "meeting_name": meeting_name_str,
-            "save_error": save_error
+            "save_error": save_error,
+            "transcript_warning": transcript_warning
         }),
     )
     .map_err(|e| e.to_string())?;
@@ -1149,7 +1273,15 @@ pub async fn stop_recording<R: Runtime>(
         error!("{error}");
         return Err(error);
     }
-    info!("Recording stopped and saved successfully");
+    if expected_session.is_some() {
+        // Fatal worker stops use the global handler without claiming transcription success.
+        app.emit("recording-stop-complete", false).map_err(|error| error.to_string())?;
+    }
+    if transcript_warning.is_some() {
+        warn!("Recording stopped and saved; the final transcript may be incomplete");
+    } else {
+        info!("Recording stopped and saved successfully");
+    }
     Ok(true)
 }
 
@@ -1779,11 +1911,120 @@ mod unload_tests {
 
 #[cfg(test)]
 mod stopping_tests {
-    use super::StoppingGuard;
+    use super::{
+        claim_recording_stop, complete_recording_start, matches_stop_session,
+        wait_for_transcription_init, RecordingManager, StoppingGuard,
+    };
     use std::sync::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
-        Barrier,
+        Barrier, Mutex,
     };
+
+    #[tokio::test]
+    async fn successful_start_notification_keeps_capture_running() {
+        assert!(complete_recording_start(Ok(()), || async {
+            panic!("A successful start must not stop capture");
+        }).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn failed_start_notification_waits_for_capture_to_stop() {
+        let recording = AtomicBool::new(true);
+        let error = complete_recording_start(Err("Event send failed".to_string()), || async {
+            tokio::task::yield_now().await;
+            recording.store(false, Ordering::SeqCst);
+            Ok(true)
+        }).await.unwrap_err();
+        assert!(!recording.load(Ordering::SeqCst));
+        assert!(error.contains("Event send failed"));
+    }
+
+    #[tokio::test]
+    async fn failed_start_keeps_both_notification_and_save_errors() {
+        let error = complete_recording_start(Err("Event send failed".to_string()), || async {
+            Err("Recording save failed".to_string())
+        }).await.unwrap_err();
+        assert!(error.contains("Event send failed"));
+        assert!(error.contains("Recording save failed"));
+    }
+
+    #[test]
+    fn stopped_worker_cannot_claim_shutdown_or_report_a_fatal_error() {
+        let recording = AtomicBool::new(false);
+        let stopping = AtomicBool::new(false);
+        let manager = Mutex::new(None);
+        let session = crate::audio::RecordingState::new();
+        assert!(claim_recording_stop(&recording, &stopping, &manager, Some(&session)).is_none());
+        assert!(!stopping.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn stale_worker_cannot_take_a_later_session_or_report_a_fatal_error() {
+        let recording = AtomicBool::new(true);
+        let stopping = AtomicBool::new(false);
+        let manager = Mutex::new(Some(RecordingManager::new()));
+        let current = manager.lock().unwrap().as_ref().unwrap().get_state().clone();
+        let old = crate::audio::RecordingState::new();
+        assert!(claim_recording_stop(&recording, &stopping, &manager, Some(&old)).is_none());
+        assert!(matches_stop_session(
+            manager.lock().unwrap().as_ref().map(|manager| manager.get_state()),
+            Some(&current),
+        ));
+        assert!(!stopping.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn current_worker_claims_its_manager_once_before_reporting_an_error() {
+        let recording = AtomicBool::new(true);
+        let stopping = AtomicBool::new(false);
+        let manager = Mutex::new(Some(RecordingManager::new()));
+        let current = manager.lock().unwrap().as_ref().unwrap().get_state().clone();
+        let owner = claim_recording_stop(&recording, &stopping, &manager, Some(&current));
+        assert!(owner.as_ref().unwrap().1.is_some());
+        assert!(manager.lock().unwrap().is_none());
+        assert!(claim_recording_stop(&recording, &stopping, &manager, Some(&current)).is_none());
+        drop(owner);
+        assert!(!stopping.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn successful_worker_init_does_not_request_shutdown() {
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        sender.send(Ok(())).unwrap();
+        assert_eq!(wait_for_transcription_init(receiver).await, Ok(()));
+    }
+
+    #[tokio::test]
+    async fn failed_worker_init_preserves_the_error_for_shutdown() {
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        sender.send(Err("Model load failed".to_string())).unwrap();
+        assert_eq!(
+            wait_for_transcription_init(receiver).await,
+            Err("Model load failed".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn panicked_worker_init_requests_shutdown() {
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        let worker = tokio::spawn(async move {
+            let _sender = sender;
+            panic!("Model initialization panicked");
+        });
+        let error = wait_for_transcription_init(receiver).await.unwrap_err();
+        assert!(error.contains("exited before initialization finished"));
+        assert!(worker.await.unwrap_err().is_panic());
+    }
+
+    #[test]
+    fn failed_worker_can_stop_only_its_own_session() {
+        let failed_session = crate::audio::RecordingState::new();
+        let later_session = crate::audio::RecordingState::new();
+        assert!(matches_stop_session(Some(&failed_session), Some(&failed_session)));
+        assert!(!matches_stop_session(Some(&later_session), Some(&failed_session)));
+        assert!(!matches_stop_session(None, Some(&failed_session)));
+        assert!(matches_stop_session(Some(&later_session), None));
+    }
 
     #[test]
     fn concurrent_stops_have_only_one_owner() {
@@ -1818,5 +2059,63 @@ mod stopping_tests {
         });
         assert!(result.is_err());
         assert!(StoppingGuard::try_acquire(&flag).is_some());
+    }
+}
+
+#[cfg(test)]
+mod stop_outcome_tests {
+    use super::{recording_stop_errors, transcription_wait_lost_chunks, RecordingStopOutcome};
+
+    #[tokio::test]
+    async fn failed_or_timed_out_transcription_worker_marks_transcript_incomplete() {
+        let finished = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            tokio::spawn(async { Ok(()) }),
+        )
+        .await;
+        assert!(!transcription_wait_lost_chunks(finished));
+
+        let panicked = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            tokio::spawn(async { panic!("Injected worker panic") }),
+        )
+        .await;
+        assert!(transcription_wait_lost_chunks(panicked));
+
+        let timed_out = tokio::time::timeout(
+            std::time::Duration::from_millis(1),
+            tokio::spawn(std::future::pending::<Result<(), String>>()),
+        )
+        .await;
+        assert!(transcription_wait_lost_chunks(timed_out));
+    }
+
+    #[tokio::test]
+    async fn reported_inner_worker_failure_marks_transcript_incomplete() {
+        let failed = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            tokio::spawn(async { Err("Inner worker failed".to_string()) }),
+        ).await;
+        assert!(transcription_wait_lost_chunks(failed));
+    }
+
+    #[test]
+    fn final_transcript_failure_does_not_become_an_audio_save_failure() {
+        let (shutdown_error, transcript_incomplete) = recording_stop_errors(RecordingStopOutcome {
+            audio_error: None,
+            transcript_error: Some(anyhow::anyhow!("Final VAD flush failed")),
+        });
+        assert!(shutdown_error.is_none());
+        assert!(transcript_incomplete);
+    }
+
+    #[test]
+    fn audio_and_transcript_failures_are_both_preserved() {
+        let (shutdown_error, transcript_incomplete) = recording_stop_errors(RecordingStopOutcome {
+            audio_error: Some(anyhow::anyhow!("Capture could not stop")),
+            transcript_error: Some(anyhow::anyhow!("Final send failed")),
+        });
+        assert!(shutdown_error.unwrap().contains("Capture could not stop"));
+        assert!(transcript_incomplete);
     }
 }

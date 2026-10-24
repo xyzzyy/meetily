@@ -1,6 +1,6 @@
 use super::batch_processor::AudioMetricsBatcher;
 use crate::batch_audio_metric;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use log::{debug, error, info, warn};
 use rubato::{SincFixedIn, SincInterpolationParameters, SincInterpolationType, WindowFunction};
 use std::collections::VecDeque;
@@ -15,7 +15,7 @@ use super::capture_resampler::CaptureResampler;
 use super::devices::AudioDevice;
 use super::diarization_stems::StemWindow;
 use super::recording_state::{AudioChunk, AudioError, DeviceType, RecordingState, SourceActivity};
-use super::vad::ContinuousVadProcessor;
+use super::vad::{ContinuousVadProcessor, SpeechSegment};
 
 /// How long a silence must last before the VAD closes a speech segment, and
 /// therefore how long the audio clips handed to the ASR engine are.
@@ -29,6 +29,30 @@ use super::vad::ContinuousVadProcessor;
 /// accumulated-speech-buffer warning threshold. Bounded live segmentation
 /// during continuous speech is tracked separately in #756.
 const VAD_REDEMPTION_TIME_MS: u32 = 500;
+
+/// Send final speech segments and preserve flush or delivery errors.
+fn forward_final_segments(
+    final_segments: Result<Vec<SpeechSegment>>,
+    mut send: impl FnMut(SpeechSegment) -> Result<()>,
+) -> Result<()> {
+    for segment in final_segments.context("Failed to flush final VAD audio")? {
+        // Use the same 50 ms minimum as the live pipeline.
+        if segment.samples.len() >= 800 {
+            info!(
+                "Sending final VAD segment: {:.1} ms, {} samples",
+                segment.end_timestamp_ms - segment.start_timestamp_ms,
+                segment.samples.len()
+            );
+            send(segment).context("Failed to send final VAD segment")?;
+        } else {
+            debug!(
+                "Skipping short final VAD segment: {} samples < 800",
+                segment.samples.len()
+            );
+        }
+    }
+    Ok(())
+}
 
 /// Ring buffer for synchronized audio mixing
 /// Accumulates samples from mic and system streams until we have aligned windows
@@ -853,13 +877,21 @@ impl AudioPipeline {
     }
 
     /// Run the VAD-driven audio processing pipeline
-    pub async fn run(mut self) -> Result<()> {
+    pub async fn run(self) -> Result<()> {
+        self.run_with_flush(Self::flush_remaining_audio).await
+    }
+
+    /// Flush only after all queued audio has been processed.
+    async fn run_with_flush(
+        mut self,
+        mut flush: impl FnMut(&mut Self) -> Result<()> + Send,
+    ) -> Result<()> {
         info!("VAD-driven audio pipeline started - segments sent in real-time based on speech detection");
 
         // CRITICAL FIX: Continue processing until channel is closed, not based on recording state
         // This ensures ALL chunks are processed during shutdown, fixing premature meeting completion
         // Previous bug: Loop checked `while self.state.is_recording()` which caused early exit when
-        // stop_recording() was called, losing flush signals and remaining chunks in the pipeline
+        // stop_recording() was called, losing remaining chunks in the pipeline
         loop {
             // Receive audio chunks with timeout
             match tokio::time::timeout(
@@ -931,8 +963,8 @@ impl AudioPipeline {
             }
         }
 
-        // Flush any remaining VAD segments
-        self.flush_remaining_audio()?;
+        // Flush the final mixer window and return any final transcript error.
+        flush(&mut self)?;
 
         info!("VAD-driven audio pipeline ended");
         Ok(())
@@ -1026,53 +1058,26 @@ impl AudioPipeline {
             self.process_window(mic_window, sys_window, self.source_timeline_seconds);
         }
 
-        // Flush any remaining audio from VAD processor and send segments to transcription
-        match self.vad_processor.flush() {
-            Ok(final_segments) => {
-                for segment in final_segments {
-                    let duration_ms = segment.end_timestamp_ms - segment.start_timestamp_ms;
-
-                    // Send segments >= 50ms (800 samples at 16kHz) - matches main pipeline filter
-                    if segment.samples.len() >= 800 {
-                        info!(
-                            "📤 Sending final VAD segment to Whisper: {:.1}ms duration, {} samples",
-                            duration_ms,
-                            segment.samples.len()
-                        );
-
-                        let transcription_chunk = AudioChunk {
-                            data: segment.samples,
-                            sample_rate: 16000,
-                            timestamp: segment.start_timestamp_ms / 1000.0,
-                            end_timestamp: Some(segment.end_timestamp_ms / 1000.0),
-                            chunk_id: self.chunk_id_counter,
-                            device_type: DeviceType::Microphone,
-                            source_activity: Some(self.source_activity_for_interval(
-                                segment.start_timestamp_ms / 1000.0,
-                                segment.end_timestamp_ms / 1000.0,
-                            )),
-                        };
-
-                        if let Err(e) = self.transcription_sender.send(transcription_chunk) {
-                            warn!("Failed to send final VAD segment: {}", e);
-                        } else {
-                            self.chunk_id_counter += 1;
-                        }
-                    } else {
-                        info!(
-                            "⏭️ Skipping short final segment: {:.1}ms ({} samples < 800)",
-                            duration_ms,
-                            segment.samples.len()
-                        );
-                    }
-                }
-            }
-            Err(e) => {
-                warn!("Failed to flush VAD processor: {}", e);
-            }
-        }
-
-        Ok(())
+        let final_segments = self.vad_processor.flush();
+        forward_final_segments(final_segments, |segment| {
+            let transcription_chunk = AudioChunk {
+                data: segment.samples,
+                sample_rate: 16000,
+                timestamp: segment.start_timestamp_ms / 1000.0,
+                end_timestamp: Some(segment.end_timestamp_ms / 1000.0),
+                chunk_id: self.chunk_id_counter,
+                device_type: DeviceType::Microphone,
+                source_activity: Some(self.source_activity_for_interval(
+                    segment.start_timestamp_ms / 1000.0,
+                    segment.end_timestamp_ms / 1000.0,
+                )),
+            };
+            self.transcription_sender
+                .send(transcription_chunk)
+                .map_err(|error| anyhow::anyhow!("{error}"))?;
+            self.chunk_id_counter += 1;
+            Ok(())
+        })
     }
 
     fn record_source_activity(&mut self, microphone: &[f32], system: &[f32]) {
@@ -1115,6 +1120,17 @@ impl AudioPipeline {
     }
 }
 
+/// Separate an early pipeline exit from a failed final transcript flush.
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum PipelineStopError {
+    /// The pipeline also feeds the recording, so saved audio may be incomplete.
+    #[error("{0:#}")]
+    Pipeline(anyhow::Error),
+    /// Only the final transcript segments may be missing.
+    #[error("{0:#}")]
+    FinalTranscript(anyhow::Error),
+}
+
 /// Simple audio pipeline manager
 pub struct AudioPipelineManager {
     pipeline_handle: Option<JoinHandle<Result<()>>>,
@@ -1126,6 +1142,15 @@ impl AudioPipelineManager {
     pub fn new() -> Self {
         Self {
             pipeline_handle: None,
+            audio_sender: None,
+            state: None,
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn with_task_for_test(handle: JoinHandle<Result<()>>) -> Self {
+        Self {
+            pipeline_handle: Some(handle),
             audio_sender: None,
             state: None,
         }
@@ -1192,7 +1217,7 @@ impl AudioPipelineManager {
     ///
     /// Stop the capture streams first. Their final audio goes through the state's sender,
     /// and this call closes it. A capture that is still stopping cannot hold the pipeline open.
-    pub async fn stop(&mut self) -> Result<()> {
+    pub(crate) async fn stop(&mut self) -> std::result::Result<(), PipelineStopError> {
         // Drop the senders to close the pipeline
         self.audio_sender = None;
         if let Some(state) = self.state.take() {
@@ -1202,11 +1227,10 @@ impl AudioPipelineManager {
         // Wait for pipeline to finish
         if let Some(handle) = self.pipeline_handle.take() {
             match handle.await {
-                Ok(result) => result,
-                Err(e) => {
-                    error!("Pipeline task failed: {}", e);
-                    Ok(())
-                }
+                Ok(result) => result.map_err(PipelineStopError::FinalTranscript),
+                Err(e) => Err(PipelineStopError::Pipeline(anyhow::anyhow!(
+                    "Audio pipeline task failed: {e}"
+                ))),
             }
         } else {
             Ok(())
@@ -1222,6 +1246,137 @@ impl Default for AudioPipelineManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn final_segment(samples: usize) -> SpeechSegment {
+        SpeechSegment {
+            samples: vec![0.1; samples],
+            start_timestamp_ms: 0.0,
+            end_timestamp_ms: samples as f64 / 16.0,
+            confidence: 1.0,
+        }
+    }
+
+    #[tokio::test]
+    async fn final_flush_failure_preserves_queued_audio_and_the_partial_window() {
+        use super::super::device_detection::InputDeviceKind;
+        let (audio_sender, audio_receiver) = mpsc::unbounded_channel();
+        let (transcription_sender, _transcription_receiver) = mpsc::unbounded_channel();
+        let (recording_sender, mut recording_receiver) = mpsc::unbounded_channel();
+        let mut pipeline = AudioPipeline::new(
+            audio_receiver,
+            transcription_sender,
+            RecordingState::new(),
+            1000,
+            16000,
+            "Test microphone".to_string(),
+            InputDeviceKind::Wired,
+            "No System Audio".to_string(),
+            InputDeviceKind::Wired,
+        )
+        .unwrap();
+        pipeline.recording_sender_for_mixed = Some(recording_sender);
+        let chunk = |chunk_id, data| AudioChunk {
+            data,
+            chunk_id,
+            sample_rate: 16000,
+            timestamp: 0.0,
+            end_timestamp: None,
+            device_type: DeviceType::Microphone,
+            source_activity: None,
+        };
+        // Keep both a complete mixer window and a partial window before final flush.
+        audio_sender.send(chunk(0, vec![0.05; 9600])).unwrap();
+        audio_sender.send(chunk(1, vec![0.05; 127])).unwrap();
+        drop(audio_sender);
+        let mut flush_calls = 0;
+        let error = pipeline
+            .run_with_flush(|pipeline| {
+                flush_calls += 1;
+                pipeline.flush_remaining_audio()?;
+                Err(anyhow::anyhow!("Injected final flush failure"))
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(error.to_string(), "Injected final flush failure");
+        assert_eq!(flush_calls, 1);
+        assert_eq!(recording_receiver.recv().await.unwrap().data.len(), 9600);
+        assert_eq!(recording_receiver.recv().await.unwrap().data.len(), 127);
+        assert!(recording_receiver.recv().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn final_flush_error_reaches_stop() {
+        let mut manager = AudioPipelineManager::new();
+        manager.pipeline_handle = Some(tokio::spawn(async {
+            forward_final_segments(Err(anyhow::anyhow!("Injected VAD failure")), |_| {
+                panic!("A failed flush must not send segments")
+            })
+        }));
+        let error = manager.stop().await.unwrap_err();
+        assert!(matches!(error, PipelineStopError::FinalTranscript(_)));
+        let message = error.to_string();
+        assert!(message.contains("Failed to flush final VAD audio"));
+        assert!(message.contains("Injected VAD failure"));
+        assert!(manager.pipeline_handle.is_none());
+    }
+
+    #[tokio::test]
+    async fn closed_final_transcript_receiver_reaches_stop() {
+        let mut manager = AudioPipelineManager::new();
+        let (sender, receiver) = mpsc::unbounded_channel::<SpeechSegment>();
+        drop(receiver);
+        manager.pipeline_handle = Some(tokio::spawn(async move {
+            forward_final_segments(Ok(vec![final_segment(800)]), |segment| {
+                sender
+                    .send(segment)
+                    .map_err(|error| anyhow::anyhow!("{error}"))
+            })
+        }));
+        let error = manager.stop().await.unwrap_err();
+        assert!(matches!(error, PipelineStopError::FinalTranscript(_)));
+        assert!(error.to_string().contains("Failed to send final VAD segment"));
+        assert!(manager.pipeline_handle.is_none());
+    }
+
+    #[tokio::test]
+    async fn final_segments_keep_the_minimum_length_filter() {
+        let (sender, mut receiver) = mpsc::unbounded_channel();
+        forward_final_segments(
+            Ok(vec![final_segment(799), final_segment(800)]),
+            |segment| {
+                sender
+                    .send(segment)
+                    .map_err(|error| anyhow::anyhow!("{error}"))
+            },
+        )
+        .unwrap();
+        assert_eq!(receiver.try_recv().unwrap().samples.len(), 800);
+        assert!(receiver.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn pipeline_task_failure_is_an_audio_failure() {
+        let mut manager = AudioPipelineManager::new();
+        manager.pipeline_handle = Some(tokio::spawn(async {
+            panic!("Injected pipeline panic");
+        }));
+        let error = manager.stop().await.unwrap_err();
+        assert!(matches!(error, PipelineStopError::Pipeline(_)));
+        assert!(error.to_string().contains("Audio pipeline task failed"));
+        assert!(manager.pipeline_handle.is_none());
+    }
+
+    #[tokio::test]
+    async fn stop_joins_a_finished_pipeline_after_its_receiver_closes() {
+        let mut manager = AudioPipelineManager::new();
+        let (sender, receiver) = mpsc::unbounded_channel();
+        drop(receiver);
+        manager.audio_sender = Some(sender);
+        manager.pipeline_handle = Some(tokio::spawn(async { Ok(()) }));
+        manager.stop().await.unwrap();
+        assert!(manager.pipeline_handle.is_none());
+        assert!(manager.audio_sender.is_none());
+    }
 
     #[test]
     fn test_live_vad_redemption_matches_pro_policy() {

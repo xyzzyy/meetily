@@ -17,7 +17,7 @@ function loadStopAction(result) {
   }
   visit(file);
   assert.ok(initializer);
-  const calls = { stopped: [], success: 0, processing: [], stopping: [], paths: [] };
+  const calls = { stopped: [], success: 0, processing: [], stopping: [], paths: [], requestsFinished: 0 };
   const compiled = ts.transpileModule(`const stop = ${initializer}; stop;`, {
     compilerOptions: { module: ts.ModuleKind.CommonJS },
   }).outputText;
@@ -29,6 +29,7 @@ function loadStopAction(result) {
     setIsStopping: value => calls.stopping.push(value),
     setRecordingPath: value => calls.paths.push(value),
     onRecordingStop: value => calls.stopped.push(value),
+    onStopRequestFinished: () => calls.requestsFinished++,
     Analytics: { trackTranscriptionSuccess: () => calls.success++ },
     console: { log() {}, error() {} },
   });
@@ -43,13 +44,15 @@ test('a duplicate stop does not start post-processing or report success', async 
   assert.deepEqual(calls.paths, []);
   assert.equal(calls.processing.at(-1), false);
   assert.equal(calls.stopping.at(-1), false);
+  assert.equal(calls.requestsFinished, 1);
 });
 
-test('the owning stop starts post-processing once', async () => {
+test('the owning stop starts post-processing without claiming transcription success', async () => {
   const { action, calls } = loadStopAction(true);
   await action();
   assert.deepEqual(calls.stopped, [true]);
-  assert.equal(calls.success, 1);
+  assert.equal(calls.success, 0);
+  assert.equal(calls.requestsFinished, 1);
 });
 
 test('a failed stop cannot report success', async () => {
@@ -57,4 +60,69 @@ test('a failed stop cannot report success', async () => {
   await action();
   assert.deepEqual(calls.stopped, [false]);
   assert.equal(calls.success, 0);
+  assert.equal(calls.requestsFinished, 1);
+});
+
+test('an inactive stop releases its request without starting post-processing', async () => {
+  const { action, calls } = loadStopAction(new Error('No recording in progress'));
+  await action();
+  assert.deepEqual(calls.stopped, []);
+  assert.equal(calls.requestsFinished, 1);
+});
+
+/** Run the component's actual event effect with controllable Tauri events. */
+async function loadRecordingListeners() {
+  const source = fs.readFileSync(new URL('../../src/components/RecordingControls.tsx', import.meta.url), 'utf8');
+  const file = ts.createSourceFile('RecordingControls.tsx', source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  let effect;
+  function visit(node) {
+    if (ts.isCallExpression(node) && node.expression.getText(file) === 'useEffect'
+      && node.arguments[0].getText(file).includes('Setting up recording event listeners')) {
+      effect = node.getText(file);
+    }
+    ts.forEachChild(node, visit);
+  }
+  visit(file);
+  assert.ok(effect);
+  const listeners = new Map();
+  const calls = { stopped: [], errors: [] };
+  const compiled = ts.transpileModule(effect, {
+    compilerOptions: { module: ts.ModuleKind.CommonJS },
+  }).outputText;
+  let cleanup;
+  vm.runInNewContext(compiled, {
+    useEffect: fn => { cleanup = fn(); },
+    listen: async (event, listener) => {
+      listeners.set(event, listener);
+      return () => listeners.delete(event);
+    },
+    setTranscriptionErrors() {}, setIsProcessing() {}, setSpeechDetected() {},
+    onRecordingStop: value => calls.stopped.push(value),
+    onTranscriptionError() {},
+    Analytics: { trackTranscriptionError: message => calls.errors.push(message) },
+    console: { log() {}, error() {} },
+  });
+  await new Promise(setImmediate);
+  return { listeners, calls, cleanup };
+}
+
+test('a fatal worker error waits for native stop completion before post-processing', async t => {
+  const { listeners, calls, cleanup } = await loadRecordingListeners();
+  t.after(cleanup);
+  listeners.get('transcription-error')({ payload: {
+    phase: 'active', actionable: true, error: 'Engine initialization failed',
+    userMessage: 'Speech recognition failed. Recording is stopping.',
+  } });
+  assert.deepEqual(calls.stopped, []);
+  assert.deepEqual(calls.errors, ['Speech recognition failed. Recording is stopping.']);
+});
+
+test('a nonfatal chunk error does not end the recording in the interface', async t => {
+  const { listeners, calls, cleanup } = await loadRecordingListeners();
+  t.after(cleanup);
+  listeners.get('transcription-error')({ payload: {
+    phase: 'active', actionable: false, error: 'One chunk failed', userMessage: 'One chunk failed',
+  } });
+  assert.deepEqual(calls.stopped, []);
+  assert.deepEqual(calls.errors, ['One chunk failed']);
 });
