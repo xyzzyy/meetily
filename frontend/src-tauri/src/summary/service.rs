@@ -398,7 +398,7 @@ impl SummaryService {
             if provider == LLMProvider::CustomOpenAI {
                 match SettingsRepository::get_custom_openai_config(&pool).await {
                     Ok(Some(config)) => {
-                        info!("✓ Using custom OpenAI endpoint: {}", config.endpoint);
+                        info!("✓ Using the custom OpenAI endpoint");
                         (
                             Some(config.endpoint),
                             config.api_key,

@@ -39,6 +39,11 @@ pub fn encode_single_audio(
     let mut command = Command::new(ffmpeg_path);
     command
         .args([
+            // All of stdin is written before stderr is read. Suppress normal
+            // progress output that could fill the pipe and stall encoding.
+            "-loglevel",
+            "error",
+            "-nostats",
             "-f",
             "f32le",
             "-ar",

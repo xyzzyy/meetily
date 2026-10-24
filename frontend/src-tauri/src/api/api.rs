@@ -523,11 +523,11 @@ pub async fn api_get_model_config<R: Runtime>(
     match SettingsRepository::get_model_config(pool).await {
         Ok(Some(config)) => {
             log_info!(
-                "✅ Found model config in database: provider={}, model={}, whisperModel={}, ollamaEndpoint={:?}",
+                "✅ Found model config in database: provider={}, model={}, whisperModel={}, custom Ollama endpoint={}",
                 &config.provider,
                 &config.model,
                 &config.whisper_model,
-                &config.ollama_endpoint
+                config.ollama_endpoint.is_some()
             );
             match SettingsRepository::get_api_key(pool, &config.provider).await {
                 Ok(api_key) => {
@@ -573,11 +573,11 @@ pub async fn api_save_model_config<R: Runtime>(
     _auth_token: Option<String>,
 ) -> Result<serde_json::Value, String> {
     log_info!(
-        "💾 api_save_model_config called (native): provider='{}', model='{}', whisperModel='{}', ollamaEndpoint={:?}",
+        "💾 api_save_model_config called (native): provider='{}', model='{}', whisperModel='{}', custom Ollama endpoint={}",
         &provider,
         &model,
         &whisper_model,
-        &ollama_endpoint
+        ollama_endpoint.is_some()
     );
     let pool = state.db_manager.pool();
 
@@ -1366,11 +1366,8 @@ pub async fn api_save_custom_openai_config<R: Runtime>(
     temperature: Option<f32>,
     top_p: Option<f32>,
 ) -> Result<serde_json::Value, String> {
-    log_info!(
-        "api_save_custom_openai_config called: endpoint='{}', model='{}'",
-        &endpoint,
-        &model
-    );
+    // Endpoints are not logged: a URL can carry a user name, password or token.
+    log_info!("api_save_custom_openai_config called: model='{}'", &model);
 
     // Validate required fields
     if endpoint.trim().is_empty() {
@@ -1415,10 +1412,7 @@ pub async fn api_save_custom_openai_config<R: Runtime>(
 
     match SettingsRepository::save_custom_openai_config(pool, &config).await {
         Ok(()) => {
-            log_info!(
-                "✅ Successfully saved custom OpenAI config for endpoint: {}",
-                config.endpoint
-            );
+            log_info!("✅ Successfully saved custom OpenAI config");
             Ok(serde_json::json!({
                 "status": "success",
                 "message": "Custom OpenAI configuration saved successfully"
@@ -1444,11 +1438,7 @@ pub async fn api_get_custom_openai_config<R: Runtime>(
     match SettingsRepository::get_custom_openai_config(pool).await {
         Ok(config) => {
             if let Some(ref c) = config {
-                log_info!(
-                    "✅ Found custom OpenAI config: endpoint='{}', model='{}'",
-                    c.endpoint,
-                    c.model
-                );
+                log_info!("✅ Found custom OpenAI config: model='{}'", c.model);
             } else {
                 log_info!("No custom OpenAI config found");
             }
@@ -1470,11 +1460,7 @@ pub async fn api_test_custom_openai_connection<R: Runtime>(
     api_key: Option<String>,
     model: String,
 ) -> Result<serde_json::Value, String> {
-    log_info!(
-        "api_test_custom_openai_connection called: endpoint='{}', model='{}'",
-        &endpoint,
-        &model
-    );
+    log_info!("api_test_custom_openai_connection called: model='{}'", &model);
 
     // Validate endpoint URL format
     if !endpoint.starts_with("http://") && !endpoint.starts_with("https://") {
