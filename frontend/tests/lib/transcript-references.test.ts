@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { Schema } from "prosemirror-model";
-import { EditorState } from "prosemirror-state";
+import { Schema } from "@tiptap/pm/model";
+import { EditorState } from "@tiptap/pm/state";
 import {
   TIMESTAMP_REF_REGEX,
   parseTimestampRange,
