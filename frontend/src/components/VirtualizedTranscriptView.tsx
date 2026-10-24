@@ -11,6 +11,7 @@ import { RecordingStatusBar } from "./RecordingStatusBar";
 import { motion, AnimatePresence } from "framer-motion";
 import { TranscriptSegmentData } from "@/types";
 import type { DiarizationStatus } from "@/types/diarization";
+import { createHighlightTimer, findTargetSegmentIndex, startLoadMoreRetry } from "@/lib/transcript-navigation";
 
 export interface VirtualizedTranscriptViewProps {
     /** Transcript segments to display */
@@ -327,8 +328,11 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
     const lastHandledKeyRef = useRef(0);
     const pendingScrollRef = useRef<{ key: number; time: number } | null>(null);
     const [highlightedSegmentId, setHighlightedSegmentId] = useState<string | null>(null);
-    const highlightTimerRef = useRef<NodeJS.Timeout | null>(null);
-    const loadMoreRetryTimerRef = useRef<NodeJS.Timeout | null>(null);
+    const highlightRef = useRef<ReturnType<typeof createHighlightTimer> | null>(null);
+    if (!highlightRef.current) {
+        highlightRef.current = createHighlightTimer(setHighlightedSegmentId, 2500);
+    }
+    const cancelLoadMoreRetryRef = useRef<(() => void) | null>(null);
     // Latest pagination state, so the retry timer never acts on a stale closure
     const paginationRef = useRef({ hasMore, isLoadingMore, onLoadMore });
     paginationRef.current = { hasMore, isLoadingMore, onLoadMore };
@@ -336,15 +340,19 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
     const gaveUpKeyRef = useRef(0);
     const [retryExhaustedTick, setRetryExhaustedTick] = useState(0);
 
+    const cancelLoadMoreRetry = useCallback(() => {
+        cancelLoadMoreRetryRef.current?.();
+        cancelLoadMoreRetryRef.current = null;
+    }, []);
+
     // Clean up timers on unmount
     useEffect(() => {
+        const highlight = highlightRef.current;
         return () => {
-            clearTimeout(highlightTimerRef.current as NodeJS.Timeout);
-            highlightTimerRef.current = null;
-            clearTimeout(loadMoreRetryTimerRef.current as NodeJS.Timeout);
-            loadMoreRetryTimerRef.current = null;
+            highlight?.dispose();
+            cancelLoadMoreRetry();
         };
-    }, []);
+    }, [cancelLoadMoreRetry]);
 
     // Scroll to specific segment when scrollToKey changes or pending load arrives
     useEffect(() => {
@@ -353,8 +361,7 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
         if (segments.length === 0) {
             // Transcript was reset (e.g. meeting switched): drop any in-flight jump
             pendingScrollRef.current = null;
-            clearTimeout(loadMoreRetryTimerRef.current as NodeJS.Timeout);
-            loadMoreRetryTimerRef.current = null;
+            cancelLoadMoreRetry();
             return;
         }
 
@@ -365,15 +372,8 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
 
         if (isNewRequest) {
             lastHandledKeyRef.current = scrollToKey;
-            if (highlightTimerRef.current) {
-                clearTimeout(highlightTimerRef.current);
-                highlightTimerRef.current = null;
-            }
-            setHighlightedSegmentId(null);
-            if (loadMoreRetryTimerRef.current) {
-                clearTimeout(loadMoreRetryTimerRef.current);
-                loadMoreRetryTimerRef.current = null;
-            }
+            highlightRef.current?.clear();
+            cancelLoadMoreRetry();
         }
 
         // Check if target timestamp is beyond currently loaded segments
@@ -386,78 +386,31 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
                 onLoadMore();
             }
 
-            // Ensure a pending jump continues through all required pages:
-            // usePaginatedTranscripts debounces calls less than 100ms apart.
-            // Schedule a retry so fast responses or throttled calls are re-attempted once the delay expires.
-            clearTimeout(loadMoreRetryTimerRef.current as NodeJS.Timeout);
-            let attempts = 0;
-            const scheduleRetry = () => {
-                loadMoreRetryTimerRef.current = setTimeout(() => {
-                    loadMoreRetryTimerRef.current = null;
-                    const latest = paginationRef.current;
-                    if (!pendingScrollRef.current || !latest.hasMore || !latest.onLoadMore) return;
-                    if (++attempts > MAX_LOAD_MORE_RETRIES) {
-                        // Pages keep failing to load: stop polling and jump to the nearest loaded segment
-                        gaveUpKeyRef.current = scrollToKey;
-                        setRetryExhaustedTick(t => t + 1);
-                        return;
-                    }
-                    if (!latest.isLoadingMore) {
-                        latest.onLoadMore();
-                    }
-                    scheduleRetry();
-                }, 120);
-            };
-            scheduleRetry();
+            // Ensure a pending jump continues through all required pages: calls less than 100ms apart
+            // are debounced by usePaginatedTranscripts, so retry once the delay expires.
+            cancelLoadMoreRetry();
+            cancelLoadMoreRetryRef.current = startLoadMoreRetry({
+                getState: () => paginationRef.current,
+                onGiveUp: () => {
+                    // Pages keep failing to load: stop polling and jump to the nearest loaded segment
+                    gaveUpKeyRef.current = scrollToKey;
+                    cancelLoadMoreRetryRef.current = null;
+                    setRetryExhaustedTick(t => t + 1);
+                },
+                maxRetries: MAX_LOAD_MORE_RETRIES,
+                delayMs: 120,
+            });
             return;
         }
 
         // Target is within range or we reached end of available segments
         pendingScrollRef.current = null;
-        if (loadMoreRetryTimerRef.current) {
-            clearTimeout(loadMoreRetryTimerRef.current);
-            loadMoreRetryTimerRef.current = null;
-        }
+        cancelLoadMoreRetry();
 
-        // Find the segment whose time range contains the target
-        // References are whole seconds (floored when the summary prompt is built), so match a segment
-        // starting in the same second first, otherwise a fractional start (872.7s cited as 872) would
-        // select the preceding segment.
-        const targetSecond = Math.floor(scrollToTime);
-        let targetIndex = segments.findIndex(s => Math.floor(s.timestamp) === targetSecond);
-        if (targetIndex === -1) {
-            targetIndex = segments.findIndex(s =>
-                s.timestamp <= scrollToTime && (s.endTime ?? s.timestamp) >= scrollToTime
-            );
-        }
-
-        // Fallback: find nearest segment by distance to speech window
-        if (targetIndex === -1) {
-            let best = 0;
-            let bestDist = Infinity;
-            for (let i = 0; i < segments.length; i++) {
-                const s = segments[i];
-                const sEnd = s.endTime ?? s.timestamp;
-                const dist = scrollToTime < s.timestamp
-                    ? s.timestamp - scrollToTime
-                    : scrollToTime > sEnd
-                        ? scrollToTime - sEnd
-                        : 0;
-                if (dist < bestDist) {
-                    bestDist = dist;
-                    best = i;
-                }
-            }
-            targetIndex = best;
-        }
+        const targetIndex = findTargetSegmentIndex(segments, scrollToTime);
         const targetSegment = segments[targetIndex];
         if (targetSegment) {
-            clearTimeout(highlightTimerRef.current as NodeJS.Timeout);
-            setHighlightedSegmentId(targetSegment.id);
-            highlightTimerRef.current = setTimeout(() => {
-                setHighlightedSegmentId(null);
-                highlightTimerRef.current = null;
-            }, 2500);
+            highlightRef.current?.show(targetSegment.id);
 
             if (useVirtualization) {
                 virtualizer.scrollToIndex(targetIndex, { align: 'center' });
@@ -466,7 +419,7 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
                 el?.scrollIntoView({ behavior: 'smooth', block: 'center' });
             }
         }
-    }, [scrollToTime, scrollToKey, segments, hasMore, isLoadingMore, onLoadMore, useVirtualization, virtualizer, retryExhaustedTick]);
+    }, [scrollToTime, scrollToKey, segments, hasMore, isLoadingMore, onLoadMore, useVirtualization, virtualizer, retryExhaustedTick, cancelLoadMoreRetry]);
 
     return (
         <div ref={scrollRef} className="flex flex-col h-full overflow-y-auto px-4 py-2">
