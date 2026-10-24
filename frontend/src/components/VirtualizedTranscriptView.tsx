@@ -325,6 +325,18 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
     const lastHandledKeyRef = useRef(0);
     const pendingScrollRef = useRef<{ key: number; time: number } | null>(null);
     const [highlightedSegmentId, setHighlightedSegmentId] = useState<string | null>(null);
+    const highlightTimerRef = useRef<NodeJS.Timeout | null>(null);
+    const loadMoreRetryTimerRef = useRef<NodeJS.Timeout | null>(null);
+
+    // Clean up timers on unmount
+    useEffect(() => {
+        return () => {
+            clearTimeout(highlightTimerRef.current as NodeJS.Timeout);
+            highlightTimerRef.current = null;
+            clearTimeout(loadMoreRetryTimerRef.current as NodeJS.Timeout);
+            loadMoreRetryTimerRef.current = null;
+        };
+    }, []);
 
     // Scroll to specific segment when scrollToKey changes or pending load arrives
     useEffect(() => {
@@ -337,6 +349,15 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
 
         if (isNewRequest) {
             lastHandledKeyRef.current = scrollToKey;
+            if (highlightTimerRef.current) {
+                clearTimeout(highlightTimerRef.current);
+                highlightTimerRef.current = null;
+            }
+            setHighlightedSegmentId(null);
+            if (loadMoreRetryTimerRef.current) {
+                clearTimeout(loadMoreRetryTimerRef.current);
+                loadMoreRetryTimerRef.current = null;
+            }
         }
 
         // Check if target timestamp is beyond currently loaded segments
@@ -345,12 +366,34 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
 
         if (scrollToTime > lastLoadedTime && hasMore && onLoadMore) {
             pendingScrollRef.current = { key: scrollToKey, time: scrollToTime };
-            onLoadMore();
+            if (!isLoadingMore) {
+                onLoadMore();
+            }
+
+            // Ensure a pending jump continues through all required pages:
+            // usePaginatedTranscripts debounces calls less than 100ms apart.
+            // Schedule a retry so fast responses or throttled calls are re-attempted once the delay expires.
+            clearTimeout(loadMoreRetryTimerRef.current as NodeJS.Timeout);
+            const scheduleRetry = () => {
+                loadMoreRetryTimerRef.current = setTimeout(() => {
+                    loadMoreRetryTimerRef.current = null;
+                    if (!pendingScrollRef.current || !hasMore || !onLoadMore) return;
+                    if (!isLoadingMore) {
+                        onLoadMore();
+                    }
+                    scheduleRetry();
+                }, 120);
+            };
+            scheduleRetry();
             return;
         }
 
         // Target is within range or we reached end of available segments
         pendingScrollRef.current = null;
+        if (loadMoreRetryTimerRef.current) {
+            clearTimeout(loadMoreRetryTimerRef.current);
+            loadMoreRetryTimerRef.current = null;
+        }
 
         // Find the segment whose time range contains the target
         let targetIndex = segments.findIndex(s =>
@@ -376,11 +419,14 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
             }
             targetIndex = best;
         }
-
         const targetSegment = segments[targetIndex];
         if (targetSegment) {
+            clearTimeout(highlightTimerRef.current as NodeJS.Timeout);
             setHighlightedSegmentId(targetSegment.id);
-            const timer = setTimeout(() => setHighlightedSegmentId(null), 2500);
+            highlightTimerRef.current = setTimeout(() => {
+                setHighlightedSegmentId(null);
+                highlightTimerRef.current = null;
+            }, 2500);
 
             if (useVirtualization) {
                 virtualizer.scrollToIndex(targetIndex, { align: 'center' });
@@ -388,10 +434,8 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
                 const el = document.getElementById(`segment-${targetSegment.id}`);
                 el?.scrollIntoView({ behavior: 'smooth', block: 'center' });
             }
-
-            return () => clearTimeout(timer);
         }
-    }, [scrollToTime, scrollToKey, segments, hasMore, onLoadMore, useVirtualization, virtualizer]);
+    }, [scrollToTime, scrollToKey, segments, hasMore, isLoadingMore, onLoadMore, useVirtualization, virtualizer]);
 
     return (
         <div ref={scrollRef} className="flex flex-col h-full overflow-y-auto px-4 py-2">

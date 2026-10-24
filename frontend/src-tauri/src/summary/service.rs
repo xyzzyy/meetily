@@ -1078,6 +1078,26 @@ mod tests {
     }
 
     #[test]
+    fn test_result_json_serializes_transcript_references_with_camel_case() {
+        let result = build_summary_result_json(
+            "# Title\n## Key Decision\nMigrate auth. [14:32-15:18]",
+            "# Title\n## Key Decision\nMigrate auth. [14:32-15:18]",
+            sample_cache_source(),
+            None,
+            false,
+            false,
+        )
+        .unwrap();
+
+        let refs = result.get("transcript_references").and_then(|v| v.as_array()).unwrap();
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0]["startTime"], 872.0);
+        assert_eq!(refs[0]["endTime"], 918.0);
+        assert!(refs[0].get("start_time").is_none());
+        assert!(refs[0].get("end_time").is_none());
+    }
+
+    #[test]
     fn result_json_rejects_title_only_display_markdown() {
         assert_eq!(
             build_summary_result_json(

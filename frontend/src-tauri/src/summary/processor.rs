@@ -21,10 +21,13 @@ static REFERENCE_REGEX: Lazy<Regex> = Lazy::new(|| {
 
 /// A parsed transcript reference extracted from the summary markdown.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct TranscriptReference {
     /// Start time in seconds
+    #[serde(alias = "start_time")]
     pub start_time: f64,
     /// End time in seconds
+    #[serde(alias = "end_time")]
     pub end_time: f64,
 }
 
@@ -1028,6 +1031,25 @@ Second point. [27:41–28:05]"
         assert!((refs[0].end_time - 918.0).abs() < f64::EPSILON);
         assert!((refs[1].start_time - 1200.0).abs() < f64::EPSILON);
         assert!((refs[1].end_time - 1290.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn serializes_transcript_reference_to_camel_case() {
+        let reference = TranscriptReference {
+            start_time: 872.0,
+            end_time: 918.0,
+        };
+        let serialized = serde_json::to_string(&reference).unwrap();
+        assert_eq!(serialized, r#"{"startTime":872.0,"endTime":918.0}"#);
+
+        // Deserialization supports both camelCase and snake_case aliases
+        let from_camel: TranscriptReference =
+            serde_json::from_str(r#"{"startTime":872.0,"endTime":918.0}"#).unwrap();
+        assert_eq!(from_camel, reference);
+
+        let from_snake: TranscriptReference =
+            serde_json::from_str(r#"{"start_time":872.0,"end_time":918.0}"#).unwrap();
+        assert_eq!(from_snake, reference);
     }
 
 

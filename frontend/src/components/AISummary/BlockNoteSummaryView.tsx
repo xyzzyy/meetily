@@ -10,6 +10,7 @@ import { BlockNoteView } from '@blocknote/shadcn';
 import { blocksToMarkdownSafely } from '@/lib/blocknote-markdown';
 import { useTheme } from '@/contexts/ThemeContext';
 import "@blocknote/shadcn/style.css";
+import { TranscriptReferenceExtension } from '@/lib/transcript-reference-plugin';
 
 // Dynamically import BlockNote Editor to avoid SSR issues
 const Editor = dynamic(() => import('../BlockNoteEditor/Editor'), { ssr: false });
@@ -87,9 +88,12 @@ export const BlockNoteSummaryView = forwardRef<BlockNoteSummaryViewRef, BlockNot
   const isContentLoaded = useRef(false);
   const containerRef = useRef<HTMLDivElement>(null);
 
-  // Create BlockNote editor for markdown parsing
+  // Create BlockNote editor for markdown parsing with transcript reference decoration extension
   const editor = useCreateBlockNote({
-    initialContent: undefined
+    initialContent: undefined,
+    _tiptapOptions: {
+      extensions: [TranscriptReferenceExtension],
+    },
   });
 
   // Parse markdown to blocks when format is markdown
@@ -150,118 +154,6 @@ export const BlockNoteSummaryView = forwardRef<BlockNoteSummaryViewRef, BlockNot
     }
   }, [onTranscriptRefClick]);
 
-  // Make transcript references [MM:SS-MM:SS], [MM:SS–MM:SS], or [MM:SS] clickable in the rendered DOM
-  useEffect(() => {
-    if ((format !== 'markdown' && format !== 'blocknote') || !containerRef.current) return;
-
-    const root = containerRef.current;
-    // Matches [MM:SS-MM:SS], [MM:SS–MM:SS], [MM:SS—MM:SS], or single [MM:SS], allowing optional whitespace around delimiters
-    const TIMESTAMP_REF = /\[(\d{1,4}:\d{2})(?:\s*[-–—]\s*(\d{1,4}:\d{2}))?\]/g;
-    let isMutating = false;
-
-    function walkTextNodes(node: Node) {
-      if (node.nodeType === Node.TEXT_NODE) {
-        const text = node.textContent || '';
-        if (!TIMESTAMP_REF.test(text)) return;
-        TIMESTAMP_REF.lastIndex = 0;
-
-        const fragment = document.createDocumentFragment();
-        let lastIndex = 0;
-        let match: RegExpExecArray | null;
-
-        while ((match = TIMESTAMP_REF.exec(text)) !== null) {
-          if (match.index > lastIndex) {
-            fragment.appendChild(document.createTextNode(text.slice(lastIndex, match.index)));
-          }
-
-          const startParts = match[1].split(':');
-          const startM = parseInt(startParts[0], 10);
-          const startS = parseInt(startParts[1], 10);
-          const startTime = startM * 60 + startS;
-
-          let endTime = startTime;
-          if (match[2]) {
-            const endParts = match[2].split(':');
-            const endM = parseInt(endParts[0], 10);
-            const endS = parseInt(endParts[1], 10);
-            endTime = endM * 60 + endS;
-          }
-
-          const refEl = document.createElement('span');
-          refEl.textContent = match[0];
-          refEl.className = 'transcript-ref inline text-xs font-semibold text-blue-600 dark:text-blue-400 bg-blue-50 dark:bg-blue-950/40 border border-blue-200 dark:border-blue-800 rounded px-1 mx-0.5 cursor-pointer select-none hover:bg-blue-100 dark:hover:bg-blue-900/60 hover:text-blue-800 dark:hover:text-blue-300 transition-colors';
-          refEl.title = `Jump to transcript ${match[0]}`;
-          refEl.dataset.start = String(startTime);
-          refEl.dataset.end = String(endTime);
-          refEl.contentEditable = 'false';
-          refEl.setAttribute('role', 'button');
-          refEl.setAttribute('tabindex', '0');
-          refEl.setAttribute('aria-label', `Jump to transcript at ${match[0]}`);
-          fragment.appendChild(refEl);
-
-          lastIndex = match.index + match[0].length;
-        }
-
-        if (lastIndex < text.length) {
-          fragment.appendChild(document.createTextNode(text.slice(lastIndex)));
-        }
-
-        node.parentNode?.replaceChild(fragment, node);
-      } else if (node.nodeType === Node.ELEMENT_NODE) {
-        const el = node as HTMLElement;
-        if (el.classList.contains('transcript-ref')) return;
-        const children = Array.from(el.childNodes);
-        for (const child of children) {
-          walkTextNodes(child);
-        }
-      }
-    }
-
-    const scan = () => {
-      if (isMutating || !containerRef.current) return;
-      isMutating = true;
-      try {
-        walkTextNodes(containerRef.current);
-      } finally {
-        isMutating = false;
-      }
-    };
-
-    scan();
-    const rafId = requestAnimationFrame(scan);
-    const timeoutId = setTimeout(scan, 100);
-
-    const observer = new MutationObserver((mutations) => {
-      if (isMutating) return;
-      let shouldScan = false;
-      for (const mutation of mutations) {
-        for (const added of Array.from(mutation.addedNodes)) {
-          if (added.nodeType === Node.TEXT_NODE) {
-            shouldScan = true;
-            break;
-          } else if (
-            added.nodeType === Node.ELEMENT_NODE &&
-            !(added as HTMLElement).classList.contains('transcript-ref')
-          ) {
-            shouldScan = true;
-            break;
-          }
-        }
-        if (shouldScan) break;
-      }
-      if (shouldScan) {
-        scan();
-      }
-    });
-
-    observer.observe(root, { childList: true, subtree: true });
-
-    return () => {
-      cancelAnimationFrame(rafId);
-      clearTimeout(timeoutId);
-      observer.disconnect();
-    };
-  }, [format, data?.markdown, data?.summary_json]);
   const handleEditorChange = useCallback((blocks: Block[]) => {
     // Only set dirty flag if content has finished loading
     if (isContentLoaded.current) {
