@@ -2,7 +2,6 @@ use crate::summary::llm_client::{generate_summary, LLMProvider};
 use crate::summary::templates::Template;
 use once_cell::sync::Lazy;
 use regex::Regex;
-use serde::{Deserialize, Serialize};
 use reqwest::Client;
 use std::path::PathBuf;
 use tokio_util::sync::CancellationToken;
@@ -13,24 +12,6 @@ static THINK_ENVELOPE_REGEX: Lazy<Regex> = Lazy::new(|| {
 });
 static THINK_MARKER_REGEX: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"(?is)</?think(?:ing)?(?:\s+[^>]*)?>").unwrap());
-
-/// Matches timestamp references like [14:32-15:18], [14:32–15:18], or single [14:32]
-static REFERENCE_REGEX: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"\[(\d{1,4}):(\d{2})(?:\s*[-–—]\s*(\d{1,4}):(\d{2}))?\]").unwrap()
-});
-
-/// A parsed transcript reference extracted from the summary markdown.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct TranscriptReference {
-    /// Start time in seconds
-    #[serde(alias = "start_time")]
-    pub start_time: f64,
-    /// End time in seconds
-    #[serde(alias = "end_time")]
-    pub end_time: f64,
-}
-
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CleanedLlmMarkdown {
@@ -100,8 +81,8 @@ const ENGLISH_BASE_SUMMARY_INSTRUCTION: &str =
 
 const REFERENCE_INSTRUCTION: &str = "**TRANSCRIPT REFERENCE REQUIREMENT:**\
 \nAfter each key point, decision, action item, or important detail, include the \
-timestamp range from the transcript where this was discussed, in the format `[MM:SS-MM:SS]`.\
-Use the `[MM:SS]` prefixes shown in the transcript text.\
+timestamp range from the transcript where this was discussed, in the format `[MM:SS-MM:SS]`. \
+Take the times from the `[MM:SS–MM:SS]` prefixes shown in the transcript text.\
 \nExample: \"Decision: Migrate authentication to OAuth2. [14:32-15:18]\"\
 \nExample: \"Alice will prepare the migration plan. [27:41-28:05]\"\
 \nInclude the reference at the end of each relevant item.";
@@ -364,30 +345,6 @@ pub fn chunk_text(text: &str, chunk_size_tokens: usize, overlap_tokens: usize) -
 
     info!("Created {} chunks from text", chunks.len());
     chunks
-}
-
-/// Extracts transcript timestamp references from markdown text.
-///
-/// Finds all `[MM:SS-MM:SS]`, `[MM:SS–MM:SS]`, or single `[MM:SS]` patterns and converts
-/// them to structured `TranscriptReference` values with start/end times in seconds.
-pub fn extract_transcript_references(markdown: &str) -> Vec<TranscriptReference> {
-    let mut refs = Vec::new();
-    for cap in REFERENCE_REGEX.captures_iter(markdown) {
-        let start_m: f64 = cap[1].parse().unwrap_or(0.0);
-        let start_s: f64 = cap[2].parse().unwrap_or(0.0);
-        let start_time = start_m * 60.0 + start_s;
-        let end_time = if let (Some(m_str), Some(s_str)) = (cap.get(3), cap.get(4)) {
-            let end_m: f64 = m_str.as_str().parse().unwrap_or(start_m);
-            let end_s: f64 = s_str.as_str().parse().unwrap_or(start_s);
-            end_m * 60.0 + end_s
-        } else {
-            start_time
-        };
-        if end_time >= start_time {
-            refs.push(TranscriptReference { start_time, end_time });
-        }
-    }
-    refs
 }
 
 /// Extracts meeting name from the first heading in markdown
@@ -970,88 +927,6 @@ mod tests {
         assert!(!cleaned.reasoning_stripped);
         assert_eq!(clean_llm_markdown_detailed(markdown).markdown, markdown);
     }
-
-    // extract_transcript_references -------------------------------------------
-
-    #[test]
-    fn extracts_single_reference_hyphen() {
-        let refs = extract_transcript_references("Decision: Migrate to OAuth2. [14:32-15:18]");
-        assert_eq!(refs.len(), 1);
-        assert!((refs[0].start_time - 872.0).abs() < f64::EPSILON);
-        assert!((refs[0].end_time - 918.0).abs() < f64::EPSILON);
-    }
-
-    #[test]
-    fn extracts_reference_with_en_dash() {
-        let refs = extract_transcript_references("Decision: Migrate to OAuth2. [14:32–15:18]");
-        assert_eq!(refs.len(), 1);
-        assert!((refs[0].start_time - 872.0).abs() < f64::EPSILON);
-        assert!((refs[0].end_time - 918.0).abs() < f64::EPSILON);
-    }
-
-    #[test]
-    fn extracts_multiple_references() {
-        let refs = extract_transcript_references(
-            "First point. [01:05-02:30]
-Second point. [27:41–28:05]"
-        );
-        assert_eq!(refs.len(), 2);
-        assert!((refs[0].start_time - 65.0).abs() < f64::EPSILON);
-        assert!((refs[1].start_time - 1661.0).abs() < f64::EPSILON);
-    }
-
-    #[test]
-    fn extracts_single_digit_and_long_minutes() {
-        let refs = extract_transcript_references("[1:23-4:56] and [125:10-126:40]");
-        assert_eq!(refs.len(), 2);
-        assert!((refs[0].start_time - 83.0).abs() < f64::EPSILON);
-        assert!((refs[0].end_time - 296.0).abs() < f64::EPSILON);
-        assert!((refs[1].start_time - 7510.0).abs() < f64::EPSILON);
-        assert!((refs[1].end_time - 7600.0).abs() < f64::EPSILON);
-    }
-
-    #[test]
-    fn extracts_single_timestamp_as_point_in_time() {
-        let refs = extract_transcript_references("Key moment: [05:30]");
-        assert_eq!(refs.len(), 1);
-        assert!((refs[0].start_time - 330.0).abs() < f64::EPSILON);
-        assert!((refs[0].end_time - 330.0).abs() < f64::EPSILON);
-    }
-
-    #[test]
-    fn no_references_returns_empty() {
-        let refs = extract_transcript_references("Just a plain summary without timestamps.");
-        assert!(refs.is_empty());
-    }
-    #[test]
-    fn extracts_references_with_spaces_around_delimiter() {
-        let refs = extract_transcript_references("Decision: [14:32 - 15:18] and [20:00 – 21:30]");
-        assert_eq!(refs.len(), 2);
-        assert!((refs[0].start_time - 872.0).abs() < f64::EPSILON);
-        assert!((refs[0].end_time - 918.0).abs() < f64::EPSILON);
-        assert!((refs[1].start_time - 1200.0).abs() < f64::EPSILON);
-        assert!((refs[1].end_time - 1290.0).abs() < f64::EPSILON);
-    }
-
-    #[test]
-    fn serializes_transcript_reference_to_camel_case() {
-        let reference = TranscriptReference {
-            start_time: 872.0,
-            end_time: 918.0,
-        };
-        let serialized = serde_json::to_string(&reference).unwrap();
-        assert_eq!(serialized, r#"{"startTime":872.0,"endTime":918.0}"#);
-
-        // Deserialization supports both camelCase and snake_case aliases
-        let from_camel: TranscriptReference =
-            serde_json::from_str(r#"{"startTime":872.0,"endTime":918.0}"#).unwrap();
-        assert_eq!(from_camel, reference);
-
-        let from_snake: TranscriptReference =
-            serde_json::from_str(r#"{"start_time":872.0,"end_time":918.0}"#).unwrap();
-        assert_eq!(from_snake, reference);
-    }
-
 
     #[test]
     fn prompt_tests_check_reference_instructions() {

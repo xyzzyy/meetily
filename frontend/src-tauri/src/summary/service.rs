@@ -5,9 +5,8 @@ use crate::summary::llm_client::LLMProvider;
 use crate::summary::language_detection::detect_summary_language;
 use crate::summary::metadata::read_detected_summary_language_from_metadata;
 use crate::summary::processor::{
-    clean_llm_markdown_detailed, extract_meeting_name_from_markdown, extract_transcript_references,
-    generate_meeting_summary, language_name_from_code, require_visible_markdown,
-    TranscriptReference,
+    clean_llm_markdown_detailed, extract_meeting_name_from_markdown, generate_meeting_summary,
+    language_name_from_code, require_visible_markdown,
 };
 use crate::summary::templates::{self, Template};
 use crate::ollama::metadata::ModelMetadataCache;
@@ -157,11 +156,8 @@ fn build_summary_result_json(
     let cleaned_english = clean_llm_markdown_detailed(english_markdown);
     require_visible_markdown("English summary", &cleaned_english)?;
 
-    let references = extract_transcript_references(&markdown);
-
     Ok(serde_json::json!({
         "markdown": markdown,
-        "transcript_references": references,
         ENGLISH_CACHE_FIELD: EnglishSummaryCache {
             markdown: cleaned_english.markdown,
             source,
@@ -1074,27 +1070,6 @@ mod tests {
             result["english_cache"]["markdown"],
             "# English Title\n## Decisions\nDone"
         );
-        assert!(result.get("transcript_references").is_some());
-    }
-
-    #[test]
-    fn test_result_json_serializes_transcript_references_with_camel_case() {
-        let result = build_summary_result_json(
-            "# Title\n## Key Decision\nMigrate auth. [14:32-15:18]",
-            "# Title\n## Key Decision\nMigrate auth. [14:32-15:18]",
-            sample_cache_source(),
-            None,
-            false,
-            false,
-        )
-        .unwrap();
-
-        let refs = result.get("transcript_references").and_then(|v| v.as_array()).unwrap();
-        assert_eq!(refs.len(), 1);
-        assert_eq!(refs[0]["startTime"], 872.0);
-        assert_eq!(refs[0]["endTime"], 918.0);
-        assert!(refs[0].get("start_time").is_none());
-        assert!(refs[0].get("end_time").is_none());
     }
 
     #[test]

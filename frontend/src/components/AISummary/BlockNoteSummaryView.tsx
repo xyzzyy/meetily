@@ -129,30 +129,33 @@ export const BlockNoteSummaryView = forwardRef<BlockNoteSummaryViewRef, BlockNot
   }, [format, data?.summary_json]);
 
 
+  // Resolve a click/keyboard target to a valid transcript reference, or null
+  const resolveTranscriptRef = useCallback((eventTarget: EventTarget) => {
+    const target = (eventTarget as HTMLElement).closest('.transcript-ref');
+    if (!(target instanceof HTMLElement) || !containerRef.current?.contains(target)) return null;
+    const startTime = Number.parseFloat(target.dataset.start ?? '');
+    if (!Number.isFinite(startTime)) return null;
+    const endTime = Number.parseFloat(target.dataset.end ?? '');
+    return { startTime, endTime: Number.isFinite(endTime) ? endTime : startTime };
+  }, []);
+
   // Handle transcript reference clicks via event delegation on container
   const handleContainerClick = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
-    const target = (e.target as HTMLElement).closest('.transcript-ref');
-    if (target && target instanceof HTMLElement && containerRef.current?.contains(target)) {
-      e.preventDefault();
-      e.stopPropagation();
-      const startTime = parseFloat(target.dataset.start ?? '0');
-      const endTime = parseFloat(target.dataset.end ?? String(startTime));
-      onTranscriptRefClick?.(startTime, endTime);
-    }
-  }, [onTranscriptRefClick]);
+    // Dragging a text selection across a reference must not navigate away
+    if (window.getSelection()?.isCollapsed === false) return;
+    const ref = resolveTranscriptRef(e.target);
+    if (!ref) return;
+    e.preventDefault();
+    onTranscriptRefClick?.(ref.startTime, ref.endTime);
+  }, [onTranscriptRefClick, resolveTranscriptRef]);
 
   const handleContainerKeyDown = useCallback((e: React.KeyboardEvent<HTMLDivElement>) => {
-    if (e.key === 'Enter' || e.key === ' ') {
-      const target = (e.target as HTMLElement).closest('.transcript-ref');
-      if (target && target instanceof HTMLElement && containerRef.current?.contains(target)) {
-        e.preventDefault();
-        e.stopPropagation();
-        const startTime = parseFloat(target.dataset.start ?? '0');
-        const endTime = parseFloat(target.dataset.end ?? String(startTime));
-        onTranscriptRefClick?.(startTime, endTime);
-      }
-    }
-  }, [onTranscriptRefClick]);
+    if (e.key !== 'Enter' && e.key !== ' ') return;
+    const ref = resolveTranscriptRef(e.target);
+    if (!ref) return;
+    e.preventDefault();
+    onTranscriptRefClick?.(ref.startTime, ref.endTime);
+  }, [onTranscriptRefClick, resolveTranscriptRef]);
 
   const handleEditorChange = useCallback((blocks: Block[]) => {
     // Only set dirty flag if content has finished loading
