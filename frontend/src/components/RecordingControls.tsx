@@ -250,14 +250,27 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
     };
   }, []);
 
+  // The listeners below must be registered once. Read the latest callbacks through
+  // refs so a new function identity from the parent never re-subscribes them.
+  const onRecordingStopRef = useRef(onRecordingStop);
+  const onTranscriptionErrorRef = useRef(onTranscriptionError);
+  useEffect(() => {
+    onRecordingStopRef.current = onRecordingStop;
+    onTranscriptionErrorRef.current = onTranscriptionError;
+  });
+
   useEffect(() => {
     console.log('Setting up recording event listeners');
+    // Set by cleanup. Registration is async, so listeners that resolve after
+    // cleanup must unsubscribe themselves or they leak for the app's lifetime.
+    let cancelled = false;
     let unsubscribes: (() => void)[] = [];
 
     const setupListeners = async () => {
       try {
         // Transcript error listener - handles both regular and actionable errors
         const transcriptErrorUnsubscribe = await listen('transcript-error', (event) => {
+          if (cancelled) return;
           console.log('transcript-error event received:', event);
           console.error('Transcription error received:', event.payload);
           const errorMessage = event.payload as string;
@@ -272,14 +285,13 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
           });
           setIsProcessing(false);
           console.log('Calling onRecordingStop(false) due to transcript error');
-          onRecordingStop(false);
-          if (onTranscriptionError) {
-            onTranscriptionError(errorMessage);
-          }
+          onRecordingStopRef.current(false);
+          onTranscriptionErrorRef.current?.(errorMessage);
         });
 
         // Transcription error listener - handles structured error objects with actionable flag
         const transcriptionErrorUnsubscribe = await listen<TranscriptionErrorPayload>('transcription-error', (event) => {
+          if (cancelled) return;
           console.log('transcription-error event received:', event);
           console.error('Transcription error received:', event.payload);
 
@@ -307,15 +319,21 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
 
         // Speech detected listener - for UX feedback when VAD detects speech
         const speechDetectedUnsubscribe = await listen('speech-detected', (event) => {
+          if (cancelled) return;
           console.log('speech-detected event received:', event);
           setSpeechDetected(true);
         });
 
-        unsubscribes = [
+        const registered = [
           transcriptErrorUnsubscribe,
           transcriptionErrorUnsubscribe,
           speechDetectedUnsubscribe
         ];
+        if (cancelled) {
+          registered.forEach(unsubscribe => unsubscribe());
+          return;
+        }
+        unsubscribes = registered;
         console.log('Recording event listeners set up successfully');
       } catch (error) {
         console.error('Failed to set up recording event listeners:', error);
@@ -326,13 +344,14 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
 
     return () => {
       console.log('Cleaning up recording event listeners');
+      cancelled = true;
       unsubscribes.forEach(unsubscribe => {
         if (unsubscribe && typeof unsubscribe === 'function') {
           unsubscribe();
         }
       });
     };
-  }, [onRecordingStop, onTranscriptionError]);
+  }, []);
 
   return (
     <TooltipProvider>

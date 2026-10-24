@@ -2,6 +2,39 @@ use sqlx::{migrate::MigrateDatabase, Result, Sqlite, SqlitePool, Transaction};
 use std::fs;
 use std::path::Path;
 
+/// Keep a copy of the database and move its WAL/SHM files aside, named with
+/// a unique `.corrupt-<timestamp>-<id>` suffix, so earlier backups are preserved.
+fn quarantine_database_files(
+    db_path: &Path,
+    wal_path: &Path,
+    shm_path: &Path,
+) -> std::io::Result<()> {
+    let stamp = format!(
+        "{}-{}",
+        chrono::Local::now().format("%Y%m%d-%H%M%S"),
+        uuid::Uuid::new_v4()
+    );
+    let with_suffix = |path: &Path| {
+        let mut name = path.as_os_str().to_owned();
+        name.push(format!(".corrupt-{stamp}"));
+        std::path::PathBuf::from(name)
+    };
+
+    if db_path.exists() {
+        let backup = with_suffix(db_path);
+        fs::copy(db_path, &backup)?;
+        log::warn!("Copied database to {}", backup.display());
+    }
+    for path in [wal_path, shm_path] {
+        if path.exists() {
+            let moved = with_suffix(path);
+            fs::rename(path, &moved)?;
+            log::warn!("Moved {} to {}", path.display(), moved.display());
+        }
+    }
+    Ok(())
+}
+
 #[derive(Clone)]
 pub struct DatabaseManager {
     pool: SqlitePool,
@@ -63,7 +96,7 @@ impl DatabaseManager {
             .to_string_lossy()
             .to_string();
 
-        // WAL file paths for defensive cleanup
+        // WAL file paths, set aside if the database cannot be opened
         let wal_path = app_data_dir.join("meeting_minutes.sqlite-wal");
         let shm_path = app_data_dir.join("meeting_minutes.sqlite-shm");
 
@@ -80,32 +113,32 @@ impl DatabaseManager {
                 // Check if error is due to corrupted WAL file
                 let error_msg = e.to_string();
                 if error_msg.contains("malformed") || error_msg.contains("corrupt") {
-                    log::warn!("Database appears corrupted, likely due to orphaned WAL file. Attempting recovery...");
+                    log::warn!("Database appears corrupted. Attempting recovery...");
                     log::warn!("Error details: {}", error_msg);
 
-                    // Delete potentially corrupted WAL/SHM files
-                    if wal_path.exists() {
-                        match fs::remove_file(&wal_path) {
-                            Ok(_) => log::info!("Removed orphaned WAL file: {:?}", wal_path),
-                            Err(e) => log::warn!("Failed to remove WAL file: {}", e),
-                        }
-                    }
-                    if shm_path.exists() {
-                        match fs::remove_file(&shm_path) {
-                            Ok(_) => log::info!("Removed orphaned SHM file: {:?}", shm_path),
-                            Err(e) => log::warn!("Failed to remove SHM file: {}", e),
-                        }
+                    // The WAL can hold committed changes that were never checkpointed,
+                    // so move it aside instead of deleting it.
+                    if let Err(quarantine_err) = quarantine_database_files(
+                        Path::new(&tauri_db_path),
+                        &wal_path,
+                        &shm_path,
+                    ) {
+                        log::error!(
+                            "Could not finish setting the database files aside; stopping recovery: {}",
+                            quarantine_err
+                        );
+                        return Err(e);
                     }
 
                     // Retry connection without WAL files
-                    log::info!("Retrying database connection after WAL cleanup...");
+                    log::info!("Retrying database connection without the WAL...");
                     match Self::new(&tauri_db_path, &backend_db_path).await {
                         Ok(db_manager) => {
-                            log::info!("Database opened successfully after WAL recovery");
+                            log::info!("Database opened successfully after WAL recovery (original files kept alongside)");
                             Ok(db_manager)
                         }
                         Err(retry_err) => {
-                            log::error!("Database connection failed even after WAL cleanup: {}", retry_err);
+                            log::error!("Database connection failed even without the WAL: {}", retry_err);
                             Err(retry_err)
                         }
                     }
@@ -201,5 +234,71 @@ impl DatabaseManager {
         log::info!("Database connection pool closed");
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn quarantine_keeps_every_database_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("meeting_minutes.sqlite");
+        let wal = dir.path().join("meeting_minutes.sqlite-wal");
+        let shm = dir.path().join("meeting_minutes.sqlite-shm");
+        fs::write(&db, b"main").unwrap();
+        fs::write(&wal, b"unflushed changes").unwrap();
+        fs::write(&shm, b"index").unwrap();
+
+        quarantine_database_files(&db, &wal, &shm).unwrap();
+
+        assert!(db.exists(), "the database stays in place for the retry");
+        assert!(!wal.exists() && !shm.exists());
+        let saved: Vec<_> = fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|name| name.contains(".corrupt-"))
+            .collect();
+        assert_eq!(saved.len(), 3, "main, wal and shm are all preserved: {saved:?}");
+        let wal_copy = saved.iter().find(|name| name.contains("-wal.corrupt-")).unwrap();
+        assert_eq!(fs::read(dir.path().join(wal_copy)).unwrap(), b"unflushed changes");
+    }
+
+    #[test]
+    fn quarantine_tolerates_missing_wal_and_shm() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("meeting_minutes.sqlite");
+        fs::write(&db, b"main").unwrap();
+
+        quarantine_database_files(
+            &db,
+            &dir.path().join("meeting_minutes.sqlite-wal"),
+            &dir.path().join("meeting_minutes.sqlite-shm"),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn repeated_quarantine_preserves_each_backup() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("meeting_minutes.sqlite");
+        let wal = dir.path().join("meeting_minutes.sqlite-wal");
+        let shm = dir.path().join("meeting_minutes.sqlite-shm");
+        for contents in [b"first", b"later"] {
+            for path in [&db, &wal, &shm] {
+                fs::write(path, contents).unwrap();
+            }
+            quarantine_database_files(&db, &wal, &shm).unwrap();
+        }
+        let backups: Vec<_> = fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| path.file_name().unwrap().to_string_lossy().contains(".corrupt-"))
+            .map(|path| fs::read(path).unwrap())
+            .collect();
+        assert_eq!(backups.len(), 6);
+        assert_eq!(backups.iter().filter(|contents| *contents == b"first").count(), 3);
+        assert_eq!(backups.iter().filter(|contents| *contents == b"later").count(), 3);
     }
 }

@@ -1,3 +1,4 @@
+import { redactSecrets } from '@/lib/redact-secrets';
 import { useState, useEffect, useRef } from 'react';
 import { useSidebar } from './Sidebar/SidebarProvider';
 import { invoke } from '@tauri-apps/api/core';
@@ -249,7 +250,12 @@ export function ModelSettingsModal({
     !customOpenAIModel.trim()
   );
 
+  const selectedModel = (modelConfig.provider === 'custom-openai'
+    ? customOpenAIModel
+    : modelConfig.model ?? '').trim();
+
   const isDoneDisabled =
+    !selectedModel ||
     (requiresApiKey && (!apiKey || (typeof apiKey === 'string' && !apiKey.trim()))) ||
     (modelConfig.provider === 'ollama' && ollamaEndpointChanged) ||
     isCustomOpenAIInvalid;
@@ -598,6 +604,14 @@ export function ModelSettingsModal({
     }
   }, [modelConfig.provider, apiKey]);
 
+  // Load OpenRouter models whenever OpenRouter is the active provider, including
+  // when it was already configured on open (not only when it is selected here)
+  useEffect(() => {
+    if (modelConfig.provider === 'openrouter') {
+      loadOpenRouterModels();
+    }
+  }, [modelConfig.provider]);
+
   // Restore cached model when async model lists become available
   useEffect(() => {
     const providerModels = modelOptions[modelConfig.provider];
@@ -615,6 +629,8 @@ export function ModelSettingsModal({
   }, [models, openRouterModels, builtinAiModels, openaiModels, claudeModels, groqModels, modelConfig.provider]);
 
   const handleSave = async () => {
+    if (isDoneDisabled) return;
+
     // For custom-openai provider, save the custom config first
     if (modelConfig.provider === 'custom-openai') {
       try {
@@ -647,11 +663,11 @@ export function ModelSettingsModal({
       maxTokens: modelConfig.provider === 'custom-openai' && customMaxTokens ? parseInt(customMaxTokens, 10) : null,
       temperature: modelConfig.provider === 'custom-openai' && customTemperature ? parseFloat(customTemperature) : null,
       topP: modelConfig.provider === 'custom-openai' && customTopP ? parseFloat(customTopP) : null,
-      // For custom-openai, use the customOpenAIModel as the model field
-      model: modelConfig.provider === 'custom-openai' ? customOpenAIModel.trim() : modelConfig.model,
+      // Use the validated model name, including the custom model input.
+      model: selectedModel,
     };
     setModelConfig(updatedConfig);
-    console.log('ModelSettingsModal - handleSave - Updated ModelConfig:', updatedConfig);
+    console.log('ModelSettingsModal - handleSave - Updated ModelConfig:', redactSecrets(updatedConfig));
 
     // Persist confirmed model choice to per-provider cache
     if (updatedConfig.model) {
@@ -843,10 +859,7 @@ export function ModelSettingsModal({
                 });
                 // API key is now synced automatically via useEffect watching providerApiKeys
 
-                // Load OpenRouter models only when OpenRouter is selected
-                if (provider === 'openrouter') {
-                  loadOpenRouterModels();
-                }
+                // OpenRouter models load from the effect watching modelConfig.provider
 
                 // Load Built-in AI models when selected
                 if (provider === 'builtin-ai') {

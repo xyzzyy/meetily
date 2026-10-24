@@ -1,5 +1,6 @@
 'use client';
 
+import { redactSecrets } from '@/lib/redact-secrets';
 import React, { createContext, useContext, useState, useEffect, useCallback, useMemo, ReactNode, useRef } from 'react';
 import { TranscriptModelProps } from '@/components/TranscriptSettings';
 import { SelectedDevices } from '@/components/DeviceSelection';
@@ -215,7 +216,7 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
       try {
         const config = await configService.getTranscriptConfig();
         if (config) {
-          console.log('[ConfigContext] Loaded saved transcript config:', config);
+          console.log('[ConfigContext] Loaded saved transcript config:', redactSecrets(config));
           setTranscriptModelConfig({
             provider: config.provider || '',
             model: config.model || '',
@@ -344,7 +345,7 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
     const setupListener = async () => {
       const { listen } = await import('@tauri-apps/api/event');
       const unlisten = await listen<ModelConfig>('model-config-updated', (event) => {
-        console.log('[ConfigContext] Received model-config-updated event:', event.payload);
+        console.log('[ConfigContext] Received model-config-updated event:', redactSecrets(event.payload));
         setModelConfig(event.payload);
 
         // Update provider-specific key when config changes

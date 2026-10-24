@@ -447,8 +447,11 @@ impl WhisperEngine {
     // Check for obviously meaningless patterns
     fn is_meaningless_output(text: &str) -> bool {
         let text_lower = text.to_lowercase();
+        let trimmed = text_lower.trim();
 
-        // Check for common meaningless patterns
+        // Whisper invents these phrases on silence or music. Only drop a segment that
+        // contains only the phrase, never a real sentence that mentions it
+        // ("the room burst into laughter", "a round of applause for the team").
         let meaningless_patterns = [
             "thank you for watching",
             "thanks for watching",
@@ -456,15 +459,19 @@ impl WhisperEngine {
             "music playing",
             "applause",
             "laughter",
+            "laughter and applause",
             "um um um",
             "uh uh uh",
             "ah ah ah",
         ];
 
-        for pattern in &meaningless_patterns {
-            if text_lower.contains(pattern) {
-                return true;
-            }
+        // Compare words only, so punctuation and brackets do not affect a match.
+        let words: Vec<&str> = trimmed
+            .split(|c: char| !c.is_alphanumeric())
+            .filter(|word| !word.is_empty())
+            .collect();
+        if meaningless_patterns.contains(&words.join(" ").as_str()) {
+            return true;
         }
 
         // Check if text is mostly the same character or very short repetitive patterns
@@ -1293,6 +1300,48 @@ mod tests {
     use tokio::net::TcpListener;
     use tokio::sync::oneshot;
     use tokio::time::{timeout, Duration};
+
+    #[test]
+    fn meaningless_output_drops_hallucinated_phrases() {
+        for text in [
+            "Thank you for watching.",
+            "Thanks for watching!",
+            "[Applause]",
+            "(laughter)",
+            "[Laughter and applause]",
+            "\u{266A} music playing \u{266A}",
+            "Applause",
+            "Um, um, um.",
+            "Like and subscribe.",
+        ] {
+            assert!(WhisperEngine::is_meaningless_output(text), "should drop: {text}");
+        }
+    }
+
+    #[test]
+    fn meaningless_output_keeps_real_sentences_that_mention_the_phrases() {
+        for text in [
+            "The whole room burst into laughter when he said that.",
+            "Let's give a round of applause to the team for shipping this.",
+            "Thank you for watching over the deployment last night.",
+            "Thank you for watching him.",
+            "Thanks for watching Alice.",
+            "Thank you for watching everyone",
+            "burst into laughter",
+            "round of applause",
+            "[The room burst into laughter]",
+            "Um, um, um, so I think the budget is fine.",
+            "We should plan the budget review for next week.",
+        ] {
+            assert!(!WhisperEngine::is_meaningless_output(text), "should keep: {text}");
+        }
+    }
+
+    #[test]
+    fn cleaning_a_sentence_that_mentions_laughter_keeps_the_sentence() {
+        let text = "The whole room burst into laughter when he said that.";
+        assert_eq!(WhisperEngine::clean_repetitive_text(text), text);
+    }
 
     fn tiny_model(models: &[ModelInfo]) -> &ModelInfo {
         models

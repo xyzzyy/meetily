@@ -1,5 +1,6 @@
 'use client';
 
+import { redactSecrets } from '@/lib/redact-secrets';
 import { useState, useEffect, useCallback } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { toast } from 'sonner';
@@ -83,7 +84,7 @@ export function SummaryModelSettings({ refetchTrigger }: SummaryModelSettingsPro
     const setupListener = async () => {
       const { listen } = await import('@tauri-apps/api/event');
       const unlisten = await listen<ModelConfig>('model-config-updated', (event) => {
-        console.log('SummaryModelSettings received model-config-updated event:', event.payload);
+        console.log('SummaryModelSettings received model-config-updated event:', redactSecrets(event.payload));
         setModelConfig(event.payload);
       });
 

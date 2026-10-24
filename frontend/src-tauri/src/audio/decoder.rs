@@ -288,12 +288,11 @@ fn convert_to_wav_with_ffmpeg(
         )
     })?;
 
-    // Create temp file in the same directory as the input to avoid cross-device issues
-    let parent_dir = input_path.parent().unwrap_or_else(|| Path::new("."));
+    // The input can be read-only. Keep conversion output in the system temp directory.
     let temp_file = tempfile::Builder::new()
         .prefix(".meetily_decode_")
         .suffix(".wav")
-        .tempfile_in(parent_dir)
+        .tempfile()
         .map_err(|e| anyhow!("Failed to create temporary WAV file: {}", e))?;
 
     let temp_path = temp_file.into_temp_path();
@@ -593,6 +592,46 @@ pub fn decode_audio_file_with_progress(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn ffmpeg_conversion_reads_from_a_read_only_directory() {
+        use std::os::unix::fs::PermissionsExt;
+
+        struct SourceDirectory(tempfile::TempDir);
+        impl Drop for SourceDirectory {
+            fn drop(&mut self) {
+                // Restore directory access before TempDir removes the fixture.
+                let _ = std::fs::set_permissions(
+                    self.0.path(),
+                    std::fs::Permissions::from_mode(0o700),
+                );
+            }
+        }
+
+        let directory = SourceDirectory(tempfile::tempdir().unwrap());
+        let source = directory.0.path().join("recording.mkv");
+        let output = Command::new(find_ffmpeg_path().expect("ffmpeg is required for this test"))
+            .args(["-loglevel", "error", "-f", "lavfi", "-i", "sine=duration=0.2", "-c:a", "pcm_s16le"])
+            .arg(&source)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        let original = std::fs::read(&source).unwrap();
+        std::fs::set_permissions(directory.0.path(), std::fs::Permissions::from_mode(0o500)).unwrap();
+        assert!(tempfile::NamedTempFile::new_in(directory.0.path()).is_err(), "fixture directory must reject writes");
+
+        let converted = convert_to_wav_with_ffmpeg(&source, None).unwrap();
+        let converted_path = converted.to_path_buf();
+        assert_ne!(converted_path.parent(), source.parent());
+        let decoded = decode_audio_file(&converted_path).unwrap();
+        assert!((decoded.duration_seconds - 0.2).abs() < 0.01);
+        assert!(!decoded.samples.is_empty());
+        assert_eq!(std::fs::read(&source).unwrap(), original);
+        assert_eq!(std::fs::read_dir(directory.0.path()).unwrap().count(), 1);
+        drop(converted);
+        assert!(!converted_path.exists(), "temporary WAV must be removed after use");
+    }
 
     #[test]
     fn test_decode_he_aac_uses_decoded_rate_not_container_rate() {
