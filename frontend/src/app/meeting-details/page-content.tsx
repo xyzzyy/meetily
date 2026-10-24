@@ -1,5 +1,5 @@
 "use client";
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import { motion } from 'framer-motion';
 import { MeetingSummary, SummaryProcessResponse } from '@/types';
 import { useSidebar } from '@/components/Sidebar/SidebarProvider';
@@ -60,6 +60,16 @@ export default function PageContent({
   const [customPrompt, setCustomPrompt] = useState<string>('');
   const isRecording = false;
   const [activeTab, setActiveTab] = useState<MeetingDetailsTab>('transcript');
+  const [scrollToTime, setScrollToTime] = useState<number | undefined>(undefined);
+  const [scrollToKey, setScrollToKey] = useState(0);
+
+  // Handle transcript reference click - switch to transcript view if on mobile/small screen and scroll
+  const handleTranscriptRefClick = useCallback((startTime: number, _endTime: number) => {
+    manuallySelectedTabMeetingIdsRef.current.add(meeting.id);
+    setScrollToTime(startTime);
+    setScrollToKey(k => k + 1);
+    setActiveTab('transcript');
+  }, [meeting.id]);
 
   // Ref to store the modal open function from SummaryGeneratorButtonGroup
   const openModelSettingsRef = useRef<(() => void) | null>(null);
@@ -208,6 +218,8 @@ export default function PageContent({
               onOpenMeetingFolder={meetingOperations.handleOpenMeetingFolder}
               isRecording={isRecording}
               disableAutoScroll={true}
+              scrollToTime={scrollToTime}
+              scrollToKey={scrollToKey}
               usePagination={true}
               segments={segments}
               hasMore={hasMore}
@@ -249,6 +261,7 @@ export default function PageContent({
               onTemplateSelect={templates.handleTemplateSelection}
               isModelConfigLoading={isModelConfigLoading}
               onOpenModelSettings={handleRegisterModalOpen}
+              onTranscriptRefClick={handleTranscriptRefClick}
             />
           }
         />

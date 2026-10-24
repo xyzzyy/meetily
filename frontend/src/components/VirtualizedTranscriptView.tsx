@@ -11,6 +11,7 @@ import { RecordingStatusBar } from "./RecordingStatusBar";
 import { motion, AnimatePresence } from "framer-motion";
 import { TranscriptSegmentData } from "@/types";
 import type { DiarizationStatus } from "@/types/diarization";
+import { createHighlightTimer, findTargetSegmentIndex, startLoadMoreRetry } from "@/lib/transcript-navigation";
 
 export interface VirtualizedTranscriptViewProps {
     /** Transcript segments to display */
@@ -29,6 +30,10 @@ export interface VirtualizedTranscriptViewProps {
     showConfidence?: boolean;
     /** Completely disable auto-scroll behavior (for meeting details page) */
     disableAutoScroll?: boolean;
+    /** When set, scrolls to the segment whose timestamp contains this time (seconds) */
+    scrollToTime?: number;
+    /** Increment to trigger scrollToTime even if time value is the same */
+    scrollToKey?: number;
 
     // Pagination props (infinite scroll)
     hasMore?: boolean;
@@ -42,6 +47,8 @@ export interface VirtualizedTranscriptViewProps {
 
 // Threshold for enabling virtualization (below this, use simple rendering)
 const VIRTUALIZATION_THRESHOLD = 10;
+// Max 120ms retries (~6s) while paging in the transcript for a pending reference jump
+const MAX_LOAD_MORE_RETRIES = 50;
 
 // Helper function to format seconds as recording-relative time [MM:SS]
 function formatRecordingTime(seconds: number | undefined): string {
@@ -93,6 +100,7 @@ const TranscriptSegment = memo(function TranscriptSegment({
     showConfidence,
     selected,
     onToggle,
+    highlighted,
 }: {
     id: string;
     timestamp: number;
@@ -108,6 +116,7 @@ const TranscriptSegment = memo(function TranscriptSegment({
     showConfidence: boolean;
     selected?: boolean;
     onToggle?: (id: string) => void;
+    highlighted?: boolean;
 }) {
     const displayText = cleanStopWords(text) || (text.trim() === '' ? '[Silence]' : text);
     const duration = endTime !== undefined && endTime >= timestamp
@@ -131,7 +140,12 @@ const TranscriptSegment = memo(function TranscriptSegment({
             : null;
 
     return (
-        <div id={`segment-${id}`} className="mb-3">
+        <div
+            id={`segment-${id}`}
+            className={`mb-3 rounded-md transition-all duration-500 ${
+                highlighted ? 'ring-2 ring-blue-500 bg-blue-50/60 dark:bg-blue-950/40 p-1.5 -m-1.5' : ''
+            }`}
+        >
             <div className="flex items-start gap-2">
                 {onToggle && (
                     <input
@@ -202,6 +216,8 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
     enableStreaming = false,
     showConfidence = true,
     disableAutoScroll = false,
+    scrollToTime,
+    scrollToKey,
     hasMore = false,
     isLoadingMore = false,
     totalCount = 0,
@@ -308,6 +324,106 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
     // Use simple rendering for small lists, virtualization for large lists
     const useVirtualization = segments.length >= VIRTUALIZATION_THRESHOLD;
 
+    // Scroll to specific segment when scrollToTime changes
+    const lastHandledKeyRef = useRef(0);
+    const pendingScrollRef = useRef<{ key: number; time: number } | null>(null);
+    const [highlightedSegmentId, setHighlightedSegmentId] = useState<string | null>(null);
+    const highlightRef = useRef<ReturnType<typeof createHighlightTimer> | null>(null);
+    if (!highlightRef.current) {
+        highlightRef.current = createHighlightTimer(setHighlightedSegmentId, 2500);
+    }
+    const cancelLoadMoreRetryRef = useRef<(() => void) | null>(null);
+    // Latest pagination state, so the retry timer never acts on a stale closure
+    const paginationRef = useRef({ hasMore, isLoadingMore, onLoadMore });
+    // Declared before the jump effect so it runs first on each commit; writing during render could leak uncommitted values
+    useEffect(() => {
+        paginationRef.current = { hasMore, isLoadingMore, onLoadMore };
+    }, [hasMore, isLoadingMore, onLoadMore]);
+    // Request key whose pagination retries were exhausted; jump to the nearest loaded segment instead
+    const gaveUpKeyRef = useRef(0);
+    const [retryExhaustedTick, setRetryExhaustedTick] = useState(0);
+
+    const cancelLoadMoreRetry = useCallback(() => {
+        cancelLoadMoreRetryRef.current?.();
+        cancelLoadMoreRetryRef.current = null;
+    }, []);
+
+    // Clean up timers on unmount
+    useEffect(() => {
+        const highlight = highlightRef.current;
+        return () => {
+            highlight?.dispose();
+            cancelLoadMoreRetry();
+        };
+    }, [cancelLoadMoreRetry]);
+
+    // Scroll to specific segment when scrollToKey changes or pending load arrives
+    useEffect(() => {
+        if (scrollToTime === undefined || scrollToKey === undefined || scrollToKey === 0) return;
+
+        if (segments.length === 0) {
+            // Transcript was reset (e.g. meeting switched): drop any in-flight jump
+            pendingScrollRef.current = null;
+            cancelLoadMoreRetry();
+            return;
+        }
+
+        const isNewRequest = scrollToKey !== lastHandledKeyRef.current;
+        const isPending = pendingScrollRef.current?.key === scrollToKey;
+
+        if (!isNewRequest && !isPending) return;
+
+        if (isNewRequest) {
+            lastHandledKeyRef.current = scrollToKey;
+            highlightRef.current?.clear();
+            cancelLoadMoreRetry();
+        }
+
+        // Check if target timestamp is beyond currently loaded segments
+        const lastSegment = segments[segments.length - 1];
+        const lastLoadedTime = lastSegment.endTime ?? lastSegment.timestamp;
+
+        if (scrollToTime > lastLoadedTime && hasMore && onLoadMore && gaveUpKeyRef.current !== scrollToKey) {
+            pendingScrollRef.current = { key: scrollToKey, time: scrollToTime };
+            if (!isLoadingMore) {
+                onLoadMore();
+            }
+
+            // Ensure a pending jump continues through all required pages: calls less than 100ms apart
+            // are debounced by usePaginatedTranscripts, so retry once the delay expires.
+            cancelLoadMoreRetry();
+            cancelLoadMoreRetryRef.current = startLoadMoreRetry({
+                getState: () => paginationRef.current,
+                onGiveUp: () => {
+                    // Pages keep failing to load: stop polling and jump to the nearest loaded segment
+                    gaveUpKeyRef.current = scrollToKey;
+                    cancelLoadMoreRetryRef.current = null;
+                    setRetryExhaustedTick(t => t + 1);
+                },
+                maxRetries: MAX_LOAD_MORE_RETRIES,
+                delayMs: 120,
+            });
+            return;
+        }
+
+        // Target is within range or we reached end of available segments
+        pendingScrollRef.current = null;
+        cancelLoadMoreRetry();
+
+        const targetIndex = findTargetSegmentIndex(segments, scrollToTime);
+        const targetSegment = segments[targetIndex];
+        if (targetSegment) {
+            highlightRef.current?.show(targetSegment.id);
+
+            if (useVirtualization) {
+                virtualizer.scrollToIndex(targetIndex, { align: 'center' });
+            } else {
+                const el = document.getElementById(`segment-${targetSegment.id}`);
+                el?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            }
+        }
+    }, [scrollToTime, scrollToKey, segments, hasMore, isLoadingMore, onLoadMore, useVirtualization, virtualizer, retryExhaustedTick, cancelLoadMoreRetry]);
+
     return (
         <div ref={scrollRef} className="flex flex-col h-full overflow-y-auto px-4 py-2">
             {/* Recording Status Bar - Sticky at top, always visible when recording */}
@@ -389,6 +505,7 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
                                         showConfidence={showConfidence}
                                         selected={selectedSegmentIds?.has(segment.id)}
                                         onToggle={onToggleSegment}
+                                        highlighted={highlightedSegmentId === segment.id}
                                     />
                                 </div>
                             );
@@ -453,6 +570,7 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
                                         showConfidence={showConfidence}
                                         selected={selectedSegmentIds?.has(segment.id)}
                                         onToggle={onToggleSegment}
+                                        highlighted={highlightedSegmentId === segment.id}
                                     />
                                 </motion.div>
                             );
