@@ -398,8 +398,9 @@ impl RecordingManager {
     pub(crate) async fn stop_streams_and_force_flush(&mut self) -> RecordingStopOutcome {
         info!("🚀 Stopping recording streams with IMMEDIATE pipeline flush");
 
-        // Freeze timing and device names before stop clears pause and device state.
+        // Keep pause state and device names before stop clears them.
         let mut metrics = self.get_metrics();
+        let was_paused = self.state.is_paused();
 
         // CRITICAL: Stop device monitor FIRST to prevent continuous WASAPI polling on Windows
         // This fixes the slow shutdown issue where device enumeration runs for 90+ seconds
@@ -415,6 +416,19 @@ impl RecordingManager {
         let capture_error = self.stream_manager.stop_streams().err();
         if let Some(error) = &capture_error {
             error!("Error stopping audio streams: {error:#}");
+        }
+        if self.stopped_metrics.is_none() {
+            // Capture can continue while monitoring and streams shut down.
+            // Freeze timing here, before waiting for pipeline drain or saving.
+            let duration = self.state.get_recording_duration();
+            let shutdown_duration = duration.zip(metrics.duration)
+                .map(|(end, start)| (end - start).max(0.0)).unwrap_or(0.0);
+            metrics.duration = duration;
+            if was_paused {
+                metrics.pause_duration += shutdown_duration;
+            } else {
+                metrics.active_duration = metrics.active_duration.map(|value| value + shutdown_duration);
+            }
         }
         let (pipeline_error, transcript_error) = match self.pipeline_manager.stop().await {
             Ok(()) => (None, None),
@@ -748,6 +762,27 @@ mod wake_tests {
 #[cfg(test)]
 mod stop_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn final_timing_includes_capture_shutdown_for_active_and_paused_recordings() {
+        for paused in [false, true] {
+            let mut manager = RecordingManager::new();
+            manager.state.start_recording().unwrap();
+            if paused { manager.state.pause_recording().unwrap(); }
+            manager.device_monitor = Some(AudioDeviceMonitor::with_task_for_test(tokio::spawn(async {
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            })));
+            manager.stop_streams_and_force_flush().await;
+            let metrics = manager.get_metrics();
+            assert!(metrics.duration.unwrap() >= 0.05);
+            if paused {
+                assert!(metrics.pause_duration >= 0.05);
+                assert!(metrics.active_duration.unwrap() < metrics.pause_duration);
+            } else {
+                assert!(metrics.active_duration.unwrap() >= 0.05);
+            }
+        }
+    }
 
     #[tokio::test]
     async fn stop_keeps_final_metrics_after_resource_cleanup() {

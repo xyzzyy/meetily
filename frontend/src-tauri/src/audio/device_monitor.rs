@@ -256,6 +256,14 @@ impl AudioDeviceMonitor {
         Ok(())
     }
 
+    /// Build a monitor with a controlled shutdown task.
+    #[cfg(test)]
+    pub(super) fn with_task_for_test(handle: JoinHandle<()>) -> Self {
+        let (mut monitor, _) = Self::new();
+        monitor.monitor_handle = Some(handle);
+        monitor
+    }
+
     /// Stop monitoring
     pub async fn stop_monitoring(&mut self) {
         info!("Stopping device monitor");
