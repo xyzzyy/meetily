@@ -201,20 +201,26 @@ describe("findTargetSegmentIndex", () => {
 });
 
 describe("targetMayBeUnloaded", () => {
-  const loaded = [{ timestamp: 0, endTime: 100 }, { timestamp: 100, endTime: 871.2 }];
+  const loaded = [{ timestamp: 0, endTime: 100 }, { timestamp: 800, endTime: 871.2 }];
 
-  test("is true when the cited second extends past the loaded range", () => {
+  test("is true when the cited second reaches the last loaded start or later", () => {
     // [14:31] floors 871.2s to 871; the next page's first segment starts at 871.2
     expect(targetMayBeUnloaded(loaded, 871)).toBe(true);
     expect(targetMayBeUnloaded(loaded, 900)).toBe(true);
+    expect(targetMayBeUnloaded(loaded, 800)).toBe(true);
   });
 
-  test("is false when the cited second is fully inside the loaded range", () => {
-    expect(targetMayBeUnloaded(loaded, 870)).toBe(false);
+  test("covers an overlapping segment at the page edge", () => {
+    // Last loaded segment spans 100-130; the next page starts with an overlapping one at 120
+    expect(targetMayBeUnloaded([{ timestamp: 100, endTime: 130 }], 120)).toBe(true);
+  });
+
+  test("is false when the cited second is before the last loaded start", () => {
     expect(targetMayBeUnloaded(loaded, 5)).toBe(false);
+    expect(targetMayBeUnloaded(loaded, 798)).toBe(false);
   });
 
-  test("uses the start time for segments without an end time and tolerates an empty list", () => {
+  test("tolerates segments without an end time and an empty list", () => {
     expect(targetMayBeUnloaded([{ timestamp: 50 }], 50)).toBe(true);
     expect(targetMayBeUnloaded([], 10)).toBe(false);
   });
@@ -245,6 +251,33 @@ describe("startLoadMoreRetry", () => {
 
     await sleep(20);
     cancel();
+    expect(calls).toBe(0);
+  });
+
+  test("an in-flight request does not spend the retry budget", async () => {
+    let calls = 0;
+    let gaveUp = 0;
+    const state: LoadMoreState = { hasMore: true, isLoadingMore: true, onLoadMore: () => { calls++; } };
+    const cancel = startLoadMoreRetry({ ...options, getState: () => state, onGiveUp: () => { gaveUp++; } });
+
+    await sleep(30); // many ticks while loading; maxRetries is only 3
+    expect(gaveUp).toBe(0);
+
+    state.isLoadingMore = false;
+    await sleep(3);
+    cancel();
+    expect(calls).toBeGreaterThan(0);
+    expect(gaveUp).toBe(0);
+  });
+
+  test("gives up when a single request stalls past maxStalledTicks", async () => {
+    let calls = 0;
+    let gaveUp = 0;
+    const state: LoadMoreState = { hasMore: true, isLoadingMore: true, onLoadMore: () => { calls++; } };
+    startLoadMoreRetry({ ...options, maxStalledTicks: 5, getState: () => state, onGiveUp: () => { gaveUp++; } });
+
+    await sleep(40);
+    expect(gaveUp).toBe(1);
     expect(calls).toBe(0);
   });
 

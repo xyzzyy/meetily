@@ -33,14 +33,15 @@ export function findTargetSegmentIndex(segments: NavigableSegment[], time: numbe
 }
 
 /**
- * Whether the cited time may refer to a segment that is not loaded yet. Reference times are floored
- * to whole seconds, so the cited segment can start up to a second after the cited time; if the loaded
- * range ends inside that window, the segment may be the first of the next page.
+ * Whether the cited time may refer to a segment that is not loaded yet. Pages are ordered by start
+ * time, so every unloaded segment starts at or after the last loaded start. Reference times are
+ * floored to whole seconds, so the cited segment can start up to a second after the cited time.
+ * Comparing against the last loaded start (not its end) also covers overlapping segments at a page edge.
  */
 export function targetMayBeUnloaded(segments: NavigableSegment[], time: number): boolean {
   const last = segments[segments.length - 1];
   if (!last) return false;
-  return time + 1 > (last.endTime ?? last.timestamp);
+  return time + 1 > last.timestamp;
 }
 
 export interface LoadMoreState {
@@ -59,8 +60,11 @@ export interface LoadMoreRetryOptions {
   attempts?: { count: number };
   /** Called when retries are exhausted while more pages are still expected */
   onGiveUp: () => void;
+  /** Max page requests without progress */
   maxRetries: number;
   delayMs: number;
+  /** Max consecutive ticks to wait on one in-flight request before giving up (default ~30s) */
+  maxStalledTicks?: number;
 }
 
 /**
@@ -74,19 +78,31 @@ export function startLoadMoreRetry({
   onGiveUp,
   maxRetries,
   delayMs,
+  maxStalledTicks = Math.ceil(30000 / delayMs),
 }: LoadMoreRetryOptions): () => void {
   let timer: ReturnType<typeof setTimeout> | null = null;
+  let stalledTicks = 0;
 
   const schedule = () => {
     timer = setTimeout(() => {
       timer = null;
       const state = getState();
       if (!state.hasMore || !state.onLoadMore) return;
+      if (state.isLoadingMore) {
+        // An in-flight request does not spend the retry budget; only a stalled one gives up
+        if (++stalledTicks > maxStalledTicks) {
+          onGiveUp();
+          return;
+        }
+        schedule();
+        return;
+      }
+      stalledTicks = 0;
       if (++attempts.count > maxRetries) {
         onGiveUp();
         return;
       }
-      if (!state.isLoadingMore) state.onLoadMore();
+      state.onLoadMore();
       schedule();
     }, delayMs);
   };
