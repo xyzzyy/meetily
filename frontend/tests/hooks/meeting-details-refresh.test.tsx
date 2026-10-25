@@ -118,6 +118,23 @@ function deferMetadata() {
 }
 
 describe('meeting route transcript refresh', () => {
+  test('failed refresh keeps the view mounted and can be retried', async () => {
+    await show();
+    await complete('Summary A', 'attempt-a');
+    readTranscripts = async () => { throw new Error('Temporary storage failure'); };
+    await act(async () => { await refresh(); });
+    expect(text()).toContain('Summary A');
+    expect(mounts).toBe(1);
+    expect(renderer!.root.findAllByProps({ role: 'alert' })).toHaveLength(1);
+    readTranscripts = async () => transcriptPage;
+    const retry = renderer!.root.findAllByType('button').find(button => button.props.children === 'Retry');
+    expect(retry).toBeDefined();
+    await act(async () => { retry!.props.onClick(); });
+    expect(renderer!.root.findAllByProps({ role: 'alert' })).toHaveLength(0);
+    expect(text()).toContain('Summary A');
+    expect(mounts).toBe(1);
+  });
+
   test('navigation waits for the new meeting first transcript page before mounting its view', async () => {
     await show();
     await complete('Summary A', 'attempt-a');

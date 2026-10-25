@@ -143,14 +143,6 @@ function MeetingDetailsContent() {
     }
   }, [metadata, transcripts, meetingId, isLoadingTranscripts, setCurrentMeeting]);
 
-  // Handle transcript loading errors
-  useEffect(() => {
-    if (transcriptError) {
-      console.error('Error loading transcripts:', transcriptError);
-      setError(transcriptError);
-    }
-  }, [transcriptError]);
-
   // Extract fetchMeetingDetails for use in child components (now refetches via hook)
   const fetchMeetingDetails = useCallback(async () => {
     if (!meetingId || meetingId === 'intro-call') {
@@ -247,11 +239,12 @@ function MeetingDetailsContent() {
     checkAutoGen();
   }, [meetingDetails, meetingSummary, summaryResponse, isLoading, hasCheckedAutoGen, setupAutoGeneration]);
 
-  if (error) {
+  const initialTranscriptError = metadata?.id !== meetingId ? transcriptError : null;
+  if (error || initialTranscriptError) {
     return (
       <div className="flex items-center justify-center h-screen">
         <div className="text-center">
-          <p className="text-red-500 dark:text-red-400 mb-4">{error}</p>
+          <p className="text-red-500 dark:text-red-400 mb-4">{error || initialTranscriptError}</p>
           <button
             onClick={() => router.push('/')}
             className="px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600"
@@ -270,28 +263,40 @@ function MeetingDetailsContent() {
     </div>;
   }
 
-  return <PageContent
-    key={meetingId}
-    initialSummary={summaryResponse}
-    meeting={meetingDetails}
-    summaryData={meetingSummary}
-    shouldAutoGenerate={shouldAutoGenerate}
-    onAutoGenerateComplete={() => setShouldAutoGenerate(false)}
-    onMeetingUpdated={async () => {
-      // Refetch meeting details to get updated title from backend
-      await fetchMeetingDetails();
-      // Refetch meetings list to update sidebar
-      await refetchMeetings();
-    }}
-    onRefetchTranscripts={refetch}
-    // Pagination props for efficient transcript loading
-    segments={segments}
-    hasMore={hasMore}
-    isLoadingMore={isLoadingMore}
-    totalCount={totalCount}
-    loadedCount={loadedCount}
-    onLoadMore={loadMore}
-  />;
+  return (
+    <div className="flex h-full min-h-0 flex-col">
+      {transcriptError && (
+        <div role="alert" className="flex items-center justify-between gap-3 border-b border-amber-200 bg-amber-50 px-4 py-2 text-sm text-amber-950 dark:border-amber-500/30 dark:bg-amber-500/10 dark:text-amber-200">
+          <span>{transcriptError}. Try again.</span>
+          <button type="button" onClick={() => void refetch()} className="shrink-0 underline">Retry</button>
+        </div>
+      )}
+      <div className="min-h-0 flex-1">
+        <PageContent
+          key={meetingId}
+          initialSummary={summaryResponse}
+          meeting={meetingDetails}
+          summaryData={meetingSummary}
+          shouldAutoGenerate={shouldAutoGenerate}
+          onAutoGenerateComplete={() => setShouldAutoGenerate(false)}
+          onMeetingUpdated={async () => {
+            // Refetch meeting details to get updated title from backend
+            await fetchMeetingDetails();
+            // Refetch meetings list to update sidebar
+            await refetchMeetings();
+          }}
+          onRefetchTranscripts={refetch}
+          // Pagination props for efficient transcript loading
+          segments={segments}
+          hasMore={hasMore}
+          isLoadingMore={isLoadingMore}
+          totalCount={totalCount}
+          loadedCount={loadedCount}
+          onLoadMore={loadMore}
+        />
+      </div>
+    </div>
+  );
 }
 
 export default function MeetingDetails() {
