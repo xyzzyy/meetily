@@ -26,11 +26,13 @@ mock.module('../../src/lib/analytics', () => ({ default: {
   trackSummaryGenerationCompleted: trackCompletion,
 } }));
 let startProcess: () => Promise<{ process_id: string }>;
+const transcriptPage = { transcripts: [{ text: 'Meeting transcript', timestamp: '00:00' }], total_count: 1 };
+let readTranscripts: () => Promise<unknown>;
 let getSummary: (meetingId: string) => Promise<SummaryProcessResponse>;
 const invoke = mock(async (command: string, args?: Record<string, unknown>): Promise<unknown> => {
   if (command === 'api_get_meetings') return [];
   if (command === 'api_get_summary') return getSummary(args!.meetingId as string);
-  if (command === 'api_get_meeting_transcripts') return { transcripts: [{ text: 'Meeting transcript', timestamp: '00:00' }], total_count: 1 };
+  if (command === 'api_get_meeting_transcripts') return readTranscripts();
   if (command === 'get_ollama_models') return [{ name: 'test' }];
   if (command === 'api_process_transcript') return startProcess();
   if (command === 'api_cancel_summary') return { cancelled: true };
@@ -80,6 +82,7 @@ beforeEach(() => {
   timers.clear(); notify.mockClear(); trackCompletion.mockClear(); invoke.mockClear();
   getSummary = async () => response();
   startProcess = async () => ({ process_id: 'attempt-a' });
+  readTranscripts = async () => transcriptPage;
   globalThis.setInterval = ((callback: () => Promise<void>) => {
     const id = ++nextTimer; timers.set(id, callback); return id;
   }) as typeof setInterval;
@@ -120,6 +123,28 @@ describe('summary state restored when returning to a meeting', () => {
       await act(async () => { await state[entry](); });
       expect(confirmReplacement).toHaveBeenCalledTimes(1);
       expect(invoke.mock.calls.some(([command]) => command === 'api_process_transcript')).toBe(true);
+    });
+  }
+
+  for (const entry of ['handleGenerateSummary', 'handleRegenerateSummary'] as const) {
+    test(`${entry} checks edits made during preflight and ignores duplicate requests`, async () => {
+      let finishRead!: (value: unknown) => void;
+      let reads = 0;
+      readTranscripts = () => ++reads === 1
+        ? new Promise(resolve => { finishRead = resolve; })
+        : Promise.resolve(transcriptPage);
+      const initial = response({ status: 'completed', data: { markdown: 'Current notes' } });
+      await show(initial);
+      let pending!: Promise<void>;
+      await act(async () => { pending = state[entry](); });
+      await act(async () => { await state[entry](); });
+      expect(invoke.mock.calls.filter(([command]) => command === 'api_get_meeting_transcripts')).toHaveLength(1);
+      isSummaryDirty = true;
+      await show(initial);
+      await act(async () => { finishRead(transcriptPage); await pending; });
+      expect(confirmReplacement).toHaveBeenCalledTimes(1);
+      expect(invoke.mock.calls.some(([command]) => command === 'api_process_transcript')).toBe(false);
+      expect(text()).toContain('Current notes');
     });
   }
 

@@ -307,6 +307,29 @@ export function useSummaryGeneration({
       pollingResultRef.current(result, generationId, isRegeneration));
   }, [initialSummary, meeting.id, startSummaryPolling]);
 
+  const isSummaryDirtyRef = useRef(isSummaryDirty);
+  isSummaryDirtyRef.current = isSummaryDirty;
+  const requestPendingRef = useRef(false);
+  const confirmationPendingRef = useRef(false);
+  const confirmReplacement = useCallback(async () => {
+    if (!mountedRef.current || visibleMeetingIdRef.current !== meeting.id) return false;
+    if (!isSummaryDirtyRef.current) return true;
+    if (confirmationPendingRef.current) return false;
+    confirmationPendingRef.current = true;
+    try {
+      const accepted = await confirm(
+        'This will replace your unsaved summary edits. Cancel and save them first, or continue.',
+        { title: 'Replace unsaved summary edits?', kind: 'warning', okLabel: 'Replace edits', cancelLabel: 'Cancel' },
+      );
+      return accepted && mountedRef.current && visibleMeetingIdRef.current === meeting.id;
+    } catch (error) {
+      toast.error('Could not confirm replacement. Your edits were kept.');
+      return false;
+    } finally {
+      confirmationPendingRef.current = false;
+    }
+  }, [meeting.id]);
+
   const processSummary = useCallback(async ({
     transcriptText,
     transcriptTexts,
@@ -322,6 +345,8 @@ export function useSummaryGeneration({
     if (previousAttempt && !previousAttempt.finished) {
       await finishGeneration(previousAttempt.generationId, 'cancelled');
     }
+
+    if (!await confirmReplacement()) return;
 
     const generationId = ++generationIdRef.current;
     activeProcessIdRef.current = null;
@@ -389,6 +414,7 @@ export function useSummaryGeneration({
       await failGeneration(generationId, isRegeneration, error instanceof Error ? error.message : 'Summary generation failed.');
     }
   }, [
+    confirmReplacement,
     failGeneration,
     finishGeneration,
     meeting.created_at,
@@ -471,76 +497,61 @@ export function useSummaryGeneration({
     toast.error(message);
   }, []);
 
-  const confirmationPendingRef = useRef(false);
-  const confirmReplacement = useCallback(async () => {
-    if (!isSummaryDirty) return true;
-    if (confirmationPendingRef.current) return false;
-    confirmationPendingRef.current = true;
-    try {
-      const accepted = await confirm(
-        'This will replace your unsaved summary edits. Cancel and save them first, or continue.',
-        { title: 'Replace unsaved summary edits?', kind: 'warning', okLabel: 'Replace edits', cancelLabel: 'Cancel' },
-      );
-      return accepted && mountedRef.current && visibleMeetingIdRef.current === meeting.id;
-    } catch (error) {
-      toast.error('Could not confirm replacement. Your edits were kept.');
-      return false;
-    } finally {
-      confirmationPendingRef.current = false;
-    }
-  }, [isSummaryDirty, meeting.id]);
-
   const handleGenerateSummary = useCallback(async (customPrompt: string = '') => {
-    if (isModelConfigLoading) {
-      toast.info('Loading model configuration, please wait...');
-      return;
-    }
-    if (!await confirmReplacement()) return;
-    const allTranscripts = await fetchAllTranscripts(meeting.id);
-    if (!allTranscripts.length) {
-      showPreflightError('No transcripts available for summary');
-      return;
-    }
-
+    if (requestPendingRef.current) return;
+    requestPendingRef.current = true;
     try {
-      if (modelConfig.provider === 'ollama') {
-        const models = await invokeTauri<unknown[]>('get_ollama_models', {
-          endpoint: modelConfig.ollamaEndpoint || null,
-        });
-        if (models.length === 0) {
-          showPreflightError('No Ollama models found. Please download gemma3:1b from Model Settings.');
-          return;
-        }
+      if (isModelConfigLoading) {
+        toast.info('Loading model configuration, please wait...');
+        return;
       }
-      if (modelConfig.provider === 'builtin-ai') {
-        if (!modelConfig.model) {
-          showPreflightError('No built-in AI model selected. Please select a model in settings.');
-          onOpenModelSettings?.();
-          return;
-        }
-        const isReady = await invokeTauri<boolean>('builtin_ai_is_model_ready', {
-          modelName: modelConfig.model,
-          refresh: true,
-        });
-        if (!isReady) {
-          showPreflightError('Built-in AI model is not ready. Please check model settings.');
-          onOpenModelSettings?.();
-          return;
-        }
+      const allTranscripts = await fetchAllTranscripts(meeting.id);
+      if (!allTranscripts.length) {
+        showPreflightError('No transcripts available for summary');
+        return;
       }
-    } catch (error) {
-      console.error('Failed to validate summary model:', error);
-      showPreflightError('Failed to validate summary model. Please check model settings.');
-      return;
-    }
 
-    await processSummary({
-      ...buildSummaryTranscriptPayload(allTranscripts),
-      customPrompt,
-    });
+      try {
+        if (modelConfig.provider === 'ollama') {
+          const models = await invokeTauri<unknown[]>('get_ollama_models', {
+            endpoint: modelConfig.ollamaEndpoint || null,
+          });
+          if (models.length === 0) {
+            showPreflightError('No Ollama models found. Please download gemma3:1b from Model Settings.');
+            return;
+          }
+        }
+        if (modelConfig.provider === 'builtin-ai') {
+          if (!modelConfig.model) {
+            showPreflightError('No built-in AI model selected. Please select a model in settings.');
+            onOpenModelSettings?.();
+            return;
+          }
+          const isReady = await invokeTauri<boolean>('builtin_ai_is_model_ready', {
+            modelName: modelConfig.model,
+            refresh: true,
+          });
+          if (!isReady) {
+            showPreflightError('Built-in AI model is not ready. Please check model settings.');
+            onOpenModelSettings?.();
+            return;
+          }
+        }
+      } catch (error) {
+        console.error('Failed to validate summary model:', error);
+        showPreflightError('Failed to validate summary model. Please check model settings.');
+        return;
+      }
+
+      await processSummary({
+        ...buildSummaryTranscriptPayload(allTranscripts),
+        customPrompt,
+      });
+    } finally {
+      requestPendingRef.current = false;
+    }
   }, [
     buildSummaryTranscriptPayload,
-    confirmReplacement,
     fetchAllTranscripts,
     isModelConfigLoading,
     meeting.id,
@@ -552,20 +563,25 @@ export function useSummaryGeneration({
 
   // Public API: Regenerate summary from the current saved transcript
   const handleRegenerateSummary = useCallback(async () => {
-    if (!await confirmReplacement()) return;
-    const allTranscripts = await fetchAllTranscripts(meeting.id);
+    if (requestPendingRef.current) return;
+    requestPendingRef.current = true;
+    try {
+      const allTranscripts = await fetchAllTranscripts(meeting.id);
 
-    if (!allTranscripts.length) {
-      console.error('No transcripts available for regeneration');
-      toast.error('No transcripts available for summary regeneration');
-      return;
+      if (!allTranscripts.length) {
+        console.error('No transcripts available for regeneration');
+        toast.error('No transcripts available for summary regeneration');
+        return;
+      }
+
+      await processSummary({
+        ...buildSummaryTranscriptPayload(allTranscripts),
+        isRegeneration: true
+      });
+    } finally {
+      requestPendingRef.current = false;
     }
-
-    await processSummary({
-      ...buildSummaryTranscriptPayload(allTranscripts),
-      isRegeneration: true
-    });
-  }, [meeting.id, fetchAllTranscripts, buildSummaryTranscriptPayload, processSummary, confirmReplacement]);
+  }, [meeting.id, fetchAllTranscripts, buildSummaryTranscriptPayload, processSummary]);
 
   // Public API: Stop ongoing summary generation
   const handleStopGeneration = useCallback(async () => {
