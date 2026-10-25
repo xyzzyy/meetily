@@ -63,6 +63,33 @@ mod pending_save_tests {
         saves.finish(&current);
         assert!(!saves.has_pending());
     }
+
+    #[test]
+    fn a_failed_completion_releases_its_token_and_keeps_other_saves_blocked() {
+        let saves = PendingRecordingSaves::default();
+        let failed = saves.begin();
+        let current = saves.begin();
+        let result = saves.send_completion(&failed, || Err("Event delivery failed".into()));
+        assert_eq!(result, Err("Event delivery failed".into()));
+        assert!(saves.has_pending(), "a failed event must not release a different save");
+        saves.finish(&current);
+        assert!(!saves.has_pending(), "the failed event must not leave its own token pending");
+    }
+
+    #[test]
+    fn a_successful_completion_keeps_exit_blocked_until_the_frontend_acknowledges() {
+        let saves = PendingRecordingSaves::default();
+        let token = saves.begin();
+        let delivered = std::cell::Cell::new(false);
+        saves.send_completion(&token, || {
+            delivered.set(true);
+            Ok(())
+        }).unwrap();
+        assert!(delivered.get());
+        assert!(saves.has_pending());
+        saves.finish(&token);
+        assert!(!saves.has_pending());
+    }
 }
 
 impl PendingRecordingSaves {
@@ -78,6 +105,17 @@ impl PendingRecordingSaves {
 
     fn has_pending(&self) -> bool {
         !self.0.lock().unwrap().is_empty()
+    }
+
+    fn send_completion(
+        &self,
+        token: &str,
+        send: impl FnOnce() -> Result<(), String>,
+    ) -> Result<(), String> {
+        send().map_err(|error| {
+            self.finish(token);
+            error
+        })
     }
 }
 
@@ -526,7 +564,7 @@ pub async fn start_recording_with_meeting_name<R: Runtime>(
     start_managed_transcription(app.clone(), transcription_receiver, session.clone());
     drop(engine_lifecycle_guard);
     complete_recording_start(start_event_result, || {
-        stop_recording_session(app, Some(session), None)
+        stop_recording_session(app, Some(session), None, false)
     }).await?;
 
     info!("✅ Recording started successfully with async-first approach");
@@ -715,7 +753,7 @@ pub async fn start_recording_with_devices_and_meeting<R: Runtime>(
     start_managed_transcription(app.clone(), transcription_receiver, session.clone());
     drop(engine_lifecycle_guard);
     complete_recording_start(start_event_result, || {
-        stop_recording_session(app, Some(session), None)
+        stop_recording_session(app, Some(session), None, false)
     }).await?;
 
     info!("✅ Recording started with custom devices using async-first approach");
@@ -734,7 +772,7 @@ fn start_managed_transcription<R: Runtime>(
     *TRANSCRIPTION_TASK.lock().unwrap() = Some(worker);
     tokio::spawn(async move {
         if let Err(error) = wait_for_transcription_init(init_result).await {
-            if let Err(error) = stop_recording_session(app, Some(session), Some(error)).await {
+            if let Err(error) = stop_recording_session(app, Some(session), Some(error), false).await {
                 error!("Recording shutdown after a transcription failure failed: {error}");
             }
         }
@@ -865,13 +903,22 @@ pub async fn stop_recording<R: Runtime>(
     app: AppHandle<R>,
     _args: RecordingArgs,
 ) -> Result<bool, String> {
-    stop_recording_session(app, None, None).await
+    stop_recording_session(app, None, None, false).await
+}
+
+/// Tray stops dispatch their completion while the owning save token is in scope.
+pub(crate) async fn stop_recording_from_tray<R: Runtime>(
+    app: AppHandle<R>,
+    _args: RecordingArgs,
+) -> Result<bool, String> {
+    stop_recording_session(app, None, None, true).await
 }
 
 async fn stop_recording_session<R: Runtime>(
     app: AppHandle<R>,
     expected_session: Option<Arc<super::RecordingState>>,
     fatal_error: Option<String>,
+    notify_frontend: bool,
 ) -> Result<bool, String> {
     info!(
         "🛑 Starting optimized recording shutdown - ensuring ALL transcript chunks are preserved"
@@ -1333,17 +1380,18 @@ async fn stop_recording_session<R: Runtime>(
         error!("{error}");
         // Tray and fatal-worker error paths do not call the frontend handler.
         // Finish recovery work and acknowledge the exit token there as well.
-        if let Err(notification_error) = app.emit("recording-stop-complete", false) {
-            PENDING_RECORDING_SAVES.finish(&save_token);
+        if let Err(notification_error) = PENDING_RECORDING_SAVES.send_completion(&save_token, || {
+            app.emit("recording-stop-complete", false).map_err(|error| error.to_string())
+        }) {
             warn!("Could not notify frontend about the failed stop: {notification_error}");
         }
         return Err(error);
     }
-    if expected_session.is_some() {
-        // Fatal worker stops use the global handler without claiming transcription success.
-        app.emit("recording-stop-complete", false).map_err(|error| {
-            PENDING_RECORDING_SAVES.finish(&save_token);
-            error.to_string()
+    if notify_frontend || expected_session.is_some() {
+        // Tray stops save the meeting. Worker stops do not claim transcription success.
+        PENDING_RECORDING_SAVES.send_completion(&save_token, || {
+            app.emit("recording-stop-complete", expected_session.is_none())
+                .map_err(|error| error.to_string())
         })?;
     }
     if transcript_warning.is_some() {
