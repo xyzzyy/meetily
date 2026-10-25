@@ -11,7 +11,7 @@ import { RecordingStatusBar } from "./RecordingStatusBar";
 import { motion, AnimatePresence } from "framer-motion";
 import { TranscriptSegmentData } from "@/types";
 import type { DiarizationStatus } from "@/types/diarization";
-import { createHighlightTimer, findTargetSegmentIndex, startLoadMoreRetry } from "@/lib/transcript-navigation";
+import { createHighlightTimer, findTargetSegmentIndex, startLoadMoreRetry, targetMayBeUnloaded } from "@/lib/transcript-navigation";
 
 export interface VirtualizedTranscriptViewProps {
     /** Transcript segments to display */
@@ -341,6 +341,9 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
     }, [hasMore, isLoadingMore, onLoadMore]);
     // Request key whose pagination retries were exhausted; jump to the nearest loaded segment instead
     const gaveUpKeyRef = useRef(0);
+    // Page requests made for the pending jump; survives effect re-runs so the cap counts across them.
+    // Reset when the request changes or the transcript grows (progress).
+    const jumpAttemptsRef = useRef({ key: 0, loaded: 0, count: 0 });
     const [retryExhaustedTick, setRetryExhaustedTick] = useState(0);
 
     const cancelLoadMoreRetry = useCallback(() => {
@@ -379,13 +382,26 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
             cancelLoadMoreRetry();
         }
 
-        // Check if target timestamp is beyond currently loaded segments
-        const lastSegment = segments[segments.length - 1];
-        const lastLoadedTime = lastSegment.endTime ?? lastSegment.timestamp;
-
-        if (scrollToTime > lastLoadedTime && hasMore && onLoadMore && gaveUpKeyRef.current !== scrollToKey) {
+        // Check if the target may still be beyond the loaded segments
+        if (targetMayBeUnloaded(segments, scrollToTime) && hasMore && onLoadMore && gaveUpKeyRef.current !== scrollToKey) {
             pendingScrollRef.current = { key: scrollToKey, time: scrollToTime };
+
+            const attempts = jumpAttemptsRef.current;
+            if (attempts.key !== scrollToKey || segments.length > attempts.loaded) {
+                jumpAttemptsRef.current = { key: scrollToKey, loaded: segments.length, count: 0 };
+            }
+            const giveUp = () => {
+                // Pages keep failing to load: stop polling and jump to the nearest loaded segment
+                gaveUpKeyRef.current = scrollToKey;
+                cancelLoadMoreRetry();
+                setRetryExhaustedTick(t => t + 1);
+            };
+
             if (!isLoadingMore) {
+                if (++jumpAttemptsRef.current.count > MAX_LOAD_MORE_RETRIES) {
+                    giveUp();
+                    return;
+                }
                 onLoadMore();
             }
 
@@ -394,12 +410,8 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
             cancelLoadMoreRetry();
             cancelLoadMoreRetryRef.current = startLoadMoreRetry({
                 getState: () => paginationRef.current,
-                onGiveUp: () => {
-                    // Pages keep failing to load: stop polling and jump to the nearest loaded segment
-                    gaveUpKeyRef.current = scrollToKey;
-                    cancelLoadMoreRetryRef.current = null;
-                    setRetryExhaustedTick(t => t + 1);
-                },
+                attempts: jumpAttemptsRef.current,
+                onGiveUp: giveUp,
                 maxRetries: MAX_LOAD_MORE_RETRIES,
                 delayMs: 120,
             });

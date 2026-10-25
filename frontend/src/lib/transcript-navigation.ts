@@ -32,6 +32,17 @@ export function findTargetSegmentIndex(segments: NavigableSegment[], time: numbe
   return best;
 }
 
+/**
+ * Whether the cited time may refer to a segment that is not loaded yet. Reference times are floored
+ * to whole seconds, so the cited segment can start up to a second after the cited time; if the loaded
+ * range ends inside that window, the segment may be the first of the next page.
+ */
+export function targetMayBeUnloaded(segments: NavigableSegment[], time: number): boolean {
+  const last = segments[segments.length - 1];
+  if (!last) return false;
+  return time + 1 > (last.endTime ?? last.timestamp);
+}
+
 export interface LoadMoreState {
   hasMore: boolean;
   isLoadingMore: boolean;
@@ -41,6 +52,11 @@ export interface LoadMoreState {
 export interface LoadMoreRetryOptions {
   /** Returns the latest pagination state, so retries never act on a stale closure */
   getState: () => LoadMoreState;
+  /**
+   * Attempts made so far. Pass the same object across restarts so the cap counts across them;
+   * defaults to a fresh counter.
+   */
+  attempts?: { count: number };
   /** Called when retries are exhausted while more pages are still expected */
   onGiveUp: () => void;
   maxRetries: number;
@@ -52,16 +68,21 @@ export interface LoadMoreRetryOptions {
  * 100ms apart, so a single call can be dropped; retry until cancelled, out of pages, or out of retries.
  * Returns a cancel function.
  */
-export function startLoadMoreRetry({ getState, onGiveUp, maxRetries, delayMs }: LoadMoreRetryOptions): () => void {
+export function startLoadMoreRetry({
+  getState,
+  attempts = { count: 0 },
+  onGiveUp,
+  maxRetries,
+  delayMs,
+}: LoadMoreRetryOptions): () => void {
   let timer: ReturnType<typeof setTimeout> | null = null;
-  let attempts = 0;
 
   const schedule = () => {
     timer = setTimeout(() => {
       timer = null;
       const state = getState();
       if (!state.hasMore || !state.onLoadMore) return;
-      if (++attempts > maxRetries) {
+      if (++attempts.count > maxRetries) {
         onGiveUp();
         return;
       }

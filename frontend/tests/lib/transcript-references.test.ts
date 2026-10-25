@@ -12,6 +12,7 @@ import {
   createHighlightTimer,
   findTargetSegmentIndex,
   startLoadMoreRetry,
+  targetMayBeUnloaded,
   type LoadMoreState,
 } from "../../src/lib/transcript-navigation";
 
@@ -199,6 +200,26 @@ describe("findTargetSegmentIndex", () => {
   });
 });
 
+describe("targetMayBeUnloaded", () => {
+  const loaded = [{ timestamp: 0, endTime: 100 }, { timestamp: 100, endTime: 871.2 }];
+
+  test("is true when the cited second extends past the loaded range", () => {
+    // [14:31] floors 871.2s to 871; the next page's first segment starts at 871.2
+    expect(targetMayBeUnloaded(loaded, 871)).toBe(true);
+    expect(targetMayBeUnloaded(loaded, 900)).toBe(true);
+  });
+
+  test("is false when the cited second is fully inside the loaded range", () => {
+    expect(targetMayBeUnloaded(loaded, 870)).toBe(false);
+    expect(targetMayBeUnloaded(loaded, 5)).toBe(false);
+  });
+
+  test("uses the start time for segments without an end time and tolerates an empty list", () => {
+    expect(targetMayBeUnloaded([{ timestamp: 50 }], 50)).toBe(true);
+    expect(targetMayBeUnloaded([], 10)).toBe(false);
+  });
+});
+
 describe("startLoadMoreRetry", () => {
   const options = { maxRetries: 3, delayMs: 1 };
 
@@ -248,6 +269,29 @@ describe("startLoadMoreRetry", () => {
     await sleep(50);
     expect(gaveUp).toBe(1);
     expect(calls).toBe(3);
+  });
+
+  test("counts attempts across restarts when given a shared counter", async () => {
+    let calls = 0;
+    let gaveUp = 0;
+    const state: LoadMoreState = { hasMore: true, isLoadingMore: false, onLoadMore: () => { calls++; } };
+    const attempts = { count: 0 };
+    const start = () => startLoadMoreRetry({ ...options, attempts, getState: () => state, onGiveUp: () => { gaveUp++; } });
+
+    // Two retry chains interrupted by effect re-runs: each is cancelled after two attempts
+    for (let i = 0; i < 2; i++) {
+      const cancel = start();
+      await sleep(2);
+      cancel();
+    }
+    const spent = attempts.count;
+    expect(spent).toBeGreaterThan(0);
+
+    start();
+    await sleep(40);
+    expect(gaveUp).toBe(1);
+    expect(attempts.count).toBe(options.maxRetries + 1);
+    expect(calls).toBeLessThan(options.maxRetries + 1);
   });
 
   test("cancel stops further attempts", async () => {
