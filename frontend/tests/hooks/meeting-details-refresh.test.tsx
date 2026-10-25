@@ -124,19 +124,6 @@ function deferMetadata() {
 }
 
 describe('meeting route transcript refresh', () => {
-  test('legacy edits require confirmation and a successful save clears their dirty state', async () => {
-    savedSummary = { ...savedSummary, status: 'completed', data: { Agenda: { title: 'Agenda', blocks: [{ id: 'a', type: 'paragraph', color: 'default', content: 'Original legacy notes' }] } } };
-    await show();
-    await act(async () => { meetingData.handleSummaryChange({ Agenda: { title: 'Agenda', blocks: [{ id: 'a', type: 'paragraph', color: 'default', content: 'Unsaved legacy edit' }] } }); });
-    expect(meetingData.isSummaryDirty).toBe(true);
-    await act(async () => { await summaryState.handleRegenerateSummary(); });
-    expect(confirmReplacement).toHaveBeenCalledTimes(1);
-    expect(invoke.mock.calls.some(([command]) => command === 'api_process_transcript')).toBe(false);
-    expect(text()).toContain('Unsaved legacy edit');
-    await act(async () => { await meetingData.saveAllChanges(); });
-    expect(meetingData.isSummaryDirty).toBe(false);
-  });
-
   test('navigation waits for the new meeting first transcript page before mounting its view', async () => {
     await show();
     await complete('Summary A', 'attempt-a');
@@ -189,4 +176,18 @@ describe('meeting route transcript refresh', () => {
     expect(invoke.mock.calls.find(([command]) => command === 'api_cancel_summary')?.[1]?.processId).toBe('attempt-b');
     expect(timers.size).toBe(0);
   });
+  test('legacy edits require confirmation and a successful save clears their dirty state', async () => {
+    savedSummary = { ...savedSummary, status: 'completed', data: { Agenda: { title: 'Agenda', blocks: [{ id: 'a', type: 'paragraph', color: 'default', content: 'Original legacy notes' }] } } };
+    await show();
+    await act(async () => { meetingData.handleSummaryChange({ Agenda: { title: 'Agenda', blocks: [{ id: 'a', type: 'paragraph', color: 'default', content: 'Unsaved legacy edit' }] } }); });
+    expect(meetingData.isSummaryDirty).toBe(true);
+    await act(async () => { await summaryState.handleRegenerateSummary(); });
+    expect(confirmReplacement).toHaveBeenCalledTimes(1);
+    expect(invoke.mock.calls.some(([command]) => command === 'api_process_transcript')).toBe(false);
+    expect(text()).toContain('Unsaved legacy edit');
+    await act(async () => { await meetingData.saveAllChanges(); });
+    expect(meetingData.isSummaryDirty).toBe(false);
+  });
+
+
 });
