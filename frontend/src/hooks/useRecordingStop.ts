@@ -27,13 +27,22 @@ interface RecordingStopSession {
 }
 
 async function completeRecordingSave(saveToken: string): Promise<void> {
+  const toastId = `recording-save-status-${saveToken}`;
   try {
     await invoke('complete_recording_save', { saveToken });
+    toast.dismiss(toastId);
   } catch (error) {
     console.error('Could not release recording save guard:', error);
     toast.error('Could not finish the recording save status', {
+      id: toastId,
+      duration: Infinity,
+      dismissible: false,
+      closeButton: false,
       description: 'Quit is still blocked. Retry to update the save status.',
-      action: { label: 'Retry', onClick: () => { void completeRecordingSave(saveToken); } },
+      action: { label: 'Retry', onClick: event => {
+        event.preventDefault();
+        void completeRecordingSave(saveToken);
+      } },
     });
   }
 }

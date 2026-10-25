@@ -18,6 +18,7 @@ async function loadHook({
   deferNavigation = false,
   deferDelayMs,
   loadStored = async () => [],
+  acknowledge = async () => {},
 } = {}) {
   const listeners = new Map();
   const statuses = [];
@@ -93,7 +94,10 @@ async function loadHook({
       applyPinnedSummaryLanguageToMeeting: async () => true,
     };
     if (name === '@tauri-apps/api/core') return { invoke: async (command, args) => {
-      if (command === 'complete_recording_save') calls.saveAcks.push(args.saveToken);
+      if (command === 'complete_recording_save') {
+        calls.saveAcks.push(args.saveToken);
+        return acknowledge(args.saveToken);
+      }
       return { enabled: false };
     } };
     if (name === '@/lib/analytics') return { default: {
@@ -742,4 +746,23 @@ test('a reported save failure releases only its own exit token after keeping rec
   assert.equal(state.calls.markSaved, 0);
   assert.equal(state.calls.clear, 0);
   assert.equal(state.statuses.at(-1).status, 'ERROR');
+});
+
+test('a failed save acknowledgement keeps a persistent retry until it succeeds', async t => {
+  let attempts = 0;
+  const state = await loadHook({ allowSuccess: true, acknowledge: async () => {
+    if (++attempts === 1) throw new Error('Temporary IPC failure');
+  } });
+  t.after(state.unmount);
+  await state.listeners.get('recording-stopped')({ payload: { save_token: 'retry-token' } });
+  await state.hook.handleRecordingStop(true);
+  const options = state.toasts.find(([title]) => title === 'Could not finish the recording save status')[1];
+  assert.equal(options.duration, Infinity);
+  assert.equal(options.dismissible, false);
+  assert.equal(options.closeButton, false);
+  assert.equal(state.activeToasts.has(options.id), true);
+  options.action.onClick({ preventDefault() {} });
+  await new Promise(setImmediate);
+  assert.equal(attempts, 2);
+  assert.equal(state.activeToasts.has(options.id), false);
 });

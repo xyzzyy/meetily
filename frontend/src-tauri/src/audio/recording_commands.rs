@@ -1331,11 +1331,20 @@ async fn stop_recording_session<R: Runtime>(
 
     if let Some(error) = save_error {
         error!("{error}");
+        // Tray and fatal-worker error paths do not call the frontend handler.
+        // Finish recovery work and acknowledge the exit token there as well.
+        if let Err(notification_error) = app.emit("recording-stop-complete", false) {
+            PENDING_RECORDING_SAVES.finish(&save_token);
+            warn!("Could not notify frontend about the failed stop: {notification_error}");
+        }
         return Err(error);
     }
     if expected_session.is_some() {
         // Fatal worker stops use the global handler without claiming transcription success.
-        app.emit("recording-stop-complete", false).map_err(|error| error.to_string())?;
+        app.emit("recording-stop-complete", false).map_err(|error| {
+            PENDING_RECORDING_SAVES.finish(&save_token);
+            error.to_string()
+        })?;
     }
     if transcript_warning.is_some() {
         warn!("Recording stopped and saved; the final transcript may be incomplete");
