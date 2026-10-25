@@ -264,7 +264,7 @@ function MeetingDetailsContent() {
   }
 
   return (
-    <div className="flex h-full min-h-0 flex-col">
+    <div className="flex h-screen min-h-0 flex-col">
       {transcriptError && (
         <div role="alert" className="flex items-center justify-between gap-3 border-b border-amber-200 bg-amber-50 px-4 py-2 text-sm text-amber-950 dark:border-amber-500/30 dark:bg-amber-500/10 dark:text-amber-200">
           <span>{transcriptError}. Try again.</span>

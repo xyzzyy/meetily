@@ -18,13 +18,16 @@ const { usePaginatedTranscripts } = await import('../../src/hooks/usePaginatedTr
 afterAll(() => mock.module('@tauri-apps/api/core', () => originalCore));
 
 let state: ReturnType<typeof usePaginatedTranscripts>;
+const renders: { meetingId: string | null; error: string | null }[] = [];
 let renderer: ReactTestRenderer | undefined;
 function View({ meetingId }: { meetingId: string | null }) {
   state = usePaginatedTranscripts({ meetingId });
+  renders.push({ meetingId, error: state.error });
   return <output>{state.metadata?.id}:{state.transcripts.map(t => t.text).join(',')}</output>;
 }
 beforeEach(() => {
   requests.length = 0;
+  renders.length = 0;
   invoke.mockClear();
   mock.module('@tauri-apps/api/core', () => ({ ...originalCore, invoke }));
 });
@@ -58,6 +61,16 @@ async function load(meetingId: string, hasMore = false) {
 }
 
 describe('paginated transcript request ownership', () => {
+  test('the first render of a different meeting cannot expose the previous refresh error', async () => {
+    await load('A');
+    await act(async () => { void state.refetch(); });
+    await resolve(request('metadata', 'A', 1), metadata('A'));
+    await act(async () => { request('transcripts', 'A', 1).reject(new Error('Refresh failed')); });
+    expect(state.error).toBe('Failed to load transcripts');
+    await show('B');
+    expect(renders.find(render => render.meetingId === 'B')?.error).toBeNull();
+  });
+
   test('refresh keeps the loaded range visible and requests that whole range', async () => {
     await load('A', true);
     await act(async () => { void state.loadMore(); });

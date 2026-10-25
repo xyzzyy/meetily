@@ -233,7 +233,8 @@ export function usePaginatedTranscripts({
         hasMore,
         totalCount,
         loadedCount: transcripts.length,
-        error,
+        // Effects reset state after render. Do not expose an old meeting's error.
+        error: activeMeetingIdRef.current === meetingId ? error : null,
         loadMore,
         reset,
         refetch,
