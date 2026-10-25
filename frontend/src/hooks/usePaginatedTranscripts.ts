@@ -111,7 +111,8 @@ export function usePaginatedTranscripts({
     const loadTranscriptsAtOffset = useCallback(async (
         requestId: number,
         offset: number,
-        append: boolean = true
+        append: boolean = true,
+        limit: number = DEFAULT_PAGE_SIZE
     ): Promise<Transcript[]> => {
         if (!meetingId || !isCurrentRequest(requestId)) return [];
 
@@ -120,7 +121,7 @@ export function usePaginatedTranscripts({
                 'api_get_meeting_transcripts',
                 {
                     meetingId,
-                    limit: DEFAULT_PAGE_SIZE,
+                    limit,
                     offset,
                 }
             );
@@ -185,23 +186,30 @@ export function usePaginatedTranscripts({
     const refetch = useCallback(async () => {
         if (!meetingId || activeMeetingIdRef.current !== meetingId) return;
 
-        reset();
-        const requestId = requestIdRef.current;
+        const limit = Math.max(DEFAULT_PAGE_SIZE, offsetRef.current);
+        const requestId = ++requestIdRef.current;
+        isLoadingRef.current = true;
+        setIsLoadingMore(false);
+        setError(null);
+        // Keep the view mounted and retain its rows until the refresh succeeds.
+        setIsLoading(offsetRef.current === 0);
         try {
             await loadMetadata(requestId);
-            await loadTranscriptsAtOffset(requestId, 0, false);
+            await loadTranscriptsAtOffset(requestId, 0, false, limit);
         } finally {
-            if (isCurrentRequest(requestId)) setIsLoading(false);
+            if (isCurrentRequest(requestId)) {
+                setIsLoading(false);
+                isLoadingRef.current = false;
+            }
         }
-    }, [meetingId, reset, loadMetadata, loadTranscriptsAtOffset, isCurrentRequest]);
+    }, [meetingId, loadMetadata, loadTranscriptsAtOffset, isCurrentRequest]);
 
     // A new meeting or effect lifetime owns its own requests.
     useEffect(() => {
         activeMeetingIdRef.current = meetingId;
+        reset();
         if (meetingId) {
             void refetch();
-        } else {
-            reset();
         }
 
         return () => {

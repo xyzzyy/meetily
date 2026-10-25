@@ -58,6 +58,39 @@ async function load(meetingId: string, hasMore = false) {
 }
 
 describe('paginated transcript request ownership', () => {
+  test('refresh keeps the loaded range visible and requests that whole range', async () => {
+    await load('A', true);
+    await act(async () => { void state.loadMore(); });
+    const rows = Array.from({ length: 200 }, (_, i) => ({
+      id: `row-${i}`, text: `row ${i}`, timestamp: '00:00', audio_start_time: i,
+    }));
+    await resolve(request('transcripts', 'A', 1), { transcripts: rows, total_count: 300, has_more: true });
+    await act(async () => { void state.refetch(); });
+    expect(state.loadedCount).toBe(201);
+    expect(state.isLoading).toBe(false);
+    await resolve(request('metadata', 'A', 1), metadata('A'));
+    const refresh = request('transcripts', 'A', 2);
+    expect(refresh.args).toMatchObject({ offset: 0, limit: 201 });
+    const updated = [page('A').transcripts[0], ...rows].map(row => ({ ...row, speaker_label: 'Alice' }));
+    await resolve(refresh, { transcripts: updated, total_count: 300, has_more: true });
+    expect(state.loadedCount).toBe(201);
+    expect(state.transcripts.every(row => row.speaker_label === 'Alice')).toBe(true);
+    expect(state.hasMore).toBe(true);
+    await new Promise(resolve => setTimeout(resolve, 110));
+    await act(async () => { void state.loadMore(); });
+    expect(request('transcripts', 'A', 3).args).toMatchObject({ offset: 201, limit: 100 });
+  });
+
+  test('a failed refresh keeps existing rows available', async () => {
+    await load('A');
+    await act(async () => { void state.refetch(); });
+    await resolve(request('metadata', 'A', 1), metadata('A'));
+    await act(async () => { request('transcripts', 'A', 1).reject(new Error('temporary failure')); });
+    expect(state.transcripts.map(row => row.text)).toEqual(['A']);
+    expect(state.isLoading).toBe(false);
+    expect(state.error).toBe('Failed to load transcripts');
+  });
+
   test('ignores late A metadata after B finishes and does not start A transcripts', async () => {
     await show('A');
     const stale = request('metadata', 'A');
