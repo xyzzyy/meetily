@@ -9,6 +9,7 @@ import {
 import { ModelConfig } from '@/components/ModelSettingsModal';
 import { useSidebar } from '@/components/Sidebar/SidebarProvider';
 import { invoke as invokeTauri } from '@tauri-apps/api/core';
+import { confirm } from '@tauri-apps/plugin-dialog';
 import { toast } from 'sonner';
 import Analytics from '@/lib/analytics';
 
@@ -79,6 +80,7 @@ interface UseSummaryGenerationProps {
   updateMeetingTitle: (title: string) => void;
   setAiSummary: (summary: MeetingSummary | null) => void;
   onOpenModelSettings?: () => void;
+  isSummaryDirty?: boolean;
 }
 
 export function useSummaryGeneration({
@@ -92,6 +94,7 @@ export function useSummaryGeneration({
   updateMeetingTitle,
   setAiSummary,
   onOpenModelSettings,
+  isSummaryDirty = false,
 }: UseSummaryGenerationProps) {
   const restored = initialSummary?.meeting_id === meeting.id ? initialSummary : null;
   const [summaryStatus, setSummaryStatus] = useState<SummaryStatus>(() => restoredSummaryStatus(restored));
@@ -244,7 +247,7 @@ export function useSummaryGeneration({
         return;
       }
       const metadata = readSummaryMetadata(pollingResult.data);
-      const meetingName = metadata.meetingName || pollingResult.meetingName;
+      const meetingName = pollingResult.meetingName;
       if (meetingName) {
         updateMeetingTitle(meetingName);
       }
@@ -468,11 +471,31 @@ export function useSummaryGeneration({
     toast.error(message);
   }, []);
 
+  const confirmationPendingRef = useRef(false);
+  const confirmReplacement = useCallback(async () => {
+    if (!isSummaryDirty) return true;
+    if (confirmationPendingRef.current) return false;
+    confirmationPendingRef.current = true;
+    try {
+      const accepted = await confirm(
+        'This will replace your unsaved summary edits. Cancel and save them first, or continue.',
+        { title: 'Replace unsaved summary edits?', kind: 'warning', okLabel: 'Replace edits', cancelLabel: 'Cancel' },
+      );
+      return accepted && mountedRef.current && visibleMeetingIdRef.current === meeting.id;
+    } catch (error) {
+      toast.error('Could not confirm replacement. Your edits were kept.');
+      return false;
+    } finally {
+      confirmationPendingRef.current = false;
+    }
+  }, [isSummaryDirty, meeting.id]);
+
   const handleGenerateSummary = useCallback(async (customPrompt: string = '') => {
     if (isModelConfigLoading) {
       toast.info('Loading model configuration, please wait...');
       return;
     }
+    if (!await confirmReplacement()) return;
     const allTranscripts = await fetchAllTranscripts(meeting.id);
     if (!allTranscripts.length) {
       showPreflightError('No transcripts available for summary');
@@ -517,6 +540,7 @@ export function useSummaryGeneration({
     });
   }, [
     buildSummaryTranscriptPayload,
+    confirmReplacement,
     fetchAllTranscripts,
     isModelConfigLoading,
     meeting.id,
@@ -528,6 +552,7 @@ export function useSummaryGeneration({
 
   // Public API: Regenerate summary from the current saved transcript
   const handleRegenerateSummary = useCallback(async () => {
+    if (!await confirmReplacement()) return;
     const allTranscripts = await fetchAllTranscripts(meeting.id);
 
     if (!allTranscripts.length) {
@@ -540,7 +565,7 @@ export function useSummaryGeneration({
       ...buildSummaryTranscriptPayload(allTranscripts),
       isRegeneration: true
     });
-  }, [meeting.id, fetchAllTranscripts, buildSummaryTranscriptPayload, processSummary]);
+  }, [meeting.id, fetchAllTranscripts, buildSummaryTranscriptPayload, processSummary, confirmReplacement]);
 
   // Public API: Stop ongoing summary generation
   const handleStopGeneration = useCallback(async () => {
