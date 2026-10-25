@@ -42,6 +42,58 @@ static IS_RECORDING: AtomicBool = AtomicBool::new(false);
 /// and surfaces a spurious "Microphone fallback failed" toast.
 static IS_RECORDING_STOPPING: AtomicBool = AtomicBool::new(false);
 
+#[derive(Default)]
+struct PendingRecordingSaves(Mutex<Vec<String>>);
+
+#[cfg(test)]
+mod pending_save_tests {
+    use super::PendingRecordingSaves;
+
+    #[test]
+    fn a_stop_holds_exit_until_its_frontend_save_finishes() {
+        let saves = PendingRecordingSaves::default();
+        assert!(!saves.has_pending());
+        let old = saves.begin();
+        let current = saves.begin();
+        assert_ne!(old, current);
+        saves.finish(&old);
+        assert!(saves.has_pending());
+        saves.finish(&old);
+        assert!(saves.has_pending(), "an old acknowledgement cannot release a later save");
+        saves.finish(&current);
+        assert!(!saves.has_pending());
+    }
+}
+
+impl PendingRecordingSaves {
+    fn begin(&self) -> String {
+        let token = uuid::Uuid::new_v4().to_string();
+        self.0.lock().unwrap().push(token.clone());
+        token
+    }
+
+    fn finish(&self, token: &str) {
+        self.0.lock().unwrap().retain(|pending| pending != token);
+    }
+
+    fn has_pending(&self) -> bool {
+        !self.0.lock().unwrap().is_empty()
+    }
+}
+
+static PENDING_RECORDING_SAVES: PendingRecordingSaves = PendingRecordingSaves(Mutex::new(Vec::new()));
+
+pub(crate) fn recording_blocks_exit() -> bool {
+    IS_RECORDING.load(Ordering::SeqCst)
+        || IS_RECORDING_STOPPING.load(Ordering::SeqCst)
+        || PENDING_RECORDING_SAVES.has_pending()
+}
+
+#[tauri::command]
+pub fn complete_recording_save(save_token: String) {
+    PENDING_RECORDING_SAVES.finish(&save_token);
+}
+
 /// Recording is live and not being torn down — the only state in which the
 /// mic-disconnect fallback should run or report.
 fn recording_live() -> bool {
@@ -1212,6 +1264,9 @@ async fn stop_recording_session<R: Runtime>(
         (shutdown, save) => shutdown.or(save),
     };
 
+    // Keep exit blocked across the handoff to the frontend database save.
+    let save_token = PENDING_RECORDING_SAVES.begin();
+
     // Set recording flag to false
     info!("🔍 Setting IS_RECORDING to false");
     IS_RECORDING.store(false, Ordering::SeqCst);
@@ -1261,10 +1316,15 @@ async fn stop_recording_session<R: Runtime>(
             "folder_path": folder_path_str,
             "meeting_name": meeting_name_str,
             "save_error": save_error,
-            "transcript_warning": transcript_warning
+            "transcript_warning": transcript_warning,
+            "save_token": save_token.clone()
         }),
     )
-    .map_err(|e| e.to_string())?;
+    .map_err(|e| {
+        // No frontend can acknowledge a stop event that was not delivered.
+        PENDING_RECORDING_SAVES.finish(&save_token);
+        e.to_string()
+    })?;
 
     // Update tray menu to reflect stopped state
     crate::tray::update_tray_menu(&app);

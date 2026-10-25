@@ -767,6 +767,7 @@ pub fn run() {
             audio::recording_commands::pause_recording,
             audio::recording_commands::resume_recording,
             audio::recording_commands::is_recording_paused,
+            audio::recording_commands::complete_recording_save,
             audio::recording_commands::get_recording_state,
             audio::recording_commands::get_meeting_folder_path,
             // Reload sync commands (retrieve transcript history and meeting name)
@@ -939,7 +940,7 @@ pub fn run() {
                     tray::focus_main_window(_app_handle);
                 }
                 tauri::RunEvent::ExitRequested { api, .. } => {
-                    if tauri::async_runtime::block_on(audio::recording_commands::is_recording()) {
+                    if audio::recording_commands::recording_blocks_exit() {
                         // Tray Quit and Cmd+Q both pass through this event.
                         // The normal stop path must finish before the app can exit.
                         api.prevent_exit();
@@ -948,7 +949,7 @@ pub fn run() {
                         if !WARNING_VISIBLE.swap(true, Ordering::SeqCst) {
                             use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
                             _app_handle.dialog()
-                                .message("A recording is active or is stopping. Stop the recording and wait for it to finish saving before you quit.")
+                                .message("A recording is active or is being saved. Stop the recording and wait for it to finish saving before you quit.")
                                 .title("Recording in progress")
                                 .kind(MessageDialogKind::Warning)
                                 .buttons(MessageDialogButtons::Ok)

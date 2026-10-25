@@ -33,7 +33,7 @@ async function loadHook({
     toasts.push(args);
     activeToasts.set(args[1]?.id ?? Symbol('toast'), args);
   };
-  const calls = { save: 0, clear: 0, markSaved: 0, flush: 0, poll: 0, transcriptionSuccess: 0, meetingsCompleted: 0, markedIds: [], savedMeetings: [], recoveryReads: [], refreshes: 0, navigation: [], recording: [], disabled: [], active: [] };
+  const calls = { saveAcks: [], save: 0, clear: 0, markSaved: 0, flush: 0, poll: 0, transcriptionSuccess: 0, meetingsCompleted: 0, markedIds: [], savedMeetings: [], recoveryReads: [], refreshes: 0, navigation: [], recording: [], disabled: [], active: [] };
   const storage = new Map([['indexeddb_current_meeting_id', 'old-recording']]);
   const recordingStatus = Object.fromEntries([
     'IDLE', 'STOPPING', 'PROCESSING_TRANSCRIPTS', 'SAVING', 'ERROR', 'COMPLETED', 'RECORDING',
@@ -92,7 +92,10 @@ async function loadHook({
     if (name === '@/lib/summary-language-preferences') return {
       applyPinnedSummaryLanguageToMeeting: async () => true,
     };
-    if (name === '@tauri-apps/api/core') return { invoke: async () => ({ enabled: false }) };
+    if (name === '@tauri-apps/api/core') return { invoke: async (command, args) => {
+      if (command === 'complete_recording_save') calls.saveAcks.push(args.saveToken);
+      return { enabled: false };
+    } };
     if (name === '@/lib/analytics') return { default: {
       trackTranscriptionSuccess: () => calls.transcriptionSuccess++,
       trackPageView() {}, getMeetingsCountToday: async () => 1,
@@ -385,20 +388,23 @@ test('an older stop cannot block or release the newer stop guard', async t => {
   const finishSaves = [];
   const state = await loadHook({ allowSuccess: true, save: () => new Promise(resolve => finishSaves.push(resolve)) });
   t.after(state.unmount);
-  await state.listeners.get('recording-stopped')({ payload: { transcript_warning: transcriptWarning } });
+  await state.listeners.get('recording-stopped')({ payload: { transcript_warning: transcriptWarning, save_token: 'old-token' } });
   const first = state.hook.handleRecordingStop(true);
   await new Promise(setImmediate);
   state.listeners.get('recording-started')({ payload: {} });
-  await state.listeners.get('recording-stopped')({ payload: {} });
+  await state.listeners.get('recording-stopped')({ payload: { save_token: 'new-token' } });
   const second = state.hook.handleRecordingStop(true);
   await new Promise(setImmediate);
   assert.equal(finishSaves.length, 2);
+  assert.deepEqual(state.calls.saveAcks, []);
   finishSaves[0]({ meeting_id: 'first-meeting' });
   await first;
+  assert.deepEqual(state.calls.saveAcks, ['old-token']);
   await state.hook.handleRecordingStop(true);
   assert.equal(state.calls.save, 2);
   finishSaves[1]({ meeting_id: 'second-meeting' });
   await second;
+  assert.deepEqual(state.calls.saveAcks, ['old-token', 'new-token']);
   assert.equal(state.calls.transcriptionSuccess, 1);
   assert.equal(state.activeToasts.has('recording-transcript-incomplete'), false);
 });
@@ -723,4 +729,17 @@ test('a recovery read failure keeps the original transcript snapshot for saving'
   await stopping;
   assert.equal(state.calls.save, 1);
   assert.equal(state.calls.savedMeetings[0][1][0].text, 'Keep this transcript');
+});
+
+
+test('a reported save failure releases only its own exit token after keeping recovery data', async t => {
+  const state = await loadHook({ save: async () => { throw new Error('Database unavailable'); } });
+  t.after(state.unmount);
+  await state.listeners.get('recording-stopped')({ payload: { save_token: 'failed-token' } });
+  assert.deepEqual(state.calls.saveAcks, []);
+  await state.hook.handleRecordingStop(true);
+  assert.deepEqual(state.calls.saveAcks, ['failed-token']);
+  assert.equal(state.calls.markSaved, 0);
+  assert.equal(state.calls.clear, 0);
+  assert.equal(state.statuses.at(-1).status, 'ERROR');
 });
