@@ -938,6 +938,24 @@ pub fn run() {
                 tauri::RunEvent::Reopen { .. } => {
                     tray::focus_main_window(_app_handle);
                 }
+                tauri::RunEvent::ExitRequested { api, .. } => {
+                    if tauri::async_runtime::block_on(audio::recording_commands::is_recording()) {
+                        // Tray Quit and Cmd+Q both pass through this event.
+                        // The normal stop path must finish before the app can exit.
+                        api.prevent_exit();
+                        tray::focus_main_window(_app_handle);
+                        static WARNING_VISIBLE: AtomicBool = AtomicBool::new(false);
+                        if !WARNING_VISIBLE.swap(true, Ordering::SeqCst) {
+                            use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
+                            _app_handle.dialog()
+                                .message("A recording is active or is stopping. Stop the recording and wait for it to finish saving before you quit.")
+                                .title("Recording in progress")
+                                .kind(MessageDialogKind::Warning)
+                                .buttons(MessageDialogButtons::Ok)
+                                .show(|_| { WARNING_VISIBLE.store(false, Ordering::SeqCst); });
+                        }
+                    }
+                }
                 tauri::RunEvent::Exit => {
                     log::info!("Application exiting, cleaning up resources...");
                     tauri::async_runtime::block_on(async {
