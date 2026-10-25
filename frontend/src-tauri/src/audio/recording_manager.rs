@@ -400,7 +400,6 @@ impl RecordingManager {
 
         // Keep pause state and device names before stop clears them.
         let mut metrics = self.get_metrics();
-        let was_paused = self.state.is_paused();
 
         // CRITICAL: Stop device monitor FIRST to prevent continuous WASAPI polling on Windows
         // This fixes the slow shutdown issue where device enumeration runs for 90+ seconds
@@ -412,23 +411,17 @@ impl RecordingManager {
         // Stop recording state first - this clears device references
         self.state.stop_recording();
 
+        if self.stopped_metrics.is_none() {
+            // stop_recording freezes timing at the capture admission cutoff.
+            metrics.duration = self.state.get_recording_duration();
+            metrics.active_duration = self.state.get_active_recording_duration();
+            metrics.pause_duration = self.state.get_total_pause_duration();
+        }
+
         // Stop capture and drain the pipeline even when either step fails.
         let capture_error = self.stream_manager.stop_streams().err();
         if let Some(error) = &capture_error {
             error!("Error stopping audio streams: {error:#}");
-        }
-        if self.stopped_metrics.is_none() {
-            // Capture can continue while monitoring and streams shut down.
-            // Freeze timing here, before waiting for pipeline drain or saving.
-            let duration = self.state.get_recording_duration();
-            let shutdown_duration = duration.zip(metrics.duration)
-                .map(|(end, start)| (end - start).max(0.0)).unwrap_or(0.0);
-            metrics.duration = duration;
-            if was_paused {
-                metrics.pause_duration += shutdown_duration;
-            } else {
-                metrics.active_duration = metrics.active_duration.map(|value| value + shutdown_duration);
-            }
         }
         let (pipeline_error, transcript_error) = match self.pipeline_manager.stop().await {
             Ok(()) => (None, None),
@@ -762,6 +755,23 @@ mod wake_tests {
 #[cfg(test)]
 mod stop_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn an_error_stop_preserves_the_final_pause_before_manager_cleanup() {
+        let mut manager = RecordingManager::new();
+        manager.state.start_recording().unwrap();
+        manager.state.pause_recording().unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        manager.state.report_error(super::super::recording_state::AudioError::ChannelClosed);
+        let duration = manager.state.get_recording_duration();
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        manager.stop_streams_and_force_flush().await;
+        let metrics = manager.get_metrics();
+        assert_eq!(metrics.duration, duration);
+        assert!(metrics.pause_duration >= 0.02);
+        assert!(metrics.active_duration.unwrap() < metrics.pause_duration);
+        assert!(metrics.had_fatal_error);
+    }
 
     #[tokio::test]
     async fn final_timing_includes_capture_shutdown_for_active_and_paused_recordings() {

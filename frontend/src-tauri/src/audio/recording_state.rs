@@ -132,6 +132,7 @@ pub struct RecordingState {
 
     // Recording start time for accurate timestamps
     recording_start: Mutex<Option<Instant>>,
+    recording_end: Mutex<Option<Instant>>,
     // Pause time tracking
     pause_start: Mutex<Option<Instant>>,
     total_pause_duration: Mutex<std::time::Duration>,
@@ -152,6 +153,7 @@ impl RecordingState {
             error_callback: Mutex::new(None),
             stats: Mutex::new(RecordingStats::default()),
             recording_start: Mutex::new(None),
+            recording_end: Mutex::new(None),
             pause_start: Mutex::new(None),
             total_pause_duration: Mutex::new(std::time::Duration::ZERO),
         })
@@ -159,8 +161,13 @@ impl RecordingState {
 
     // Recording control
     pub fn start_recording(&self) -> Result<()> {
+        let mut start = self.recording_start.lock().unwrap();
+        *self.recording_end.lock().unwrap() = None;
+        *self.pause_start.lock().unwrap() = None;
+        *self.total_pause_duration.lock().unwrap() = std::time::Duration::ZERO;
+        *start = Some(Instant::now());
+        self.is_paused.store(false, Ordering::SeqCst);
         self.is_recording.store(true, Ordering::SeqCst);
-        *self.recording_start.lock().unwrap() = Some(Instant::now());
         self.error_count.store(0, Ordering::SeqCst);
         self.recoverable_error_count.store(0, Ordering::SeqCst);
         *self.last_error.lock().unwrap() = None;
@@ -168,10 +175,16 @@ impl RecordingState {
     }
 
     pub fn stop_recording(&self) {
-        self.is_recording.store(false, Ordering::SeqCst);
+        // Use the start lock to serialize timing changes with start and pause.
+        let _start = self.recording_start.lock().unwrap();
+        if self.is_recording.swap(false, Ordering::SeqCst) {
+            let end = Instant::now();
+            *self.recording_end.lock().unwrap() = Some(end);
+            if let Some(pause_start) = self.pause_start.lock().unwrap().take() {
+                *self.total_pause_duration.lock().unwrap() += end.saturating_duration_since(pause_start);
+            }
+        }
         self.is_paused.store(false, Ordering::SeqCst);
-        // Clear pause tracking when stopping
-        *self.pause_start.lock().unwrap() = None;
         // The audio sender stays open so captures can drain their final audio.
         // AudioPipelineManager::stop() closes it after the streams stop.
         // CRITICAL: Clear device references to release microphone/speaker
@@ -182,6 +195,7 @@ impl RecordingState {
     }
 
     pub fn pause_recording(&self) -> Result<()> {
+        let _start = self.recording_start.lock().unwrap();
         if !self.is_recording() {
             return Err(anyhow::anyhow!("Cannot pause when not recording"));
         }
@@ -196,6 +210,7 @@ impl RecordingState {
     }
 
     pub fn resume_recording(&self) -> Result<()> {
+        let _start = self.recording_start.lock().unwrap();
         if !self.is_recording() {
             return Err(anyhow::anyhow!("Cannot resume when not recording"));
         }
@@ -359,12 +374,12 @@ impl RecordingState {
         self.recording_start
             .lock()
             .unwrap()
-            .map(|start| start.elapsed().as_secs_f64())
+            .map(|start| self.recording_end.lock().unwrap()
+                .unwrap_or_else(Instant::now).saturating_duration_since(start).as_secs_f64())
     }
 
     pub fn get_active_recording_duration(&self) -> Option<f64> {
-        self.recording_start.lock().unwrap().map(|start| {
-            let total_duration = start.elapsed().as_secs_f64();
+        self.get_recording_duration().map(|total_duration| {
             let pause_duration = self.get_total_pause_duration();
             let current_pause = if self.is_paused() {
                 self.pause_start
@@ -375,7 +390,7 @@ impl RecordingState {
             } else {
                 0.0
             };
-            total_duration - pause_duration - current_pause
+            (total_duration - pause_duration - current_pause).max(0.0)
         })
     }
 
@@ -409,6 +424,7 @@ impl RecordingState {
         *self.error_callback.lock().unwrap() = None;
         *self.stats.lock().unwrap() = RecordingStats::default();
         *self.recording_start.lock().unwrap() = None;
+        *self.recording_end.lock().unwrap() = None;
         *self.pause_start.lock().unwrap() = None;
         *self.total_pause_duration.lock().unwrap() = std::time::Duration::ZERO;
         self.error_count.store(0, Ordering::SeqCst);
@@ -434,6 +450,7 @@ impl Default for RecordingState {
             error_callback: Mutex::new(None),
             stats: Mutex::new(RecordingStats::default()),
             recording_start: Mutex::new(None),
+            recording_end: Mutex::new(None),
             pause_start: Mutex::new(None),
             total_pause_duration: Mutex::new(std::time::Duration::ZERO),
         }
@@ -448,5 +465,39 @@ impl Clone for RecordingStats {
             total_duration: self.total_duration,
             last_activity: self.last_activity,
         }
+    }
+}
+
+#[cfg(test)]
+mod timing_tests {
+    use super::*;
+
+    #[test]
+    fn stopped_timing_does_not_grow_during_teardown_or_a_repeated_stop() {
+        let state = RecordingState::new();
+        state.start_recording().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        state.stop_recording();
+        let duration = state.get_recording_duration().unwrap();
+        let active = state.get_active_recording_duration();
+        assert!(duration >= 0.02);
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        state.stop_recording();
+        assert_eq!(state.get_recording_duration(), Some(duration));
+        assert_eq!(state.get_active_recording_duration(), active);
+    }
+
+    #[test]
+    fn a_new_recording_resets_stopped_timing_and_pause_totals() {
+        let state = RecordingState::new();
+        state.start_recording().unwrap();
+        state.pause_recording().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        state.stop_recording();
+        assert!(state.get_total_pause_duration() >= 0.02);
+        state.start_recording().unwrap();
+        assert_eq!(state.get_total_pause_duration(), 0.0);
+        assert!(!state.is_paused());
+        assert!(state.get_recording_duration().unwrap() < 0.02);
     }
 }
