@@ -8,8 +8,8 @@ use log::info;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum AudioCaptureBackend {
-    /// Legacy capture identifier. There is no ScreenCaptureKit host on macOS.
-    /// Uses CPAL with ScreenCaptureKit host for system audio
+    /// Legacy identifier for the CPAL capture path.
+    /// Normalized to Core Audio on macOS; ScreenCaptureKit is not implemented.
     ScreenCaptureKit,
 
     /// Core Audio backend (macOS default)
