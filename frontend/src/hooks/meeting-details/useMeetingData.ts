@@ -17,7 +17,7 @@ export function useMeetingData({ meeting, summaryData, onMeetingUpdated }: UseMe
   // Use prop directly since summary generation fetches transcripts independently
   const transcripts = meeting.transcripts;
   const [meetingTitle, setMeetingTitle] = useState(meeting.title || '+ New Call');
-  const [aiSummary, setAiSummary] = useState<MeetingSummary | null>(summaryData);
+  const [aiSummary, setAiSummaryContent] = useState<MeetingSummary | null>(summaryData);
   const [isSaving, setIsSaving] = useState(false);
   const [isSummaryDirty, setIsSummaryDirty] = useState(false);
   const legacyEditVersionRef = useRef(0);
@@ -28,15 +28,22 @@ export function useMeetingData({ meeting, summaryData, onMeetingUpdated }: UseMe
   // Sidebar context
   const { setCurrentMeeting, setMeetings, meetings: sidebarMeetings } = useSidebar();
 
+  // Backend replacements are saved content. User edits use handleSummaryChange.
+  const setAiSummary = useCallback((summary: MeetingSummary | null) => {
+    legacyEditVersionRef.current += 1;
+    setAiSummaryContent(summary);
+    setIsSummaryDirty(false);
+  }, []);
+
   // Sync aiSummary state when summaryData prop changes (fixes display of fetched summaries)
   useEffect(() => {
     console.log('[useMeetingData] Syncing summary data from prop:', summaryData ? 'present' : 'null');
     setAiSummary(summaryData);
-  }, [summaryData]); // Only trigger when parent prop changes, not when aiSummary changes
+  }, [summaryData, setAiSummary]); // Only trigger when parent prop changes, not when aiSummary changes
 
   const handleSummaryChange = useCallback((newSummary: Summary) => {
     legacyEditVersionRef.current += 1;
-    setAiSummary(newSummary);
+    setAiSummaryContent(newSummary);
     setIsSummaryDirty(true);
   }, []);
 

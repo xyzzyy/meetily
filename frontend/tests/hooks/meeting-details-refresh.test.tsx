@@ -44,6 +44,9 @@ let readTranscripts: (id: string) => Promise<unknown>;
 const transcriptPage = {
   transcripts: [{ id: 'transcript', text: 'Meeting transcript', timestamp: '00:00' }], total_count: 1, has_more: false,
 };
+const legacySummary = (content: string) => ({
+  Agenda: { title: 'Agenda', blocks: [{ id: 'a', type: 'paragraph', color: 'default', content }] },
+});
 let savedSummary: SummaryProcessResponse;
 const invoke = mock(async (command: string, args?: Record<string, unknown>): Promise<unknown> => {
   if (command === 'api_get_meetings') return [];
@@ -91,11 +94,14 @@ beforeEach(() => {
   readMetadata = async id => metadata(id);
   readTranscripts = async () => transcriptPage;
   savedSummary = { meeting_id: selectedMeeting, status: 'pending', start: 'attempt-a', end: null, data: null, error: null, meetingName: 'Meeting A' };
-  mounts = 0; timers.clear(); invoke.mockClear(); notify.mockClear(); confirmReplacement.mockClear();
+  mounts = 0; timers.clear(); invoke.mockClear(); notify.mockClear();
+  confirmReplacement.mockReset();
+  confirmReplacement.mockResolvedValue(false);
   globalThis.setInterval = ((callback: () => Promise<void>) => {
     const id = ++nextTimer; timers.set(id, callback); return id;
   }) as typeof setInterval;
   globalThis.clearInterval = ((id: number) => { timers.delete(id); }) as typeof clearInterval;
+
 });
 afterEach(async () => {
   if (renderer) await act(async () => renderer!.unmount());
@@ -189,5 +195,41 @@ describe('meeting route transcript refresh', () => {
     expect(meetingData.isSummaryDirty).toBe(false);
   });
 
+
+  for (const status of ['cancelled', 'failed', 'completed'] as const) {
+    test(`loading saved legacy notes after ${status} clears dirty state and avoids a false replacement prompt`, async () => {
+      savedSummary = { ...savedSummary, status: 'completed', data: legacySummary('Saved legacy notes') };
+      await show();
+      await act(async () => { meetingData.handleSummaryChange(legacySummary('Unsaved legacy edit')); });
+      confirmReplacement.mockResolvedValue(true);
+      await act(async () => { await summaryState.handleRegenerateSummary(); });
+      savedSummary = { ...savedSummary, status, start: 'attempt-b', error: status === 'failed' ? 'Model unavailable' : null };
+      await tick();
+      expect(text()).toContain('Saved legacy notes');
+      expect(text()).not.toContain('Unsaved legacy edit');
+      expect(meetingData.isSummaryDirty).toBe(false);
+      confirmReplacement.mockClear();
+      confirmReplacement.mockResolvedValue(false);
+      await act(async () => { await summaryState.handleRegenerateSummary(); });
+      expect(confirmReplacement).toHaveBeenCalledTimes(0);
+      expect(invoke.mock.calls.filter(([command]) => command === 'api_process_transcript')).toHaveLength(2);
+    });
+  }
+
+  test('stopping without loading saved notes keeps visible legacy edits dirty', async () => {
+    savedSummary = { ...savedSummary, status: 'completed', data: legacySummary('Saved legacy notes') };
+    await show();
+    await act(async () => { meetingData.handleSummaryChange(legacySummary('Unsaved legacy edit')); });
+    confirmReplacement.mockResolvedValue(true);
+    await act(async () => { await summaryState.handleRegenerateSummary(); });
+    await act(async () => { await summaryState.handleStopGeneration(); });
+    expect(text()).toContain('Unsaved legacy edit');
+    expect(meetingData.isSummaryDirty).toBe(true);
+    confirmReplacement.mockClear();
+    confirmReplacement.mockResolvedValue(false);
+    await act(async () => { await summaryState.handleRegenerateSummary(); });
+    expect(confirmReplacement).toHaveBeenCalledTimes(1);
+    expect(invoke.mock.calls.filter(([command]) => command === 'api_process_transcript')).toHaveLength(1);
+  });
 
 });
