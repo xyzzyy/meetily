@@ -8,11 +8,11 @@ use log::info;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum AudioCaptureBackend {
-    /// ScreenCaptureKit backend (macOS default)
+    /// ScreenCaptureKit backend
     /// Uses CPAL with ScreenCaptureKit host for system audio
     ScreenCaptureKit,
 
-    /// Core Audio backend (macOS only)
+    /// Core Audio backend (macOS default)
     /// Uses direct Core Audio API with aggregate device + tap
     #[cfg(target_os = "macos")]
     CoreAudio,
