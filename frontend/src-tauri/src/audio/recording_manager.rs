@@ -38,6 +38,17 @@ pub(crate) struct RecordingStopOutcome {
     pub transcript_error: Option<anyhow::Error>,
 }
 
+#[derive(Clone)]
+pub(crate) struct RecordingMetrics {
+    pub duration: Option<f64>,
+    pub active_duration: Option<f64>,
+    pub pause_duration: f64,
+    pub stats: super::recording_state::RecordingStats,
+    pub had_fatal_error: bool,
+    pub microphone_name: Option<String>,
+    pub system_name: Option<String>,
+}
+
 // ============================================================================
 // macOS Core Audio "pre-wake" — ported from feat/audio-device-handling
 // (commit 8bf6af8b, with refinements from d266feac + 7107adc7 + a10f8e55).
@@ -203,6 +214,7 @@ pub struct RecordingManager {
     device_event_receiver: Option<mpsc::UnboundedReceiver<DeviceEvent>>,
     diarization_enabled: bool,
     stem_saver: Option<DiarizationStemSaver>,
+    stopped_metrics: Option<RecordingMetrics>,
 }
 
 // SAFETY: RecordingManager contains types that we've marked as Send
@@ -221,6 +233,7 @@ impl RecordingManager {
             stream_manager,
             pipeline_manager,
             recording_saver: RecordingSaver::new(),
+            stopped_metrics: None,
             device_monitor: Some(device_monitor),
             device_event_receiver: Some(device_event_receiver),
             diarization_enabled: false,
@@ -246,6 +259,7 @@ impl RecordingManager {
         auto_save: bool,
     ) -> std::result::Result<mpsc::UnboundedReceiver<AudioChunk>, RecordingStartError> {
         info!("Starting recording manager (auto_save: {})", auto_save);
+        self.stopped_metrics = None;
 
         // Set up transcription channel
         let (transcription_sender, transcription_receiver) = mpsc::unbounded_channel::<AudioChunk>();
@@ -384,6 +398,9 @@ impl RecordingManager {
     pub(crate) async fn stop_streams_and_force_flush(&mut self) -> RecordingStopOutcome {
         info!("🚀 Stopping recording streams with IMMEDIATE pipeline flush");
 
+        // Freeze timing and device names before stop clears pause and device state.
+        let mut metrics = self.get_metrics();
+
         // CRITICAL: Stop device monitor FIRST to prevent continuous WASAPI polling on Windows
         // This fixes the slow shutdown issue where device enumeration runs for 90+ seconds
         if let Some(ref mut monitor) = self.device_monitor {
@@ -417,6 +434,12 @@ impl RecordingManager {
 
         // CRITICAL: Full cleanup to release all Arc references and resources
         // This ensures microphone is released even if Drop is delayed
+        if self.stopped_metrics.is_none() {
+            // Include chunks and errors produced while the pipeline drained.
+            metrics.stats = self.state.get_stats();
+            metrics.had_fatal_error |= self.state.has_fatal_error();
+            self.stopped_metrics = Some(metrics);
+        }
         self.state.cleanup();
 
         RecordingStopOutcome { audio_error, transcript_error }
@@ -430,7 +453,7 @@ impl RecordingManager {
         debug!("Saving recording with transcript chunks");
 
         // Get actual recording duration from state
-        let recording_duration = self.state.get_active_recording_duration();
+        let recording_duration = self.get_active_recording_duration();
         info!("Recording duration from state: {:?}s", recording_duration);
 
         // Save the recording with actual duration
@@ -531,22 +554,35 @@ impl RecordingManager {
 
     /// Get recording statistics
     pub fn get_stats(&self) -> super::recording_state::RecordingStats {
-        self.state.get_stats()
+        self.get_metrics().stats
+    }
+
+    pub(crate) fn get_metrics(&self) -> RecordingMetrics {
+        self.stopped_metrics.clone().unwrap_or_else(|| RecordingMetrics {
+            duration: self.state.get_recording_duration(),
+            active_duration: self.state.get_active_recording_duration(),
+            pause_duration: self.state.get_total_pause_duration()
+                + self.state.get_current_pause_duration().unwrap_or(0.0),
+            stats: self.state.get_stats(),
+            had_fatal_error: self.state.has_fatal_error(),
+            microphone_name: self.state.get_microphone_device().map(|device| device.name.clone()),
+            system_name: self.state.get_system_device().map(|device| device.name.clone()),
+        })
     }
 
     /// Get recording duration
     pub fn get_recording_duration(&self) -> Option<f64> {
-        self.state.get_recording_duration()
+        self.get_metrics().duration
     }
 
     /// Get active recording duration (excluding pauses)
     pub fn get_active_recording_duration(&self) -> Option<f64> {
-        self.state.get_active_recording_duration()
+        self.get_metrics().active_duration
     }
 
     /// Get total pause duration
     pub fn get_total_pause_duration(&self) -> f64 {
-        self.state.get_total_pause_duration()
+        self.get_metrics().pause_duration
     }
 
     /// Get current pause duration if paused
@@ -712,6 +748,44 @@ mod wake_tests {
 #[cfg(test)]
 mod stop_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn stop_keeps_final_metrics_after_resource_cleanup() {
+        let mut manager = RecordingManager::new();
+        manager.state.start_recording().unwrap();
+        let microphone = Arc::new(AudioDevice::new(
+            "Test microphone".into(), super::super::devices::DeviceType::Input,
+        ));
+        let device = Arc::downgrade(&microphone);
+        manager.state.set_microphone_device(microphone);
+        let (sender, _receiver) = mpsc::unbounded_channel();
+        manager.state.set_audio_sender(sender);
+        manager.state.send_captured_chunk(AudioChunk {
+            data: vec![0.0], sample_rate: 48_000, timestamp: 0.0,
+            end_timestamp: None, chunk_id: 1,
+            device_type: super::super::recording_state::DeviceType::Microphone,
+            source_activity: None,
+        }).unwrap();
+        manager.state.pause_recording().unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        manager.stop_streams_and_force_flush().await;
+        let metrics = manager.get_metrics();
+        assert!(metrics.duration.unwrap() >= 0.02);
+        assert!(metrics.pause_duration >= 0.02);
+        assert!(metrics.active_duration.unwrap() < metrics.pause_duration);
+        assert_eq!(metrics.microphone_name.as_deref(), Some("Test microphone"));
+        assert_eq!(metrics.stats.chunks_processed, 1);
+        assert!(device.upgrade().is_none(), "metrics must not retain audio devices");
+        assert_eq!(manager.state.get_stats().chunks_processed, 0);
+        assert!(manager.state.get_recording_duration().is_none());
+        assert!(!manager.state.is_recording());
+        assert!(!manager.state.is_paused());
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        manager.stop_streams_and_force_flush().await;
+        assert_eq!(manager.get_recording_duration(), metrics.duration);
+        assert_eq!(manager.get_active_recording_duration(), metrics.active_duration);
+        assert_eq!(manager.get_total_pause_duration(), metrics.pause_duration);
+    }
 
     #[tokio::test]
     async fn final_flush_failure_reaches_the_caller_after_cleanup() {
