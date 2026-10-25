@@ -43,7 +43,7 @@ fn handle_menu_event<R: Runtime>(app: &AppHandle<R>, item_id: &str) {
         "settings" => {
             focus_main_window(app);
             if let Some(window) = app.get_webview_window("main") {
-                let _ = window.eval("window.location.assign('/settings')");
+                let _ = window.eval("window.dispatchEvent(new CustomEvent('open-settings-from-tray'))");
             }
         }
         "check_updates" => check_updates_handler(app),
@@ -101,8 +101,7 @@ fn toggle_recording_handler<R: Runtime>(app: &AppHandle<R>) {
 
             log::info!("Emitting start recording event from tray");
             if let Some(window) = app_clone.get_webview_window("main") {
-                let _ = window.eval("sessionStorage.setItem('autoStartRecording', 'true')"); // Set the flag to start recording automatically
-                let _ = window.eval("window.location.assign('/')");
+                let _ = window.eval("window.dispatchEvent(new CustomEvent('start-recording-from-tray'))");
             }
         }
     });
