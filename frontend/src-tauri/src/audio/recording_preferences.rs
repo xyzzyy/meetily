@@ -374,20 +374,11 @@ pub async fn get_audio_backend_info() -> Result<Vec<BackendInfo>, String> {
     {
         use crate::audio::capture::AudioCaptureBackend;
 
-        let backends = vec![
-            BackendInfo {
-                id: AudioCaptureBackend::ScreenCaptureKit.to_string(),
-                name: AudioCaptureBackend::ScreenCaptureKit.name().to_string(),
-                description: AudioCaptureBackend::ScreenCaptureKit
-                    .description()
-                    .to_string(),
-            },
-            BackendInfo {
-                id: AudioCaptureBackend::CoreAudio.to_string(),
-                name: AudioCaptureBackend::CoreAudio.name().to_string(),
-                description: AudioCaptureBackend::CoreAudio.description().to_string(),
-            },
-        ];
+        let backends = AudioCaptureBackend::available_backends().into_iter().map(|backend| BackendInfo {
+            id: backend.to_string(),
+            name: backend.name().to_string(),
+            description: backend.description().to_string(),
+        }).collect();
         Ok(backends)
     }
 
