@@ -116,6 +116,38 @@ async function settle() { for (let i = 0; i < 20; i++) await Promise.resolve(); 
   assert.ok(renameButton(settings.render(), 'Aaron'));
   assert.equal(settings.calls.length, 1);
 }
+// Another person's name is rejected, ignoring case and surrounding spaces.
+{
+  const settings = makeSettings({ samples: [], profiles: [andrew, { ...madior, name: '  Élodie  ' }] });
+  renameButton(settings.render(), andrew.name).props.onClick();
+  for (const name of ['Élodie', '  éLODIE \t']) {
+    nameInput(settings.render()).props.onChange({ target: { value: name } });
+    const tree = settings.render();
+    assert.equal(buttons(tree, 'Save')[0].props.disabled, true);
+    assert.equal(nameInput(tree).props['aria-invalid'], true);
+    assert.ok(text(nodes(tree).find(node => node.props?.role === 'alert')).includes('already uses this name'));
+    submitRename(settings);
+    await settle();
+    assert.equal(settings.calls.length, 0);
+    assert.equal(settings.states.get('profiles')[0].name, andrew.name);
+  }
+  nameInput(settings.render()).props.onChange({ target: { value: 'Andrew' } });
+  assert.equal(buttons(settings.render(), 'Save')[0].props.disabled, false);
+  assert.equal(nameInput(settings.render()).props['aria-invalid'], false);
+  submitRename(settings);
+  await settle();
+  assert.equal(settings.states.get('profiles').find(profile => profile.id === andrew.id).name, 'Andrew');
+}
+// A case-only change to the selected person's own name is allowed.
+{
+  const settings = makeSettings({ samples: [], profiles: [andrew, madior] });
+  renameButton(settings.render()).props.onClick();
+  nameInput(settings.render()).props.onChange({ target: { value: madior.name.toLowerCase() } });
+  assert.equal(buttons(settings.render(), 'Save')[0].props.disabled, false);
+  submitRename(settings);
+  await settle();
+  assert.equal(settings.calls.filter(call => call.command === 'update_speaker_profile').length, 1);
+}
 // Cancel and dialog dismissal discard edits. Reopening restores the saved name.
 {
   const settings = makeSettings({ samples: [] });

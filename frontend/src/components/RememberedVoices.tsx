@@ -83,9 +83,14 @@ export function RememberedVoices() {
     void loadSamples(profileId);
   };
 
+  const duplicateNameError = renamingProfile && profiles.some(profile =>
+    profile.id !== renamingProfile.id && profile.name.trim().toLowerCase() === newName.trim().toLowerCase())
+    ? 'A remembered voice already uses this name. Choose a different name.'
+    : null;
+
   const renameVoice = async () => {
     const name = newName.trim();
-    if (!renamingProfile || !name || busyKey !== null) return;
+    if (!renamingProfile || !name || duplicateNameError || busyKey !== null) return;
     setBusyKey(renamingProfile.id);
     setRenameError(null);
     try {
@@ -330,18 +335,27 @@ export function RememberedVoices() {
                 <Input
                   id="remembered-voice-name"
                   value={newName}
-                  onChange={event => setNewName(event.target.value)}
+                  onChange={event => {
+                    setNewName(event.target.value);
+                    setRenameError(null);
+                  }}
+                  aria-invalid={Boolean(renameError || duplicateNameError)}
+                  aria-describedby={renameError || duplicateNameError ? 'remembered-voice-name-error' : undefined}
                   disabled={busyKey !== null}
                   autoFocus
                   required
                 />
-                {renameError && <p role="alert" className="text-sm text-destructive">{renameError}</p>}
+                {(renameError || duplicateNameError) && (
+                  <p id="remembered-voice-name-error" role="alert" className="text-sm text-destructive">
+                    {renameError || duplicateNameError}
+                  </p>
+                )}
               </div>
               <DialogFooter>
                 <Button type="button" variant="outline" disabled={busyKey !== null} onClick={() => setRenamingProfile(null)}>
                   Cancel
                 </Button>
-                <Button type="submit" disabled={busyKey !== null || !newName.trim() || newName.trim() === renamingProfile?.name}>
+                <Button type="submit" disabled={busyKey !== null || Boolean(duplicateNameError) || !newName.trim() || newName.trim() === renamingProfile?.name}>
                   {busyKey === renamingProfile?.id ? 'Saving…' : 'Save'}
                 </Button>
               </DialogFooter>

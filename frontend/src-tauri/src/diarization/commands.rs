@@ -558,6 +558,7 @@ pub async fn update_speaker_profile(
     state: State<'_, AppState>,
     request: UpdateSpeakerProfileRequest,
 ) -> Result<(), String> {
+    let _processing = super::operations::try_processing_slot()?;
     let name = normalize_speaker_label(&request.name)?;
     SpeakerProfilesRepository::rename(state.speaker_store.pool(), &request.profile_id, &name)
         .await
