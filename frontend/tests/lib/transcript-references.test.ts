@@ -106,9 +106,12 @@ describe("ProseMirror transcript reference decorations", () => {
     expect(attrs.class).toContain("transcript-ref");
     expect(attrs["data-start"]).toBe("872");
     expect(attrs["data-end"]).toBe("918");
-    expect(attrs.role).toBe("button");
-    expect(attrs.tabindex).toBe("0");
-    expect(attrs["aria-label"]).toBe("Jump to transcript at [14:32-15:18]");
+    expect(attrs.title).toBe("Jump to transcript [14:32-15:18]");
+    // Inside contenteditable the span cannot take focus, so it must not claim to be a keyboard button,
+    // and its text must stay selectable for editing
+    expect(attrs.role).toBeUndefined();
+    expect(attrs.tabindex).toBeUndefined();
+    expect(attrs.class).not.toContain("select-none");
 
     // Verify document text is unmodified
     expect(doc.textBetween(0, doc.content.size)).toBe(
@@ -166,6 +169,75 @@ describe("ProseMirror transcript reference decorations", () => {
 
     expect(found[2].type.attrs["data-start"]).toBe("300");
     expect(found[2].type.attrs["data-end"]).toBe("300");
+  });
+
+  describe("incremental updates", () => {
+    const summarize = (set: { find: () => unknown[] } | undefined) =>
+      ((set?.find() ?? []) as InlineDecorationInstance[])
+        .map(d => `${d.from}-${d.to}:${d.type.attrs["data-start"]}-${d.type.attrs["data-end"]}`)
+        .sort();
+
+    const stateFor = (...paragraphs: string[]) =>
+      EditorState.create({
+        schema,
+        plugins: [TranscriptReferencePlugin],
+        doc: schema.node("doc", null, paragraphs.map(text => schema.node("paragraph", null, text ? [schema.text(text)] : []))),
+      });
+
+    // The incremental result must always equal a full rescan of the new document
+    const expectMatchesFullScan = (state: EditorState) => {
+      expect(summarize(transcriptRefPluginKey.getState(state))).toEqual(
+        summarize(createTranscriptRefDecorations(state.doc))
+      );
+    };
+
+    test("typing inside a reference removes its decoration", () => {
+      let state = stateFor("Item [10:00-11:00].");
+      state = state.apply(state.tr.insertText("x", 7)); // "[1x0:00-11:00]"
+      expect(summarize(transcriptRefPluginKey.getState(state))).toEqual([]);
+      expectMatchesFullScan(state);
+    });
+
+    test("finishing a reference by typing adds its decoration", () => {
+      let state = stateFor("Item [10:0");
+      state = state.apply(state.tr.insertText("0]", state.doc.content.size - 1));
+      expect(summarize(transcriptRefPluginKey.getState(state))).toEqual(["6-13:600-600"]);
+      expectMatchesFullScan(state);
+    });
+
+    test("splitting and rejoining a paragraph through a reference", () => {
+      let state = stateFor("Item [10:00] end.");
+      state = state.apply(state.tr.split(9)); // "Item [10:" | "00] end."
+      expect(summarize(transcriptRefPluginKey.getState(state))).toEqual([]);
+      expectMatchesFullScan(state);
+
+      state = state.apply(state.tr.join(10)); // join the two paragraphs back
+      expect(summarize(transcriptRefPluginKey.getState(state))).toEqual(["6-13:600-600"]);
+      expectMatchesFullScan(state);
+    });
+
+    test("multi-step transactions across blocks match a full rescan", () => {
+      let state = stateFor("A [01:00].", "B [02:00-03:00].", "C plain.");
+      const tr = state.tr;
+      tr.insertText(" [04:00]", tr.doc.content.size - 1); // add a reference to the last block
+      tr.delete(15, 16); // remove the "[" of "[02:00-03:00]" in the second block
+      state = state.apply(tr);
+      expectMatchesFullScan(state);
+      expect(summarize(transcriptRefPluginKey.getState(state)).length).toBe(2);
+    });
+
+    test("leaves decorations in untouched blocks as they were", () => {
+      let state = stateFor("A [01:00].", "B plain.");
+      const before = (transcriptRefPluginKey.getState(state)?.find() ?? []) as unknown as InlineDecorationInstance[];
+
+      state = state.apply(state.tr.insertText("more ", state.doc.content.size - 1));
+      const after = (transcriptRefPluginKey.getState(state)?.find() ?? []) as unknown as InlineDecorationInstance[];
+
+      expect(after.length).toBe(1);
+      // Same decoration spec object: the first block was mapped, not rebuilt
+      expect(after[0].type).toBe(before[0].type);
+      expectMatchesFullScan(state);
+    });
   });
 });
 

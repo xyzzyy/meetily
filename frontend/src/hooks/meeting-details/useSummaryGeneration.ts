@@ -434,10 +434,7 @@ export function useSummaryGeneration({
   }, []);
 
   const buildSummaryTranscriptPayload = useCallback((allTranscripts: Transcript[]) => {
-    const formatTime = (seconds: number | undefined, fallbackTimestamp: string): string => {
-      if (seconds === undefined) {
-        return fallbackTimestamp;
-      }
+    const formatTime = (seconds: number): string => {
       const totalSecs = Math.floor(seconds);
       const mins = Math.floor(totalSecs / 60);
       const secs = totalSecs % 60;
@@ -445,14 +442,16 @@ export function useSummaryGeneration({
     };
 
     const formattedLines = allTranscripts.map(t => {
-      const start = formatTime(t.audio_start_time, t.timestamp.replace(/^\[|\]$/g, ''));
-      const end = formatTime(t.audio_end_time, start);
-      const timestamp = `[${start}–${end}]`;
+      // Legacy rows have no recording-relative time (null from the database). Omit the prefix so the
+      // summary cannot cite a wall-clock or zero time as a transcript reference.
+      const start = Number.isFinite(t.audio_start_time) ? t.audio_start_time as number : null;
+      const end = Number.isFinite(t.audio_end_time) ? t.audio_end_time as number : start;
+      const timestamp = start === null ? '' : `[${formatTime(start)}–${formatTime(end as number)}] `;
       const canTrustSpeaker = t.diarization_status === 'final' || t.diarization_method === 'manual';
       const speaker = canTrustSpeaker
         ? (t.is_overlap ? 'Multiple speakers' : t.speaker_label?.trim())
         : undefined;
-      return `${timestamp}${speaker ? ` ${speaker}:` : ''} ${t.text}`;
+      return `${timestamp}${speaker ? `${speaker}: ` : ''}${t.text}`;
     });
 
     return {

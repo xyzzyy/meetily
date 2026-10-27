@@ -1,5 +1,5 @@
 import { Extension } from '@tiptap/react';
-import { Plugin, PluginKey } from '@tiptap/pm/state';
+import { Plugin, PluginKey, type Transaction } from '@tiptap/pm/state';
 import { Decoration, DecorationSet } from '@tiptap/pm/view';
 import type { Node as ProseMirrorNode } from '@tiptap/pm/model';
 
@@ -30,34 +30,67 @@ export function parseTimestampRange(match: RegExpExecArray): ParsedTimestampRang
   return { startTime, endTime };
 }
 
-export function createTranscriptRefDecorations(doc: ProseMirrorNode): DecorationSet {
+const REF_CLASS =
+  'transcript-ref inline text-xs font-semibold text-blue-600 dark:text-blue-400 bg-blue-50 dark:bg-blue-950/40 border border-blue-200 dark:border-blue-800 rounded px-1 mx-0.5 cursor-pointer hover:bg-blue-100 dark:hover:bg-blue-900/60 hover:text-blue-800 dark:hover:text-blue-300 transition-colors';
+
+/** Decorations for every reference inside `node`, whose content starts at absolute position `contentStart`. */
+function decorationsWithin(node: ProseMirrorNode, contentStart: number): Decoration[] {
   const decorations: Decoration[] = [];
 
-  doc.descendants((node, pos) => {
-    if (node.isText && node.text) {
-      TIMESTAMP_REF_REGEX.lastIndex = 0;
-      let match: RegExpExecArray | null;
-      while ((match = TIMESTAMP_REF_REGEX.exec(node.text)) !== null) {
-        const from = pos + match.index;
-        const to = from + match[0].length;
-        const { startTime, endTime } = parseTimestampRange(match);
+  node.descendants((child, pos) => {
+    if (!child.isText || !child.text) return;
+    TIMESTAMP_REF_REGEX.lastIndex = 0;
+    let match: RegExpExecArray | null;
+    while ((match = TIMESTAMP_REF_REGEX.exec(child.text)) !== null) {
+      const from = contentStart + pos + match.index;
+      const to = from + match[0].length;
+      const { startTime, endTime } = parseTimestampRange(match);
 
-        decorations.push(
-          Decoration.inline(from, to, {
-            class: 'transcript-ref inline text-xs font-semibold text-blue-600 dark:text-blue-400 bg-blue-50 dark:bg-blue-950/40 border border-blue-200 dark:border-blue-800 rounded px-1 mx-0.5 cursor-pointer select-none hover:bg-blue-100 dark:hover:bg-blue-900/60 hover:text-blue-800 dark:hover:text-blue-300 transition-colors',
-            'data-start': String(startTime),
-            'data-end': String(endTime),
-            role: 'button',
-            tabindex: '0',
-            title: `Jump to transcript ${match[0]}`,
-            'aria-label': `Jump to transcript at ${match[0]}`,
-          })
-        );
-      }
+      decorations.push(
+        Decoration.inline(from, to, {
+          class: REF_CLASS,
+          'data-start': String(startTime),
+          'data-end': String(endTime),
+          title: `Jump to transcript ${match[0]}`,
+        })
+      );
     }
   });
 
-  return DecorationSet.create(doc, decorations);
+  return decorations;
+}
+
+export function createTranscriptRefDecorations(doc: ProseMirrorNode): DecorationSet {
+  return DecorationSet.create(doc, decorationsWithin(doc, 0));
+}
+
+/**
+ * Maps the previous decorations through `tr` and rescans only the textblocks the transaction
+ * changed, so typing in a long summary does not rescan the whole document on every keystroke.
+ */
+export function updateTranscriptRefDecorations(tr: Transaction, oldSet: DecorationSet): DecorationSet {
+  if (!tr.docChanged) return oldSet;
+
+  const { doc, mapping } = tr;
+  const size = doc.content.size;
+  let set = oldSet.map(mapping, doc);
+
+  mapping.maps.forEach((stepMap, i) => {
+    // Changed ranges are reported in this step's output; map them to the final document
+    const rest = mapping.slice(i + 1);
+    stepMap.forEach((_oldStart, _oldEnd, newStart, newEnd) => {
+      const from = Math.min(Math.max(rest.map(newStart, -1), 0), size);
+      const to = Math.min(Math.max(rest.map(newEnd, 1), from), size);
+      doc.nodesBetween(from, to, (node, pos) => {
+        if (!node.isTextblock) return true;
+        set = set.remove(set.find(pos, pos + node.nodeSize));
+        set = set.add(doc, decorationsWithin(node, pos + 1));
+        return false;
+      });
+    });
+  });
+
+  return set;
 }
 
 export const transcriptRefPluginKey = new PluginKey<DecorationSet>('transcriptRefs');
@@ -69,7 +102,7 @@ export const TranscriptReferencePlugin = new Plugin<DecorationSet>({
       return createTranscriptRefDecorations(doc);
     },
     apply(tr, oldSet) {
-      return tr.docChanged ? createTranscriptRefDecorations(tr.doc) : oldSet.map(tr.mapping, tr.doc);
+      return updateTranscriptRefDecorations(tr, oldSet);
     },
   },
   props: {

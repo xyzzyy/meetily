@@ -129,7 +129,7 @@ export const BlockNoteSummaryView = forwardRef<BlockNoteSummaryViewRef, BlockNot
   }, [format, data?.summary_json]);
 
 
-  // Resolve a click/keyboard target to a valid transcript reference, or null
+  // Resolve a click target to a valid transcript reference, or null
   const resolveTranscriptRef = useCallback((eventTarget: EventTarget) => {
     const target = (eventTarget as HTMLElement).closest('.transcript-ref');
     if (!(target instanceof HTMLElement) || !containerRef.current?.contains(target)) return null;
@@ -143,14 +143,6 @@ export const BlockNoteSummaryView = forwardRef<BlockNoteSummaryViewRef, BlockNot
   const handleContainerClick = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
     // Dragging a text selection across a reference must not navigate away
     if (window.getSelection()?.isCollapsed === false) return;
-    const ref = resolveTranscriptRef(e.target);
-    if (!ref) return;
-    e.preventDefault();
-    onTranscriptRefClick?.(ref.startTime, ref.endTime);
-  }, [onTranscriptRefClick, resolveTranscriptRef]);
-
-  const handleContainerKeyDown = useCallback((e: React.KeyboardEvent<HTMLDivElement>) => {
-    if (e.key !== 'Enter' && e.key !== ' ') return;
     const ref = resolveTranscriptRef(e.target);
     if (!ref) return;
     e.preventDefault();
@@ -275,7 +267,7 @@ export const BlockNoteSummaryView = forwardRef<BlockNoteSummaryViewRef, BlockNot
   if (format === 'blocknote') {
     console.log('🎨 Rendering BLOCKNOTE format (direct)');
     return (
-      <div ref={containerRef} onClick={handleContainerClick} onKeyDown={handleContainerKeyDown} className="flex flex-col w-full">
+      <div ref={containerRef} onClick={handleContainerClick} className="flex flex-col w-full">
         <div className="w-full">
           <Editor
             initialContent={data.summary_json}
@@ -294,7 +286,7 @@ export const BlockNoteSummaryView = forwardRef<BlockNoteSummaryViewRef, BlockNot
   if (format === 'markdown') {
     console.log('🎨 Rendering MARKDOWN format (parsed to BlockNote)');
     return (
-      <div ref={containerRef} onClick={handleContainerClick} onKeyDown={handleContainerKeyDown} className="flex flex-col w-full">
+      <div ref={containerRef} onClick={handleContainerClick} className="flex flex-col w-full">
         <div className="w-full">
           <BlockNoteView
             editor={editor}
