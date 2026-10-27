@@ -25,6 +25,21 @@ describe('revealing transcript references', () => {
     expect(getTranscriptRevealOffset({ ...viewport, targetTop: 80, targetHeight: 400 })).toBe(500);
   });
 
+  test('reveals the beginning of an oversized row below the pane', () => {
+    expect(getTranscriptRevealOffset({ ...viewport, targetTop: 450, targetHeight: 500 })).toBe(850);
+  });
+
+  test('reveals the beginning of an oversized row above the pane', () => {
+    expect(getTranscriptRevealOffset({ ...viewport, scrollTop: 1000, targetTop: -500, targetHeight: 500 })).toBe(400);
+  });
+
+  test.each([
+    { targetTop: -100, targetHeight: 400 },
+    { targetTop: 250, targetHeight: 400 },
+  ])('keeps an oversized row in place when part of it is visible: %j', (row) => {
+    expect(getTranscriptRevealOffset({ ...viewport, ...row })).toBe(500);
+  });
+
   test('does not request a negative scroll offset', () => {
     expect(getTranscriptRevealOffset({ ...viewport, scrollTop: 10, targetTop: 60, targetHeight: 80 })).toBe(0);
   });

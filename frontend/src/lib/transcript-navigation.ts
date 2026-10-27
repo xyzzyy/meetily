@@ -3,7 +3,7 @@ export interface NavigableSegment {
   endTime?: number; // audio_end_time in seconds
 }
 
-/** Reveal an off-screen row with the smallest scroll inside the transcript pane. */
+/** Reveal off-screen rows; keep visible oversized rows in place and reveal their start otherwise. */
 export function getTranscriptRevealOffset({
   scrollTop,
   viewportTop,
@@ -19,8 +19,10 @@ export function getTranscriptRevealOffset({
 }): number {
   const viewportBottom = viewportTop + viewportHeight;
   const targetBottom = targetTop + targetHeight;
-  // A row that covers the viewport already shows as much as it can.
-  if (targetTop <= viewportTop && targetBottom >= viewportBottom) return scrollTop;
+  if (targetHeight > viewportHeight) {
+    const partlyVisible = targetTop < viewportBottom && targetBottom > viewportTop;
+    return partlyVisible ? scrollTop : Math.max(0, scrollTop + targetTop - viewportTop);
+  }
   if (targetTop < viewportTop) return Math.max(0, scrollTop + targetTop - viewportTop);
   if (targetBottom > viewportBottom) return scrollTop + targetBottom - viewportBottom;
   return scrollTop;

@@ -957,5 +957,6 @@ mod tests {
         assert!(prompt.contains("In Reference Transcript Segment, include the supporting transcript words"));
         assert!(prompt.contains("In Segment Time stamp, include one transcript timestamp range"));
         assert!(prompt.contains("never replace the supporting text with a timestamp"));
+        assert!(template.to_section_instructions().contains("Do not put timestamps in this column."));
     }
 }

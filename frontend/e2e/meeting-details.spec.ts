@@ -11,11 +11,12 @@ const contentTypes: Record<string, string> = {
 };
 
 async function openMeeting(page: Page, {
-  format = 'markdown', segmentCount = 1, summary = summaryText,
+  format = 'markdown', segmentCount = 1, summary = summaryText, longRowIndex,
 }: {
   format?: 'markdown' | 'blocknote' | 'empty';
   segmentCount?: number;
   summary?: string;
+  longRowIndex?: number;
 } = {}) {
     const errors: string[] = [];
     page.on('pageerror', error => errors.push(error.message));
@@ -26,7 +27,7 @@ async function openMeeting(page: Page, {
 
     // Exercise the real production chunks. Only the desktop IPC boundary is
     // replaced; no React components, editors, or extensions are mocked.
-    await page.addInitScript(({ format, transcriptText, summaryText, segmentCount }) => {
+    await page.addInitScript(({ format, transcriptText, summaryText, segmentCount, longRowIndex }) => {
       let callbackId = 0;
       const callbacks = new Map<number, unknown>();
       const store = new Map<string, unknown>([
@@ -82,7 +83,8 @@ async function openMeeting(page: Page, {
                     const number = offset + index;
                     return {
                       id: `transcript-${number + 1}`,
-                      text: number === 0 ? transcriptText : `Transcript row ${number + 1}. ${'More meeting detail. '.repeat(number % 3)}`,
+                      text: number === longRowIndex ? 'A long supporting transcript passage. '.repeat(180)
+                        : number === 0 ? transcriptText : `Transcript row ${number + 1}. ${'More meeting detail. '.repeat(number % 3)}`,
                       timestamp: '10:00:00', audio_start_time: number * 10,
                       audio_end_time: number * 10 + 8, confidence: 0.98,
                       speaker_label: 'Speaker 1',
@@ -120,7 +122,7 @@ async function openMeeting(page: Page, {
           },
         },
       });
-    }, { format, transcriptText, summaryText: summary, segmentCount });
+    }, { format, transcriptText, summaryText: summary, segmentCount, longRowIndex });
 
     // Serve the static export through request interception, with no dev server.
     await page.route('https://meetily.test/**', async route => {
@@ -233,3 +235,26 @@ test('action item tables keep supporting text separate from the timestamp', asyn
   await expect(page.locator('#segment-transcript-1')).toHaveAttribute('data-highlighted', 'true');
   expect(errors).toEqual([]);
 });
+
+for (const { segmentCount, longRowIndex, timestamp } of [
+  { segmentCount: 4, longRowIndex: 3, timestamp: '00:30' },
+  { segmentCount: 130, longRowIndex: 120, timestamp: '20:00' },
+]) {
+  test(`long reference rows reveal their timestamp (${segmentCount} rows)`, async ({ page }) => {
+    await page.setViewportSize({ width: 1280, height: 400 });
+    const errors = await openMeeting(page, {
+      segmentCount, longRowIndex, summary: `Long discussion [${timestamp}]`,
+    });
+    const target = page.locator(`#segment-transcript-${longRowIndex + 1}`);
+    const label = target.getByText(`[${timestamp}]`, { exact: true });
+    await expect(label).not.toBeInViewport();
+    await page.locator('.transcript-ref').click();
+    await expect(label).toBeInViewport({ ratio: 1 });
+    const container = page.locator('[data-transcript-scroll-container]');
+    await container.evaluate(element => { element.scrollTop += 40; });
+    const position = await transcriptPosition(page, `segment-transcript-${longRowIndex + 1}`);
+    await page.locator('.transcript-ref').click();
+    expectSamePosition(await transcriptPosition(page, `segment-transcript-${longRowIndex + 1}`), position);
+    expect(errors).toEqual([]);
+  });
+}

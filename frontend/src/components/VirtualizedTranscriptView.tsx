@@ -392,8 +392,8 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
             });
             if (top !== container.scrollTop) container.scrollTo({ top, behavior: 'instant' });
         } else if (useVirtualization) {
-            // Unmounted rows need the virtualizer to load and measure them first.
-            virtualizer.scrollToIndex(targetIndex, { align: 'auto' });
+            // The height is unknown until mounting. Keep the timestamp visible even for long rows.
+            virtualizer.scrollToIndex(targetIndex, { align: 'start' });
         }
     }, [scrollToTime, scrollToKey, segments, hasMore, isLoadingMore, onLoadMore, useVirtualization, virtualizer, loadRecheck]);
 
