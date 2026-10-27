@@ -7,6 +7,13 @@ use std::path::PathBuf;
 
 use super::ffmpeg::find_ffmpeg_path;
 
+/// One `file` line for ffmpeg's concat list. A single quote in the path (for
+/// example a meeting called "John's Standup") must be escaped or ffmpeg cannot
+/// parse the list and the recording never merges.
+fn concat_list_line(path: &std::path::Path) -> String {
+    format!("file '{}'\n", path.display().to_string().replace('\'', "'\\''"))
+}
+
 /// Audio data without device type (we only store mixed audio)
 #[derive(Clone)]
 struct AudioData {
@@ -193,7 +200,7 @@ impl IncrementalAudioSaver {
 
             // Use absolute path for FFmpeg (required for safe mode)
             let abs_path = checkpoint_path.canonicalize()?;
-            list_content.push_str(&format!("file '{}'\n", abs_path.display()));
+            list_content.push_str(&concat_list_line(&abs_path));
         }
 
         std::fs::write(&list_file, list_content)?;
@@ -365,7 +372,7 @@ pub async fn recover_audio_from_checkpoints(
         let path = checkpoint
             .canonicalize()
             .map_err(|e| format!("Failed to canonicalize path: {}", e))?;
-        concat_content.push_str(&format!("file '{}'\n", path.display()));
+        concat_content.push_str(&concat_list_line(&path));
     }
 
     std::fs::write(&concat_file_path, concat_content)
@@ -488,6 +495,37 @@ mod tests {
     use super::super::recording_state::DeviceType;
     use super::*;
     use tempfile::tempdir;
+
+    #[test]
+    fn concat_list_escapes_single_quotes_in_paths() {
+        let line = concat_list_line(std::path::Path::new("/meetings/John's Standup/chunk.mp4"));
+        assert_eq!(line, "file '/meetings/John'\\''s Standup/chunk.mp4'\n");
+        assert_eq!(
+            concat_list_line(std::path::Path::new("/meetings/plain/chunk.mp4")),
+            "file '/meetings/plain/chunk.mp4'\n"
+        );
+    }
+
+    /// Runs the shipped recovery path, so a change to how it builds the concat
+    /// list is caught. Fails rather than skips when ffmpeg is missing.
+    #[tokio::test]
+    async fn recovery_merges_checkpoints_in_a_folder_with_an_apostrophe() {
+        let temporary = tempdir().unwrap();
+        let meeting = temporary.path().join("John's Standup");
+        let checkpoints = meeting.join(".checkpoints");
+        std::fs::create_dir_all(&checkpoints).unwrap();
+        for index in 0..2 {
+            encode_single_audio(bytemuck::cast_slice(&vec![0.25f32; 48000]), 48000, 1,
+                &checkpoints.join(format!("audio_chunk_{index:03}.mp4"))).unwrap();
+        }
+
+        let folder = meeting.to_string_lossy().to_string();
+        let recovered = recover_audio_from_checkpoints(folder, 48000).await.unwrap();
+        assert_eq!(recovered.status, "success", "{}", recovered.message);
+        assert_eq!(recovered.chunk_count, 2);
+        let merged = super::super::decoder::decode_audio_file(&meeting.join("audio.mp4")).unwrap();
+        assert!((merged.duration_seconds - 2.0).abs() < 0.1, "{}", merged.duration_seconds);
+    }
 
     #[test]
     fn published_checkpoints_exclude_scratch_files_and_sort_by_sequence() {
