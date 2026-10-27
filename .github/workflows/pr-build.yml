@@ -71,6 +71,20 @@ jobs:
       - name: Build frontend for production
         working-directory: frontend
         run: pnpm build
+      - name: Install release test browsers
+        working-directory: frontend
+        run: pnpm exec playwright install --with-deps chromium webkit
+      - name: Open saved meetings in the production build
+        working-directory: frontend
+        run: pnpm test:release
+      - name: Save release test failure details
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-release-test-failures
+          path: frontend/test-results
+          if-no-files-found: ignore
+          retention-days: 3
       - name: Save frontend output for the native build
         uses: actions/upload-artifact@v4
         with:
