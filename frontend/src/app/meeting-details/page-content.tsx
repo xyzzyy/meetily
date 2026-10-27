@@ -63,7 +63,7 @@ export default function PageContent({
   const [scrollToTime, setScrollToTime] = useState<number | undefined>(undefined);
   const [scrollToKey, setScrollToKey] = useState(0);
 
-  // Handle transcript reference click - switch to transcript view if on mobile/small screen and scroll
+  // Transcript reference clicked in the summary: show the transcript tab and jump to the cited time
   const handleTranscriptRefClick = useCallback((startTime: number, _endTime: number) => {
     manuallySelectedTabMeetingIdsRef.current.add(meeting.id);
     setScrollToTime(startTime);

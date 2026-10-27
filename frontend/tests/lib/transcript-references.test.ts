@@ -8,13 +8,7 @@ import {
   transcriptRefPluginKey,
   TranscriptReferencePlugin,
 } from "../../src/lib/transcript-reference-plugin";
-import {
-  createHighlightTimer,
-  findTargetSegmentIndex,
-  startLoadMoreRetry,
-  targetMayBeUnloaded,
-  type LoadMoreState,
-} from "../../src/lib/transcript-navigation";
+import { findTargetSegmentIndex, targetMayBeUnloaded } from "../../src/lib/transcript-navigation";
 
 interface InlineDecorationAttrs {
   class?: string;
@@ -241,8 +235,6 @@ describe("ProseMirror transcript reference decorations", () => {
   });
 });
 
-const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
-
 describe("findTargetSegmentIndex", () => {
   const segments = [
     { timestamp: 0, endTime: 10 },
@@ -295,164 +287,5 @@ describe("targetMayBeUnloaded", () => {
   test("tolerates segments without an end time and an empty list", () => {
     expect(targetMayBeUnloaded([{ timestamp: 50 }], 50)).toBe(true);
     expect(targetMayBeUnloaded([], 10)).toBe(false);
-  });
-});
-
-describe("startLoadMoreRetry", () => {
-  const options = { maxRetries: 3, delayMs: 1 };
-
-  test("keeps requesting pages until no more are available", async () => {
-    let calls = 0;
-    const state: LoadMoreState = { hasMore: true, isLoadingMore: false, onLoadMore: () => { calls++; } };
-    startLoadMoreRetry({ ...options, maxRetries: 100, getState: () => state, onGiveUp: () => { throw new Error("gave up"); } });
-
-    await sleep(20);
-    expect(calls).toBeGreaterThan(1);
-
-    state.hasMore = false;
-    await sleep(10);
-    const callsAfterStop = calls;
-    await sleep(20);
-    expect(calls).toBe(callsAfterStop);
-  });
-
-  test("skips the request while a page is already loading", async () => {
-    let calls = 0;
-    const state: LoadMoreState = { hasMore: true, isLoadingMore: true, onLoadMore: () => { calls++; } };
-    const cancel = startLoadMoreRetry({ ...options, maxRetries: 100, getState: () => state, onGiveUp: () => {} });
-
-    await sleep(20);
-    cancel();
-    expect(calls).toBe(0);
-  });
-
-  test("an in-flight request does not spend the retry budget", async () => {
-    let calls = 0;
-    let gaveUp = 0;
-    const state: LoadMoreState = { hasMore: true, isLoadingMore: true, onLoadMore: () => { calls++; } };
-    const cancel = startLoadMoreRetry({ ...options, getState: () => state, onGiveUp: () => { gaveUp++; } });
-
-    await sleep(30); // many ticks while loading; maxRetries is only 3
-    expect(gaveUp).toBe(0);
-
-    state.isLoadingMore = false;
-    await sleep(3);
-    cancel();
-    expect(calls).toBeGreaterThan(0);
-    expect(gaveUp).toBe(0);
-  });
-
-  test("gives up when a single request stalls past maxStalledTicks", async () => {
-    let calls = 0;
-    let gaveUp = 0;
-    const state: LoadMoreState = { hasMore: true, isLoadingMore: true, onLoadMore: () => { calls++; } };
-    startLoadMoreRetry({ ...options, maxStalledTicks: 5, getState: () => state, onGiveUp: () => { gaveUp++; } });
-
-    await sleep(40);
-    expect(gaveUp).toBe(1);
-    expect(calls).toBe(0);
-  });
-
-  test("reads the latest state on every attempt", async () => {
-    const seen: string[] = [];
-    const state: LoadMoreState = { hasMore: true, isLoadingMore: false, onLoadMore: () => { seen.push("old"); } };
-    const cancel = startLoadMoreRetry({ ...options, maxRetries: 100, getState: () => state, onGiveUp: () => {} });
-
-    await sleep(10);
-    state.onLoadMore = () => { seen.push("new"); };
-    await sleep(15);
-    cancel();
-    expect(seen).toContain("new");
-  });
-
-  test("gives up after maxRetries when pages never arrive", async () => {
-    let calls = 0;
-    let gaveUp = 0;
-    const state: LoadMoreState = { hasMore: true, isLoadingMore: false, onLoadMore: () => { calls++; } };
-    startLoadMoreRetry({ ...options, getState: () => state, onGiveUp: () => { gaveUp++; } });
-
-    await sleep(50);
-    expect(gaveUp).toBe(1);
-    expect(calls).toBe(3);
-  });
-
-  test("counts attempts across restarts when given a shared counter", async () => {
-    let calls = 0;
-    let gaveUp = 0;
-    const state: LoadMoreState = { hasMore: true, isLoadingMore: false, onLoadMore: () => { calls++; } };
-    const attempts = { count: 0 };
-    const start = () => startLoadMoreRetry({ ...options, attempts, getState: () => state, onGiveUp: () => { gaveUp++; } });
-
-    // Two retry chains interrupted by effect re-runs: each is cancelled after two attempts
-    for (let i = 0; i < 2; i++) {
-      const cancel = start();
-      await sleep(2);
-      cancel();
-    }
-    const spent = attempts.count;
-    expect(spent).toBeGreaterThan(0);
-
-    start();
-    await sleep(40);
-    expect(gaveUp).toBe(1);
-    expect(attempts.count).toBe(options.maxRetries + 1);
-    expect(calls).toBeLessThan(options.maxRetries + 1);
-  });
-
-  test("cancel stops further attempts", async () => {
-    let calls = 0;
-    const state: LoadMoreState = { hasMore: true, isLoadingMore: false, onLoadMore: () => { calls++; } };
-    const cancel = startLoadMoreRetry({ ...options, maxRetries: 100, getState: () => state, onGiveUp: () => {} });
-
-    cancel();
-    await sleep(20);
-    expect(calls).toBe(0);
-  });
-});
-
-describe("createHighlightTimer", () => {
-  test("highlights a segment and clears it after the duration", async () => {
-    const history: Array<string | null> = [];
-    const timer = createHighlightTimer(id => history.push(id), 5);
-
-    timer.show("seg-42");
-    expect(history).toEqual(["seg-42"]);
-
-    await sleep(20);
-    expect(history).toEqual(["seg-42", null]);
-  });
-
-  test("showing a new segment restarts the timer instead of clearing early", async () => {
-    const history: Array<string | null> = [];
-    const timer = createHighlightTimer(id => history.push(id), 30);
-
-    timer.show("a");
-    await sleep(20);
-    timer.show("b");
-    await sleep(20); // past a's original expiry, before b's
-    expect(history).toEqual(["a", "b"]);
-
-    await sleep(30);
-    expect(history).toEqual(["a", "b", null]);
-  });
-
-  test("clear removes the highlight and cancels the pending expiry", async () => {
-    const history: Array<string | null> = [];
-    const timer = createHighlightTimer(id => history.push(id), 5);
-
-    timer.show("a");
-    timer.clear();
-    await sleep(20);
-    expect(history).toEqual(["a", null]);
-  });
-
-  test("dispose cancels the timer without updating state", async () => {
-    const history: Array<string | null> = [];
-    const timer = createHighlightTimer(id => history.push(id), 5);
-
-    timer.show("a");
-    timer.dispose();
-    await sleep(20);
-    expect(history).toEqual(["a"]);
   });
 });

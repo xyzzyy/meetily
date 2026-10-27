@@ -11,7 +11,7 @@ import { RecordingStatusBar } from "./RecordingStatusBar";
 import { motion, AnimatePresence } from "framer-motion";
 import { TranscriptSegmentData } from "@/types";
 import type { DiarizationStatus } from "@/types/diarization";
-import { createHighlightTimer, findTargetSegmentIndex, startLoadMoreRetry, targetMayBeUnloaded } from "@/lib/transcript-navigation";
+import { findTargetSegmentIndex, targetMayBeUnloaded } from "@/lib/transcript-navigation";
 
 export interface VirtualizedTranscriptViewProps {
     /** Transcript segments to display */
@@ -47,8 +47,8 @@ export interface VirtualizedTranscriptViewProps {
 
 // Threshold for enabling virtualization (below this, use simple rendering)
 const VIRTUALIZATION_THRESHOLD = 10;
-// Max 120ms retries (~6s) while paging in the transcript for a pending reference jump
-const MAX_LOAD_MORE_RETRIES = 50;
+// Page requests a reference jump may make without the transcript growing before it settles
+const MAX_JUMP_LOAD_ATTEMPTS = 10;
 
 // Helper function to format seconds as recording-relative time [MM:SS]
 function formatRecordingTime(seconds: number | undefined): string {
@@ -324,117 +324,61 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
     // Use simple rendering for small lists, virtualization for large lists
     const useVirtualization = segments.length >= VIRTUALIZATION_THRESHOLD;
 
-    // Scroll to specific segment when scrollToTime changes
+    // Jump to a transcript reference when scrollToKey changes, paging in segments if needed
     const lastHandledKeyRef = useRef(0);
-    const pendingScrollRef = useRef<{ key: number; time: number } | null>(null);
-    const [highlightedSegmentId, setHighlightedSegmentId] = useState<string | null>(null);
-    const highlightRef = useRef<ReturnType<typeof createHighlightTimer> | null>(null);
-    if (!highlightRef.current) {
-        highlightRef.current = createHighlightTimer(setHighlightedSegmentId, 2500);
-    }
-    const cancelLoadMoreRetryRef = useRef<(() => void) | null>(null);
-    // Latest pagination state, so the retry timer never acts on a stale closure
-    const paginationRef = useRef({ hasMore, isLoadingMore, onLoadMore });
-    // Declared before the jump effect so it runs first on each commit; writing during render could leak uncommitted values
+    const pendingKeyRef = useRef(0);
+    const loadAttemptsRef = useRef({ key: 0, loaded: 0, count: 0 });
+    const [loadRecheck, setLoadRecheck] = useState(0);
+    const [highlight, setHighlight] = useState<{ id: string; key: number } | null>(null);
+    const highlightedSegmentId = highlight?.id ?? null;
+
     useEffect(() => {
-        paginationRef.current = { hasMore, isLoadingMore, onLoadMore };
-    }, [hasMore, isLoadingMore, onLoadMore]);
-    // Request key whose pagination retries were exhausted; jump to the nearest loaded segment instead
-    const gaveUpKeyRef = useRef(0);
-    // Page requests made for the pending jump; survives effect re-runs so the cap counts across them.
-    // Reset when the request changes or the transcript grows (progress).
-    const jumpAttemptsRef = useRef({ key: 0, loaded: 0, count: 0 });
-    const [retryExhaustedTick, setRetryExhaustedTick] = useState(0);
+        if (!highlight) return;
+        const timer = setTimeout(() => setHighlight(null), 2500);
+        return () => clearTimeout(timer);
+    }, [highlight]);
 
-    const cancelLoadMoreRetry = useCallback(() => {
-        cancelLoadMoreRetryRef.current?.();
-        cancelLoadMoreRetryRef.current = null;
-    }, []);
-
-    // Clean up timers on unmount
     useEffect(() => {
-        const highlight = highlightRef.current;
-        return () => {
-            highlight?.dispose();
-            cancelLoadMoreRetry();
-        };
-    }, [cancelLoadMoreRetry]);
-
-    // Scroll to specific segment when scrollToKey changes or pending load arrives
-    useEffect(() => {
-        if (scrollToTime === undefined || scrollToKey === undefined || scrollToKey === 0) return;
-
+        if (scrollToTime === undefined || !scrollToKey) return;
         if (segments.length === 0) {
-            // Transcript was reset (e.g. meeting switched): drop any in-flight jump
-            pendingScrollRef.current = null;
-            cancelLoadMoreRetry();
+            // Transcript was reset: drop any in-flight jump
+            pendingKeyRef.current = 0;
             return;
         }
+        if (scrollToKey === lastHandledKeyRef.current && scrollToKey !== pendingKeyRef.current) return;
+        lastHandledKeyRef.current = scrollToKey;
 
-        const isNewRequest = scrollToKey !== lastHandledKeyRef.current;
-        const isPending = pendingScrollRef.current?.key === scrollToKey;
-
-        if (!isNewRequest && !isPending) return;
-
-        if (isNewRequest) {
-            lastHandledKeyRef.current = scrollToKey;
-            highlightRef.current?.clear();
-            cancelLoadMoreRetry();
+        const attempts = loadAttemptsRef.current;
+        if (attempts.key !== scrollToKey || segments.length > attempts.loaded) {
+            loadAttemptsRef.current = { key: scrollToKey, loaded: segments.length, count: 0 };
         }
 
-        // Check if the target may still be beyond the loaded segments
-        if (targetMayBeUnloaded(segments, scrollToTime) && hasMore && onLoadMore && gaveUpKeyRef.current !== scrollToKey) {
-            pendingScrollRef.current = { key: scrollToKey, time: scrollToTime };
-
-            const attempts = jumpAttemptsRef.current;
-            if (attempts.key !== scrollToKey || segments.length > attempts.loaded) {
-                jumpAttemptsRef.current = { key: scrollToKey, loaded: segments.length, count: 0 };
-            }
-            const giveUp = () => {
-                // Pages keep failing to load: stop polling and jump to the nearest loaded segment
-                gaveUpKeyRef.current = scrollToKey;
-                cancelLoadMoreRetry();
-                setRetryExhaustedTick(t => t + 1);
-            };
-
-            if (!isLoadingMore) {
-                if (++jumpAttemptsRef.current.count > MAX_LOAD_MORE_RETRIES) {
-                    giveUp();
-                    return;
-                }
-                onLoadMore();
-            }
-
-            // Ensure a pending jump continues through all required pages: calls less than 100ms apart
-            // are debounced by usePaginatedTranscripts, so retry once the delay expires.
-            cancelLoadMoreRetry();
-            cancelLoadMoreRetryRef.current = startLoadMoreRetry({
-                getState: () => paginationRef.current,
-                attempts: jumpAttemptsRef.current,
-                onGiveUp: giveUp,
-                maxRetries: MAX_LOAD_MORE_RETRIES,
-                delayMs: 120,
-            });
-            return;
+        if (
+            targetMayBeUnloaded(segments, scrollToTime) && hasMore && onLoadMore &&
+            loadAttemptsRef.current.count < MAX_JUMP_LOAD_ATTEMPTS
+        ) {
+            pendingKeyRef.current = scrollToKey;
+            // An in-flight page re-runs this effect when it finishes
+            if (isLoadingMore) return;
+            loadAttemptsRef.current.count += 1;
+            onLoadMore();
+            // loadMore ignores calls less than 100ms apart; re-check in case this one was dropped
+            const timer = setTimeout(() => setLoadRecheck(n => n + 1), 150);
+            return () => clearTimeout(timer);
         }
 
-        // Target is within range or we reached end of available segments
-        pendingScrollRef.current = null;
-        cancelLoadMoreRetry();
-
+        // Target is loaded, or no more pages can be loaded: jump to the best loaded segment
+        pendingKeyRef.current = 0;
         const targetIndex = findTargetSegmentIndex(segments, scrollToTime);
         const targetSegment = segments[targetIndex];
-        if (targetSegment) {
-            highlightRef.current?.show(targetSegment.id);
-
-            if (useVirtualization) {
-                virtualizer.scrollToIndex(targetIndex, { align: 'center' });
-            } else {
-                const el = document.getElementById(`segment-${targetSegment.id}`);
-                el?.scrollIntoView({ behavior: 'smooth', block: 'center' });
-            }
+        if (!targetSegment) return;
+        setHighlight({ id: targetSegment.id, key: scrollToKey });
+        if (useVirtualization) {
+            virtualizer.scrollToIndex(targetIndex, { align: 'center' });
+        } else {
+            document.getElementById(`segment-${targetSegment.id}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' });
         }
-    }, [scrollToTime, scrollToKey, segments, hasMore, isLoadingMore, onLoadMore, useVirtualization, virtualizer, retryExhaustedTick, cancelLoadMoreRetry]);
+    }, [scrollToTime, scrollToKey, segments, hasMore, isLoadingMore, onLoadMore, useVirtualization, virtualizer, loadRecheck]);
 
     return (
         <div ref={scrollRef} className="flex flex-col h-full overflow-y-auto px-4 py-2">
