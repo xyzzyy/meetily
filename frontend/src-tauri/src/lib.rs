@@ -44,6 +44,7 @@ pub mod console_utils;
 pub mod database;
 pub mod diarization;
 pub mod groq;
+pub(crate) mod http_error;
 pub mod model_storage;
 pub mod notifications;
 pub mod ollama;

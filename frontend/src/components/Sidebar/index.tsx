@@ -165,7 +165,7 @@ const Sidebar: React.FC = () => {
     const setupListener = async () => {
       const { listen } = await import('@tauri-apps/api/event');
       const unlisten = await listen<ModelConfig>('model-config-updated', (event) => {
-        console.log('Sidebar received model-config-updated event:', event.payload);
+        console.log('Sidebar received model-config-updated event:', event.payload.provider, event.payload.model);
         setModelConfig(event.payload);
       });
 
@@ -217,7 +217,7 @@ const Sidebar: React.FC = () => {
         model: configToSave.model,
         apiKey: configToSave.apiKey ?? null
       };
-      console.log('Saving transcript config with payload:', payload);
+      console.log('Saving transcript config:', payload.provider, payload.model);
 
       await invoke('api_save_transcript_config', {
         provider: payload.provider,

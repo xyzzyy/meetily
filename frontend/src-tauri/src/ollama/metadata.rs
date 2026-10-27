@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use reqwest::Client;
 use regex::Regex;
 use once_cell::sync::Lazy;
+use crate::http_error::request_error;
 
 /// Model metadata containing context size and other details
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -160,9 +161,9 @@ async fn fetch_model_info(
             if e.is_timeout() {
                 format!("Request timed out while fetching metadata for {}", model_name)
             } else if e.is_connect() {
-                format!("Cannot connect to {}. Ollama server may not be running.", base_url)
+                request_error(&e).to_string()
             } else {
-                format!("Network error: {}", e)
+                format!("Network error: {}", request_error(&e))
             }
         })?;
 
@@ -174,7 +175,7 @@ async fn fetch_model_info(
     let show_response: OllamaShowResponse = response
         .json()
         .await
-        .map_err(|e| format!("Failed to parse API response: {}", e))?;
+        .map_err(|e| format!("Failed to parse API response: {}", request_error(&e)))?;
 
     // Try to get context size from model_info (verbose mode) first
     let mut context_size = extract_context_from_model_info(&show_response.model_info, &show_response.details.family);
@@ -314,6 +315,26 @@ fn get_fallback_metadata(model_name: &str) -> ModelMetadata {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn metadata_errors_do_not_expose_endpoint_or_response_credentials() {
+        use crate::http_error::test_support::{assert_private, closed_endpoint, respond_once};
+        let error = fetch_model_info("model", Some(&closed_endpoint()))
+            .await
+            .unwrap_err();
+        assert_private(&error);
+        let (endpoint, server) = respond_once(
+            "200 OK",
+            r#"{"modelfile":"", "details":"review-header-secret"}"#,
+        )
+        .await;
+        let error = fetch_model_info("model", Some(&endpoint))
+            .await
+            .unwrap_err();
+        server.await.unwrap();
+        assert!(error.contains("decoded"));
+        assert_private(&error);
+    }
 
     #[test]
     fn test_parse_num_ctx_standard() {

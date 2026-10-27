@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
+use crate::http_error::{request_error, status_error};
 
 const REQUEST_TIMEOUT_DURATION: Duration = Duration::from_secs(300);
 
@@ -412,7 +413,7 @@ pub(crate) async fn generate_summary(
                             REQUEST_TIMEOUT_DURATION.as_secs()
                         )
                     } else {
-                        format!("Failed to send request to LLM: {}", e)
+                        format!("Failed to send request to LLM: {}", request_error(&e))
                     }
                 })?
             }
@@ -428,7 +429,7 @@ pub(crate) async fn generate_summary(
                     REQUEST_TIMEOUT_DURATION.as_secs()
                 )
             } else {
-                format!("Failed to send request to LLM: {}", e)
+                format!("Failed to send request to LLM: {}", request_error(&e))
             }
         })?
     };
@@ -439,11 +440,11 @@ pub(crate) async fn generate_summary(
         let status = response.status();
         let error_body = await_or_cancel(response.text(), cancellation_token)
             .await?
-            .unwrap_or_else(|error| format!("Failed to read LLM error response body: {error}"));
+            .unwrap_or_default();
         if provider != &LLMProvider::Ollama || !ollama_rejects_reasoning_effort(status, &error_body) {
             return Err(format!(
-                "LLM API request failed with status {}: {}",
-                status, error_body
+                "LLM API request failed: {}",
+                status_error(status)
             ));
         }
 
@@ -468,19 +469,19 @@ pub(crate) async fn generate_summary(
                         REQUEST_TIMEOUT_DURATION.as_secs()
                     )
                 } else {
-                    format!("Failed to send retry request to LLM: {}", e)
+                    format!("Failed to send retry request to LLM: {}", request_error(&e))
                 }
             })?
     };
 
     if !response.status().is_success() {
         let status = response.status();
-        let error_body = await_or_cancel(response.text(), cancellation_token)
-            .await?
-            .unwrap_or_else(|error| format!("Failed to read LLM error response body: {error}"));
+        // Consume the body with cancellation support, but never expose it in an
+        // error: a server can echo the request URL or credentials there.
+        let _ = await_or_cancel(response.text(), cancellation_token).await?;
         return Err(format!(
-            "LLM API request failed with status {}: {}",
-            status, error_body
+            "LLM API request failed: {}",
+            status_error(status)
         ));
     }
 
@@ -491,7 +492,7 @@ pub(crate) async fn generate_summary(
             cancellation_token,
         )
         .await?
-        .map_err(|e| format!("Failed to parse LLM response: {}", e))?;
+        .map_err(|e| format!("Failed to parse LLM response: {}", request_error(&e)))?;
 
         info!("🐞 LLM Response received from Claude");
 
@@ -505,7 +506,7 @@ pub(crate) async fn generate_summary(
             cancellation_token,
         )
         .await?
-        .map_err(|e| format!("Failed to parse LLM response: {}", e))?;
+        .map_err(|e| format!("Failed to parse LLM response: {}", request_error(&e)))?;
 
         info!("🐞 LLM Response received from {}", provider_name(provider));
         chat_response.completion()
@@ -523,6 +524,66 @@ mod tests {
         sync::oneshot,
         time::{timeout, Duration},
     };
+
+    #[tokio::test]
+    async fn summary_request_errors_do_not_expose_endpoint_or_response_credentials() {
+        use crate::http_error::test_support::{assert_private, closed_endpoint, respond_once};
+        let client = Client::new();
+        for provider in [LLMProvider::Ollama, LLMProvider::CustomOpenAI] {
+            for cancellation in [None, Some(CancellationToken::new())] {
+                let endpoint = closed_endpoint();
+                let error = generate_summary(
+                    &client,
+                    &provider,
+                    "model",
+                    "review-header-secret",
+                    "system",
+                    "user",
+                    Some(&endpoint),
+                    Some(&endpoint),
+                    None,
+                    None,
+                    None,
+                    None,
+                    cancellation.as_ref(),
+                )
+                .await
+                .unwrap_err();
+                assert_private(&error);
+            }
+            for (status, body) in [
+                (
+                    "401 Unauthorized",
+                    "review-password review-query-secret review-header-secret",
+                ),
+                ("200 OK", r#"{"choices":"review-header-secret"}"#),
+            ] {
+                let (endpoint, server) = respond_once(status, body).await;
+                let error = generate_summary(
+                    &client,
+                    &provider,
+                    "model",
+                    "review-header-secret",
+                    "system",
+                    "user",
+                    Some(&endpoint),
+                    Some(&endpoint),
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .await
+                .unwrap_err();
+                server.await.unwrap();
+                assert_private(&error);
+                if status.starts_with("401") {
+                    assert!(error.contains("HTTP 401"));
+                }
+            }
+        }
+    }
 
     async fn read_http_request(stream: &mut tokio::net::TcpStream) -> Vec<u8> {
         let mut request = Vec::new();
