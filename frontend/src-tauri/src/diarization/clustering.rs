@@ -90,13 +90,25 @@ impl SpeakerClusterer {
     }
 
     pub fn assign_detailed(&mut self, embedding: &[f32]) -> ClusterAssignment {
+        let best = self
+            .clusters
+            .iter()
+            .enumerate()
+            .map(|(i, c)| (i, cosine_similarity(embedding, &c.centroid)))
+            .filter(|(i, similarity)| {
+                let cluster = &self.clusters[*i];
+                (!cluster.from_profile || cluster.count > 0)
+                    && *similarity >= CLUSTER_SIMILARITY_THRESHOLD
+            })
+            .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+
+
         let mut profile_matches: Vec<(usize, f32)> = self
             .clusters
             .iter()
             .enumerate()
             .filter(|(_, cluster)| cluster.from_profile && cluster.count == 0)
             .map(|(index, cluster)| (index, cosine_similarity(embedding, &cluster.centroid)))
-            .filter(|(_, similarity)| *similarity >= PROFILE_MATCH_THRESHOLD)
             .collect();
         profile_matches.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
@@ -104,8 +116,11 @@ impl SpeakerClusterer {
             let runner_up = profile_matches
                 .get(1)
                 .map(|match_| match_.1)
-                .unwrap_or(-1.0);
-            if similarity - runner_up >= PROFILE_MATCH_MARGIN {
+                .unwrap_or(-1.0)
+                .max(best.map(|(_, score)| score).unwrap_or(-1.0));
+            if similarity >= PROFILE_MATCH_THRESHOLD
+                && similarity - runner_up >= PROFILE_MATCH_MARGIN
+            {
                 let label = self.update_cluster(index, embedding);
                 self.last_label = Some(label.clone());
                 self.last_cluster = Some(index);
@@ -118,17 +133,6 @@ impl SpeakerClusterer {
             }
         }
 
-        let best = self
-            .clusters
-            .iter()
-            .enumerate()
-            .map(|(i, c)| (i, cosine_similarity(embedding, &c.centroid)))
-            .filter(|(i, similarity)| {
-                let cluster = &self.clusters[*i];
-                (!cluster.from_profile || cluster.count > 0)
-                    && *similarity >= CLUSTER_SIMILARITY_THRESHOLD
-            })
-            .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
 
         let (label, profile_id, confidence, needs_review) = match best {
             Some((idx, similarity)) => {
@@ -283,6 +287,37 @@ mod tests {
         let assignment = clusterer.assign_detailed(&unit(vec![1.0, 0.0]));
         assert_eq!(assignment.label, "Speaker 1");
         assert_eq!(assignment.profile_id, None);
+    }
+
+    #[test]
+    fn a_profile_below_threshold_still_counts_for_the_margin() {
+        let mut clusterer = SpeakerClusterer::new();
+        clusterer.seed_profile("alice", "Alice", unit(vec![0.66, (1.0_f32 - 0.66_f32.powi(2)).sqrt()]));
+        clusterer.seed_profile("bob", "Bob", unit(vec![0.64, (1.0_f32 - 0.64_f32.powi(2)).sqrt()]));
+        let assignment = clusterer.assign_detailed(&[1.0, 0.0]);
+        assert_eq!(assignment.profile_id, None);
+        assert_eq!(assignment.label, "Speaker 1");
+    }
+
+    #[test]
+    fn an_unused_profile_cannot_override_a_better_active_cluster() {
+        let mut clusterer = SpeakerClusterer::new();
+        assert_eq!(clusterer.assign(&[1.0, 0.0]), "Speaker 1");
+        clusterer.seed_profile("alice", "Alice", unit(vec![0.66, (1.0_f32 - 0.66_f32.powi(2)).sqrt()]));
+        let assignment = clusterer.assign_detailed(&[1.0, 0.0]);
+        assert_eq!(assignment.label, "Speaker 1");
+        assert_eq!(assignment.profile_id, None);
+        assert_eq!(assignment.confidence, 1.0);
+    }
+
+    #[test]
+    fn a_distinct_profile_can_win_against_an_active_cluster() {
+        let mut clusterer = SpeakerClusterer::new();
+        clusterer.assign(&[1.0, 0.0]);
+        clusterer.seed_profile("alice", "Alice", vec![0.0, 1.0]);
+        let assignment = clusterer.assign_detailed(&[0.0, 1.0]);
+        assert_eq!(assignment.profile_id.as_deref(), Some("alice"));
+        assert_eq!(assignment.label, "Alice");
     }
 
     #[test]
