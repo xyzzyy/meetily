@@ -4,6 +4,7 @@ import { useEffect } from "react";
 import { useTheme } from '@/contexts/ThemeContext';
 import type { PartialBlock, Block } from "@blocknote/core";
 import { useCreateBlockNote } from "@blocknote/react";
+import { TranscriptReferenceExtension } from '@/lib/transcript-reference-plugin';
 import { BlockNoteView } from "@blocknote/shadcn";
 import "@blocknote/shadcn/style.css";
 import "@blocknote/core/fonts/inter.css";
@@ -24,6 +25,9 @@ export default function Editor({ initialContent, onChange, editable = true }: Ed
 
   const editor = useCreateBlockNote({
     initialContent: initialContent as PartialBlock[] | undefined,
+    _tiptapOptions: {
+      extensions: [TranscriptReferenceExtension],
+    },
   });
 
   console.log('📝 EDITOR: BlockNote editor created successfully');

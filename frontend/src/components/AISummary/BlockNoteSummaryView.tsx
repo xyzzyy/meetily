@@ -10,6 +10,7 @@ import { BlockNoteView } from '@blocknote/shadcn';
 import { blocksToMarkdownSafely } from '@/lib/blocknote-markdown';
 import { useTheme } from '@/contexts/ThemeContext';
 import "@blocknote/shadcn/style.css";
+import { TranscriptReferenceExtension } from '@/lib/transcript-reference-plugin';
 
 // Dynamically import BlockNote Editor to avoid SSR issues
 const Editor = dynamic(() => import('../BlockNoteEditor/Editor'), { ssr: false });
@@ -27,6 +28,8 @@ interface BlockNoteSummaryViewProps {
     created_at: string;
   };
   onDirtyChange?: (isDirty: boolean) => void;
+  /** Called when a transcript reference is clicked */
+  onTranscriptRefClick?: (startTime: number, endTime: number) => void;
 }
 
 export interface BlockNoteSummaryViewRef {
@@ -74,7 +77,8 @@ export const BlockNoteSummaryView = forwardRef<BlockNoteSummaryViewRef, BlockNot
   error = null,
   onRegenerateSummary,
   meeting,
-  onDirtyChange
+  onDirtyChange,
+  onTranscriptRefClick
 }, ref) => {
   const { resolvedTheme } = useTheme();
   const { format, data } = detectSummaryFormat(summaryData);
@@ -82,10 +86,14 @@ export const BlockNoteSummaryView = forwardRef<BlockNoteSummaryViewRef, BlockNot
   const [currentBlocks, setCurrentBlocks] = useState<Block[]>([]);
   const [isSaving, setIsSaving] = useState(false);
   const isContentLoaded = useRef(false);
+  const containerRef = useRef<HTMLDivElement>(null);
 
-  // Create BlockNote editor for markdown parsing
+  // Create BlockNote editor for markdown parsing with transcript reference decoration extension
   const editor = useCreateBlockNote({
-    initialContent: undefined
+    initialContent: undefined,
+    _tiptapOptions: {
+      extensions: [TranscriptReferenceExtension],
+    },
   });
 
   // Parse markdown to blocks when format is markdown
@@ -119,6 +127,27 @@ export const BlockNoteSummaryView = forwardRef<BlockNoteSummaryViewRef, BlockNot
       }, 100);
     }
   }, [format, data?.summary_json]);
+
+
+  // Resolve a click target to a valid transcript reference, or null
+  const resolveTranscriptRef = useCallback((eventTarget: EventTarget) => {
+    const target = (eventTarget as HTMLElement).closest('.transcript-ref');
+    if (!(target instanceof HTMLElement) || !containerRef.current?.contains(target)) return null;
+    const startTime = Number.parseFloat(target.dataset.start ?? '');
+    if (!Number.isFinite(startTime)) return null;
+    const endTime = Number.parseFloat(target.dataset.end ?? '');
+    return { startTime, endTime: Number.isFinite(endTime) ? endTime : startTime };
+  }, []);
+
+  // Handle transcript reference clicks via event delegation on container
+  const handleContainerClick = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
+    // Dragging a text selection across a reference must not navigate away
+    if (window.getSelection()?.isCollapsed === false) return;
+    const ref = resolveTranscriptRef(e.target);
+    if (!ref) return;
+    e.preventDefault();
+    onTranscriptRefClick?.(ref.startTime, ref.endTime);
+  }, [onTranscriptRefClick, resolveTranscriptRef]);
 
   const handleEditorChange = useCallback((blocks: Block[]) => {
     // Only set dirty flag if content has finished loading
@@ -238,7 +267,7 @@ export const BlockNoteSummaryView = forwardRef<BlockNoteSummaryViewRef, BlockNot
   if (format === 'blocknote') {
     console.log('🎨 Rendering BLOCKNOTE format (direct)');
     return (
-      <div className="flex flex-col w-full">
+      <div ref={containerRef} onClick={handleContainerClick} className="flex flex-col w-full">
         <div className="w-full">
           <Editor
             initialContent={data.summary_json}
@@ -257,7 +286,7 @@ export const BlockNoteSummaryView = forwardRef<BlockNoteSummaryViewRef, BlockNot
   if (format === 'markdown') {
     console.log('🎨 Rendering MARKDOWN format (parsed to BlockNote)');
     return (
-      <div className="flex flex-col w-full">
+      <div ref={containerRef} onClick={handleContainerClick} className="flex flex-col w-full">
         <div className="w-full">
           <BlockNoteView
             editor={editor}
