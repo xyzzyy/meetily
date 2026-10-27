@@ -4,8 +4,9 @@ import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { invoke } from '@tauri-apps/api/core';
 import { confirm, message } from '@tauri-apps/plugin-dialog';
-import { ChevronRight, Search, Trash2 } from 'lucide-react';
+import { ChevronRight, Pencil, Search, Trash2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import type { SpeakerProfile, SpeakerProfileSample } from '@/types';
 
@@ -44,6 +45,9 @@ export function RememberedVoices() {
   const [samples, setSamples] = useState<SpeakerProfileSample[]>([]);
   const [samplesLoading, setSamplesLoading] = useState(false);
   const [busyKey, setBusyKey] = useState<string | null>(null);
+  const [renamingProfile, setRenamingProfile] = useState<SpeakerProfile | null>(null);
+  const [newName, setNewName] = useState('');
+  const [renameError, setRenameError] = useState<string | null>(null);
 
   const loadProfiles = async () => {
     try {
@@ -77,6 +81,26 @@ export function RememberedVoices() {
     setExpandedProfileId(profileId);
     setSamples([]);
     void loadSamples(profileId);
+  };
+
+  const renameVoice = async () => {
+    const name = newName.trim();
+    if (!renamingProfile || !name || busyKey !== null) return;
+    setBusyKey(renamingProfile.id);
+    setRenameError(null);
+    try {
+      await invoke('update_speaker_profile', {
+        request: { profileId: renamingProfile.id, name },
+      });
+      setProfiles(current => current
+        .map(profile => profile.id === renamingProfile.id ? { ...profile, name } : profile)
+        .sort((a, b) => a.name.localeCompare(b.name)));
+      setRenamingProfile(null);
+    } catch (error) {
+      setRenameError(`Could not rename voice: ${String(error)}`);
+    } finally {
+      setBusyKey(null);
+    }
   };
 
   const forgetVoice = async (profile: SpeakerProfile) => {
@@ -200,6 +224,21 @@ export function RememberedVoices() {
                   <Button
                     variant="ghost"
                     size="sm"
+                    className="h-8 w-8 shrink-0 p-0 text-muted-foreground"
+                    aria-label={`Rename ${profile.name}`}
+                    title="Rename"
+                    disabled={busyKey !== null}
+                    onClick={() => {
+                      setRenamingProfile(profile);
+                      setNewName(profile.name);
+                      setRenameError(null);
+                    }}
+                  >
+                    <Pencil className="h-4 w-4" aria-hidden="true" />
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    size="sm"
                     className="h-8 w-8 shrink-0 p-0 text-muted-foreground hover:text-destructive"
                     aria-label={`Forget ${profile.name}'s voice`}
                     title="Forget voice"
@@ -266,6 +305,49 @@ export function RememberedVoices() {
             );
           })}
         </ul>
+      )}
+
+      {renamingProfile && (
+        <Dialog
+          open={renamingProfile !== null}
+          onOpenChange={open => {
+            if (!open && busyKey === null) setRenamingProfile(null);
+          }}
+        >
+          <DialogContent>
+            <DialogHeader>
+              <DialogTitle>Rename remembered voice</DialogTitle>
+              <DialogDescription>
+                Use this name to identify the person in future meetings. Existing transcript names stay the same.
+              </DialogDescription>
+            </DialogHeader>
+            <form className="space-y-4" onSubmit={event => {
+              event.preventDefault();
+              void renameVoice();
+            }}>
+              <div className="space-y-2">
+                <label htmlFor="remembered-voice-name" className="text-sm font-medium">Name</label>
+                <Input
+                  id="remembered-voice-name"
+                  value={newName}
+                  onChange={event => setNewName(event.target.value)}
+                  disabled={busyKey !== null}
+                  autoFocus
+                  required
+                />
+                {renameError && <p role="alert" className="text-sm text-destructive">{renameError}</p>}
+              </div>
+              <DialogFooter>
+                <Button type="button" variant="outline" disabled={busyKey !== null} onClick={() => setRenamingProfile(null)}>
+                  Cancel
+                </Button>
+                <Button type="submit" disabled={busyKey !== null || !newName.trim() || newName.trim() === renamingProfile?.name}>
+                  {busyKey === renamingProfile?.id ? 'Saving…' : 'Save'}
+                </Button>
+              </DialogFooter>
+            </form>
+          </DialogContent>
+        </Dialog>
       )}
     </div>
   );
