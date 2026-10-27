@@ -33,11 +33,13 @@ pub struct CoreAudioCapture {
 #[cfg(target_os = "macos")]
 pub struct CoreAudioStream {
     consumer: HeapCons<f32>,
-    _device: ca::hardware::StartedDevice<ca::AggregateDevice>,
+    _device: Option<ca::hardware::StartedDevice<ca::AggregateDevice>>,
     _ctx: Box<AudioContext>,
     _tap: ca::TapGuard,
     waker_state: Arc<Mutex<WakerState>>,
     current_sample_rate: Arc<AtomicU32>,
+    // Set by stop_and_drain: the end of the stream is expected, not buffer pressure.
+    stopped: bool,
 }
 
 /// Audio processing context
@@ -49,6 +51,7 @@ struct AudioContext {
     current_sample_rate: Arc<AtomicU32>,
     consecutive_drops: Arc<AtomicU32>,
     should_terminate: Arc<AtomicBool>,
+    recording_state: Option<Arc<crate::audio::recording_state::RecordingState>>,
 }
 
 #[cfg(target_os = "macos")]
@@ -240,6 +243,14 @@ impl CoreAudioCapture {
 
     /// Create a stream from this capture
     pub fn stream(self) -> Result<CoreAudioStream> {
+        self.create_stream(None)
+    }
+
+    pub fn stream_for_recording(self, state: Arc<crate::audio::recording_state::RecordingState>) -> Result<CoreAudioStream> {
+        self.create_stream(Some(state))
+    }
+
+    fn create_stream(self, recording_state: Option<Arc<crate::audio::recording_state::RecordingState>>) -> Result<CoreAudioStream> {
         info!("🎙️ CoreAudio: Creating CoreAudioStream...");
 
         // Get tap audio format
@@ -277,6 +288,7 @@ impl CoreAudioCapture {
             current_sample_rate: current_sample_rate.clone(),
             consecutive_drops: Arc::new(AtomicU32::new(0)),
             should_terminate: Arc::new(AtomicBool::new(false)),
+            recording_state,
         });
 
         info!("🎙️ CoreAudio: Starting audio device...");
@@ -286,11 +298,12 @@ impl CoreAudioCapture {
 
         Ok(CoreAudioStream {
             consumer,
-            _device: device,
+            _device: Some(device),
             _ctx: ctx,
             _tap: self.tap,
             waker_state,
             current_sample_rate,
+            stopped: false,
         })
     }
 }
@@ -298,6 +311,12 @@ impl CoreAudioCapture {
 /// Process audio data from the IO proc callback
 #[cfg(target_os = "macos")]
 fn process_audio_data(ctx: &mut AudioContext, data: &[f32]) {
+    // Admit samples at the producer. A later pause or stop must not discard queued audio.
+    if ctx.should_terminate.load(Ordering::Acquire)
+        || ctx.recording_state.as_ref().is_some_and(|state| !state.is_active())
+    {
+        return;
+    }
     // Push raw samples directly to ring buffer
     // Let the pipeline handle all gain adjustments (post-mix 3x gain + mic normalization)
     let buffer_size = data.len();
@@ -332,7 +351,20 @@ fn process_audio_data(ctx: &mut AudioContext, data: &[f32]) {
 }
 
 #[cfg(target_os = "macos")]
+fn drain_samples(consumer: &mut HeapCons<f32>) -> Vec<f32> {
+    consumer.pop_iter().collect()
+}
+
+#[cfg(target_os = "macos")]
 impl CoreAudioStream {
+    /// Stop the native producer while its callback context is still alive, then drain its queue.
+    pub fn stop_and_drain(&mut self) -> Vec<f32> {
+        self.stopped = true;
+        self._ctx.should_terminate.store(true, Ordering::Release);
+        drop(self._device.take());
+        drain_samples(&mut self.consumer)
+    }
+
     /// Get current sample rate
     pub fn sample_rate(&self) -> u32 {
         self.current_sample_rate.load(Ordering::Acquire)
@@ -350,6 +382,10 @@ impl Stream for CoreAudioStream {
         // Try to pop a sample from the ring buffer
         if let Some(sample) = self.consumer.try_pop() {
             return Poll::Ready(Some(sample));
+        }
+
+        if self.stopped {
+            return Poll::Ready(None);
         }
 
         // Check if we should terminate
@@ -414,5 +450,47 @@ impl Stream for CoreAudioStream {
         _cx: &mut Context<'_>,
     ) -> Poll<Option<Self::Item>> {
         Poll::Ready(None)
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod terminal_drain_tests {
+    use super::*;
+    use crate::audio::recording_state::RecordingState;
+
+    #[test]
+    fn full_native_queue_drains_in_order_once() {
+        let (mut producer, mut consumer) = HeapRb::<f32>::new(131072).split();
+        let expected: Vec<f32> = (0..131072).map(|i| i as f32).collect();
+        assert_eq!(producer.push_slice(&expected), expected.len());
+        assert_eq!(drain_samples(&mut consumer), expected);
+        assert!(drain_samples(&mut consumer).is_empty());
+    }
+
+    #[test]
+    fn producer_accepts_only_active_audio_and_keeps_it_after_stop() {
+        let state = RecordingState::new();
+        state.start_recording().unwrap();
+        let (producer, mut consumer) = HeapRb::<f32>::new(4096).split();
+        let mut context = AudioContext {
+            format: av::AudioFormat::standard_with_sample_rate_and_channels(48000.0, 1).unwrap(),
+            producer,
+            waker_state: Arc::new(Mutex::new(WakerState { waker: None, has_data: false })),
+            current_sample_rate: Arc::new(AtomicU32::new(48000)),
+            consecutive_drops: Arc::new(AtomicU32::new(0)),
+            should_terminate: Arc::new(AtomicBool::new(false)),
+            recording_state: Some(state.clone()),
+        };
+        process_audio_data(&mut context, &[0.25; 1024]);
+        state.pause_recording().unwrap();
+        process_audio_data(&mut context, &[0.75; 127]);
+        state.resume_recording().unwrap();
+        process_audio_data(&mut context, &[0.5; 127]);
+        state.stop_recording();
+        process_audio_data(&mut context, &[0.75; 127]);
+        let mut expected = vec![0.25; 1024];
+        expected.extend_from_slice(&[0.5; 127]);
+        assert_eq!(drain_samples(&mut consumer), expected);
+        assert!(drain_samples(&mut consumer).is_empty());
     }
 }

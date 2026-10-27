@@ -11,7 +11,7 @@ use super::devices::AudioDevice;
 
 use super::recording_state::{RecordingState, AudioChunk};
 use super::diarization_stems::DiarizationStemSaver;
-use super::pipeline::AudioPipelineManager;
+use super::pipeline::{AudioPipelineManager, PipelineStopError};
 use super::recording_saver::RecordingSaver;
 use super::stream::AudioStreamManager;
 use super::device_monitor::{AudioDeviceMonitor, DeviceEvent};
@@ -27,6 +27,15 @@ pub(crate) enum RecordingStartError {
     TranscriptionRuntime(#[source] anyhow::Error),
     #[error(transparent)]
     Other(#[from] anyhow::Error),
+}
+
+/// Keep audio shutdown errors separate from final transcript warnings.
+#[derive(Debug, Default)]
+pub(crate) struct RecordingStopOutcome {
+    /// Capture or the pipeline failed, so saved audio may be incomplete.
+    pub audio_error: Option<anyhow::Error>,
+    /// Only the final transcript segments may be missing.
+    pub transcript_error: Option<anyhow::Error>,
 }
 
 // ============================================================================
@@ -372,9 +381,8 @@ impl RecordingManager {
     }
 
     /// Stop streams and force immediate pipeline flush to process all accumulated audio
-    pub async fn stop_streams_and_force_flush(&mut self) -> Result<()> {
+    pub(crate) async fn stop_streams_and_force_flush(&mut self) -> RecordingStopOutcome {
         info!("🚀 Stopping recording streams with IMMEDIATE pipeline flush");
-        let mut errors = Vec::new();
 
         // CRITICAL: Stop device monitor FIRST to prevent continuous WASAPI polling on Windows
         // This fixes the slow shutdown issue where device enumeration runs for 90+ seconds
@@ -386,29 +394,32 @@ impl RecordingManager {
         // Stop recording state first - this clears device references
         self.state.stop_recording();
 
-        // Stop audio streams immediately
-        if let Err(e) = self.stream_manager.stop_streams() {
-            error!("Error stopping audio streams: {}", e);
-            errors.push(format!("Could not stop audio streams: {e:#}"));
+        // Stop capture and drain the pipeline even when either step fails.
+        let capture_error = self.stream_manager.stop_streams().err();
+        if let Some(error) = &capture_error {
+            error!("Error stopping audio streams: {error:#}");
         }
-
-        // CRITICAL: Force pipeline to flush ALL accumulated audio before stopping
-        debug!("💨 Forcing pipeline to flush accumulated audio immediately");
-        if let Err(e) = self.pipeline_manager.force_flush_and_stop().await {
-            error!("Error during force flush: {}", e);
-            errors.push(format!("Could not flush the audio pipeline: {e:#}"));
-        }
+        let (pipeline_error, transcript_error) = match self.pipeline_manager.stop().await {
+            Ok(()) => (None, None),
+            Err(PipelineStopError::Pipeline(error)) => {
+                error!("Audio pipeline failed before stop: {error:#}");
+                (Some(error), None)
+            }
+            Err(PipelineStopError::FinalTranscript(error)) => {
+                error!("Error during force flush: {error:#}");
+                (None, Some(error))
+            }
+        };
+        let audio_error = match (capture_error, pipeline_error) {
+            (Some(capture), Some(pipeline)) => Some(anyhow::anyhow!("{capture:#}. {pipeline:#}")),
+            (capture, pipeline) => capture.or(pipeline),
+        };
 
         // CRITICAL: Full cleanup to release all Arc references and resources
         // This ensures microphone is released even if Drop is delayed
         self.state.cleanup();
 
-        info!("✅ Recording streams stopped with immediate flush completed");
-        if errors.is_empty() {
-            Ok(())
-        } else {
-            Err(anyhow::anyhow!(errors.join(". ")))
-        }
+        RecordingStopOutcome { audio_error, transcript_error }
     }
 
     /// Save recording after transcription is complete
@@ -695,5 +706,42 @@ mod wake_tests {
         // Nonexistent device name fails at the `find` step — no audio hardware needed.
         // Asserts the wake is non-fatal (returns Err, does not panic).
         assert!(wake_audio_connection_sync("__no_such_device__").is_err());
+    }
+}
+
+#[cfg(test)]
+mod stop_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn final_flush_failure_reaches_the_caller_after_cleanup() {
+        let mut manager = RecordingManager::new();
+        manager.state.start_recording().unwrap();
+        manager.pipeline_manager = AudioPipelineManager::with_task_for_test(tokio::spawn(async {
+            Err(anyhow::anyhow!("Injected final flush failure"))
+        }));
+
+        let outcome = manager.stop_streams_and_force_flush().await;
+        assert!(outcome.audio_error.is_none());
+        assert!(outcome.transcript_error.unwrap().to_string().contains("Injected final flush failure"));
+        assert!(!manager.state.is_recording());
+        // cleanup() clears the start time as well as the recording flag.
+        assert!(manager.state.get_recording_duration().is_none());
+        let outcome = manager.stop_streams_and_force_flush().await;
+        assert!(outcome.audio_error.is_none());
+        assert!(outcome.transcript_error.is_none());
+    }
+    #[tokio::test]
+    async fn pipeline_failure_reports_incomplete_audio() {
+        let mut manager = RecordingManager::new();
+        manager.state.start_recording().unwrap();
+        manager.pipeline_manager = AudioPipelineManager::with_task_for_test(tokio::spawn(async {
+            panic!("Injected pipeline panic")
+        }));
+
+        let outcome = manager.stop_streams_and_force_flush().await;
+        assert!(outcome.audio_error.unwrap().to_string().contains("Audio pipeline task failed"));
+        assert!(outcome.transcript_error.is_none());
+        assert!(!manager.state.is_recording());
     }
 }

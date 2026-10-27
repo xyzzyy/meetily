@@ -236,6 +236,7 @@ export default function Home() {
                       onRecordingStart={handleRecordingStart}
                       onTranscriptReceived={() => { }} // Not actually used by RecordingControls
                       onStopInitiated={() => setIsStopping(true)}
+                      onStopRequestFinished={() => setIsStopping(false)}
                       barHeights={barHeights}
                       onTranscriptionError={(message) => {
                         showModal('errorAlert', message);
