@@ -434,7 +434,7 @@ async fn run_inner<R: Runtime>(
         transcription_success_rate,
     )
     .await?;
-    cleanup_temporary_stems(folder);
+    // Keep source stems for Enhance and for recovery when mixed audio is missing.
     emit_progress(app, meeting_id, "completed", 100, None);
 
     Ok(FinalDiarizationResult {
@@ -708,25 +708,6 @@ fn label_existing_transcripts(
             }
         })
         .collect()
-}
-
-fn cleanup_temporary_stems(folder: &Path) {
-    if folder.join("audio.mp4").exists() {
-        return;
-    }
-    for stem in [
-        folder.join(".diarization/microphone.flac"),
-        folder.join(".diarization/system.flac"),
-    ] {
-        if let Err(error) = std::fs::remove_file(&stem) {
-            if error.kind() != std::io::ErrorKind::NotFound {
-                log::warn!(
-                    "Failed to remove temporary diarization stem {}: {error}",
-                    stem.display()
-                );
-            }
-        }
-    }
 }
 
 fn passes_quality_gates(assigned_coverage: f64, transcription_success_rate: f64) -> bool {
