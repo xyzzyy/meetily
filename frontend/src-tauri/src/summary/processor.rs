@@ -86,7 +86,9 @@ Take the times from the `[MM:SS–MM:SS]` prefixes shown in the transcript text.
 If the relevant transcript lines have no time prefix, omit the reference; never invent a time.\
 \nExample: \"Decision: Migrate authentication to OAuth2. [14:32-15:18]\"\
 \nExample: \"Alice will prepare the migration plan. [27:41-28:05]\"\
-\nInclude the reference at the end of each relevant item.";
+\nInclude the reference at the end of each relevant item. In a table with a timestamp column, \
+put the reference only in that column. Keep supporting transcript text in its text column; \
+never replace the supporting text with a timestamp or repeat the same reference in multiple columns.";
 
 
 fn resolve_cached_english<'a>(
@@ -939,5 +941,21 @@ mod tests {
 
         let final_prompt = build_final_report_system_prompt("instructions", "template");
         assert!(final_prompt.contains(REFERENCE_INSTRUCTION));
+    }
+
+    #[test]
+    fn standard_meeting_prompt_keeps_evidence_text_and_time_in_separate_columns() {
+        let template = crate::summary::templates::validate_and_parse_template(
+            include_str!("../../templates/standard_meeting.json"),
+        ).expect("standard meeting template must be valid");
+        let prompt = build_final_report_system_prompt(
+            &template.to_section_instructions(),
+            &template.to_markdown_structure(),
+        );
+
+        assert!(prompt.contains("| Reference Transcript Segment | Segment Time stamp |"));
+        assert!(prompt.contains("In Reference Transcript Segment, include the supporting transcript words"));
+        assert!(prompt.contains("In Segment Time stamp, include one transcript timestamp range"));
+        assert!(prompt.contains("never replace the supporting text with a timestamp"));
     }
 }

@@ -14,7 +14,7 @@
     },
     {
       "title": "Action Items",
-      "instruction": "List all assigned tasks with their owners and due date. Always add reference transcript segment and timestamp in the table.",
+      "instruction": "List all assigned tasks with their owners and due date. In Reference Transcript Segment, include the supporting transcript words or a brief description of the supporting statement. Do not put timestamps in this column. In Segment Time stamp, include one transcript timestamp range in [MM:SS-MM:SS] format. Use the times supplied with the transcript; if no time is supplied, write Not specified. Do not repeat the timestamp in the task or reference text. Keep the supporting text and timestamp in their separate columns.",
       "format": "list",
       "item_format": "| **Owner** | Task | Due | Reference Transcript Segment | Segment Time stamp |\n| --- | --- | --- | --- | --- |"
     },

@@ -146,7 +146,7 @@ For build and acceleration details, see:
 - Source code is in the `src/` directory
 - To run only the frontend: `pnpm run dev`
 
-The PR build checks also open saved meetings in the production frontend with Chromium and WebKit. These tests use test data at the desktop command boundary. They use the real meeting page, summary editor, and timestamp extension. They fail on page errors and console errors.
+The PR build checks also open saved meetings in the production frontend with Chromium and WebKit. These tests use test data at the desktop command boundary. They use the real meeting page, summary editor, and timestamp extension. They check that highlights keep visible rows in place and that later-page references scroll only the transcript pane. They fail on page errors and console errors.
 
 Run the same check from this directory:
 

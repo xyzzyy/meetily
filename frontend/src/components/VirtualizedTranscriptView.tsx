@@ -11,7 +11,7 @@ import { RecordingStatusBar } from "./RecordingStatusBar";
 import { motion, AnimatePresence } from "framer-motion";
 import { TranscriptSegmentData } from "@/types";
 import type { DiarizationStatus } from "@/types/diarization";
-import { findTargetSegmentIndex, targetMayBeUnloaded } from "@/lib/transcript-navigation";
+import { findTargetSegmentIndex, getTranscriptRevealOffset, targetMayBeUnloaded } from "@/lib/transcript-navigation";
 
 export interface VirtualizedTranscriptViewProps {
     /** Transcript segments to display */
@@ -142,10 +142,15 @@ const TranscriptSegment = memo(function TranscriptSegment({
     return (
         <div
             id={`segment-${id}`}
-            className={`mb-3 rounded-md transition-all duration-500 ${
-                highlighted ? 'ring-2 ring-blue-500 bg-blue-50/60 dark:bg-blue-950/40 p-1.5 -m-1.5' : ''
+            data-highlighted={highlighted || undefined}
+            className={`relative mb-3 rounded-sm transition-colors duration-200 motion-reduce:transition-none ${
+                highlighted ? 'bg-blue-50 dark:bg-blue-400/10' : ''
             }`}
         >
+            <span
+                aria-hidden="true"
+                className={`pointer-events-none absolute inset-y-0 -left-2 w-0.5 rounded-full bg-blue-500 transition-opacity duration-200 motion-reduce:transition-none ${highlighted ? 'opacity-100' : 'opacity-0'}`}
+            />
             <div className="flex items-start gap-2">
                 {onToggle && (
                     <input
@@ -373,15 +378,27 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
         const targetSegment = segments[targetIndex];
         if (!targetSegment) return;
         setHighlight({ id: targetSegment.id, key: scrollToKey });
-        if (useVirtualization) {
-            virtualizer.scrollToIndex(targetIndex, { align: 'center' });
-        } else {
-            document.getElementById(`segment-${targetSegment.id}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        const container = scrollRef.current;
+        const target = document.getElementById(`segment-${targetSegment.id}`);
+        if (container && target && container.contains(target)) {
+            const viewport = container.getBoundingClientRect();
+            const row = target.getBoundingClientRect();
+            const top = getTranscriptRevealOffset({
+                scrollTop: container.scrollTop,
+                viewportTop: viewport.top + container.clientTop,
+                viewportHeight: container.clientHeight,
+                targetTop: row.top,
+                targetHeight: row.height,
+            });
+            if (top !== container.scrollTop) container.scrollTo({ top, behavior: 'instant' });
+        } else if (useVirtualization) {
+            // Unmounted rows need the virtualizer to load and measure them first.
+            virtualizer.scrollToIndex(targetIndex, { align: 'auto' });
         }
     }, [scrollToTime, scrollToKey, segments, hasMore, isLoadingMore, onLoadMore, useVirtualization, virtualizer, loadRecheck]);
 
     return (
-        <div ref={scrollRef} className="flex flex-col h-full overflow-y-auto px-4 py-2">
+        <div ref={scrollRef} data-transcript-scroll-container className="flex flex-col h-full overflow-y-auto px-4 py-2">
             {/* Recording Status Bar - Sticky at top, always visible when recording */}
             <AnimatePresence>
                 {isRecording && (
