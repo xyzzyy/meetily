@@ -82,7 +82,8 @@ const ENGLISH_BASE_SUMMARY_INSTRUCTION: &str =
 const REFERENCE_INSTRUCTION: &str = "**TRANSCRIPT REFERENCE REQUIREMENT:**\
 \nAfter each key point, decision, action item, or important detail, include the \
 timestamp range from the transcript where this was discussed, in the format `[MM:SS-MM:SS]`. \
-Take the times from the `[MM:SS–MM:SS]` prefixes shown in the transcript text.\
+Take the times from the `[MM:SS–MM:SS]` prefixes shown in the transcript text. \
+If the relevant transcript lines have no time prefix, omit the reference; never invent a time.\
 \nExample: \"Decision: Migrate authentication to OAuth2. [14:32-15:18]\"\
 \nExample: \"Alice will prepare the migration plan. [27:41-28:05]\"\
 \nInclude the reference at the end of each relevant item.";
