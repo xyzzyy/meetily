@@ -32,7 +32,7 @@ const sample = (meetingId, extra = {}) => ({
   speakerLabel: 'Scrum Master Madior', speechSeconds: 30, removable: true, ...extra,
 });
 
-function makeSettings({ samples, confirmAnswer = true, removeOutcome = 'recalculated', profiles = [madior] }) {
+function makeSettings({ samples, confirmAnswer = true, removeOutcome = 'recalculated', profiles = [madior], rename = async () => {} }) {
   let cursor = 0;
   const states = new Map();
   const calls = [];
@@ -54,6 +54,7 @@ function makeSettings({ samples, confirmAnswer = true, removeOutcome = 'recalcul
       calls.push({ command, args });
       if (command === 'list_speaker_profiles') return profiles;
       if (command === 'list_speaker_profile_samples') return currentSamples;
+      if (command === 'update_speaker_profile') return rename(args.request);
       if (command === 'remove_speaker_profile_sample') {
         currentSamples = currentSamples.filter(item => item.meetingId !== args.request.meetingId);
         return removeOutcome;
@@ -89,7 +90,145 @@ function text(node) {
 const buttons = (tree, label) => nodes(tree).filter(node => node.type === 'Button' && text(node) === label);
 const toggles = tree => nodes(tree).filter(node => node.type === 'button' && 'aria-expanded' in node.props);
 const open = (settings, index = 0) => toggles(settings.render())[index].props.onClick();
+const renameButton = (tree, name = madior.name) => nodes(tree)
+  .find(node => node.type === 'Button' && node.props['aria-label'] === `Rename ${name}`);
+const nameInput = tree => nodes(tree).find(node => node.type === 'Input' && node.props.id === 'remembered-voice-name');
+const submitRename = settings => nodes(settings.render()).find(node => node.type === 'form')
+  .props.onSubmit({ preventDefault() {} });
 async function settle() { for (let i = 0; i < 20; i++) await Promise.resolve(); }
+
+// Rename starts with the current name and saves the trimmed name for the selected voice.
+{
+  const settings = makeSettings({ samples: [], profiles: [andrew, madior] });
+  renameButton(settings.render()).props.onClick();
+  assert.equal(nameInput(settings.render()).props.value, madior.name);
+  assert.equal(buttons(settings.render(), 'Save')[0].props.disabled, true);
+  nameInput(settings.render()).props.onChange({ target: { value: '  Aaron  ' } });
+  assert.equal(buttons(settings.render(), 'Save')[0].props.disabled, false);
+  submitRename(settings);
+  await settle();
+  const request = settings.calls.find(call => call.command === 'update_speaker_profile').args.request;
+  assert.equal(JSON.stringify(request), JSON.stringify({ profileId: 'p1', name: 'Aaron' }));
+  assert.equal(nameInput(settings.render()), undefined);
+  const renamed = settings.states.get('profiles').find(profile => profile.id === madior.id);
+  assert.equal(JSON.stringify(renamed), JSON.stringify({ ...madior, name: 'Aaron' }));
+  assert.equal(settings.states.get('profiles')[1].name, andrew.name);
+  assert.ok(renameButton(settings.render(), 'Aaron'));
+  assert.equal(settings.calls.length, 1);
+}
+// Another person's name is rejected, ignoring case and surrounding spaces.
+{
+  const settings = makeSettings({ samples: [], profiles: [andrew, { ...madior, name: '  Élodie  ' }] });
+  renameButton(settings.render(), andrew.name).props.onClick();
+  for (const name of ['Élodie', '  éLODIE \t']) {
+    nameInput(settings.render()).props.onChange({ target: { value: name } });
+    const tree = settings.render();
+    assert.equal(buttons(tree, 'Save')[0].props.disabled, true);
+    assert.equal(nameInput(tree).props['aria-invalid'], true);
+    assert.ok(text(nodes(tree).find(node => node.props?.role === 'alert')).includes('already uses this name'));
+    submitRename(settings);
+    await settle();
+    assert.equal(settings.calls.length, 0);
+    assert.equal(settings.states.get('profiles')[0].name, andrew.name);
+  }
+  nameInput(settings.render()).props.onChange({ target: { value: 'Andrew' } });
+  assert.equal(buttons(settings.render(), 'Save')[0].props.disabled, false);
+  assert.equal(nameInput(settings.render()).props['aria-invalid'], false);
+  submitRename(settings);
+  await settle();
+  assert.equal(settings.states.get('profiles').find(profile => profile.id === andrew.id).name, 'Andrew');
+}
+// A case-only change to the selected person's own name is allowed.
+{
+  const settings = makeSettings({ samples: [], profiles: [andrew, madior] });
+  renameButton(settings.render()).props.onClick();
+  nameInput(settings.render()).props.onChange({ target: { value: madior.name.toLowerCase() } });
+  assert.equal(buttons(settings.render(), 'Save')[0].props.disabled, false);
+  submitRename(settings);
+  await settle();
+  assert.equal(settings.calls.filter(call => call.command === 'update_speaker_profile').length, 1);
+}
+// Cancel and dialog dismissal discard edits. Reopening restores the saved name.
+{
+  const settings = makeSettings({ samples: [] });
+  for (const dismiss of [
+    tree => buttons(tree, 'Cancel')[0].props.onClick(),
+    tree => nodes(tree).find(node => node.type === 'Dialog').props.onOpenChange(false),
+  ]) {
+    renameButton(settings.render()).props.onClick();
+    nameInput(settings.render()).props.onChange({ target: { value: 'Changed' } });
+    dismiss(settings.render());
+    assert.equal(nameInput(settings.render()), undefined);
+    assert.equal(settings.calls.length, 0);
+    assert.equal(settings.states.get('profiles')[0].name, madior.name);
+  }
+  renameButton(settings.render()).props.onClick();
+  assert.equal(nameInput(settings.render()).props.value, madior.name);
+}
+// A blank name cannot be submitted, including with the Enter key.
+{
+  const settings = makeSettings({ samples: [] });
+  renameButton(settings.render()).props.onClick();
+  nameInput(settings.render()).props.onChange({ target: { value: ' \t ' } });
+  assert.equal(buttons(settings.render(), 'Save')[0].props.disabled, true);
+  submitRename(settings);
+  await settle();
+  assert.equal(settings.calls.length, 0);
+}
+// A failed save keeps the old name and the edit, shows the error, and permits a retry.
+{
+  let attempts = 0;
+  const settings = makeSettings({ samples: [], rename: async () => {
+    if (++attempts === 1) throw new Error('Database unavailable');
+  } });
+  renameButton(settings.render()).props.onClick();
+  nameInput(settings.render()).props.onChange({ target: { value: 'Madior' } });
+  submitRename(settings);
+  await settle();
+  assert.equal(settings.states.get('profiles')[0].name, madior.name);
+  assert.equal(nameInput(settings.render()).props.value, 'Madior');
+  assert.ok(text(nodes(settings.render()).find(node => node.props?.role === 'alert')).includes('Database unavailable'));
+  assert.equal(buttons(settings.render(), 'Save')[0].props.disabled, false);
+  submitRename(settings);
+  await settle();
+  assert.equal(settings.states.get('profiles')[0].name, 'Madior');
+  assert.equal(nameInput(settings.render()), undefined);
+}
+// A pending save blocks duplicate writes, dismissal, and voice removal.
+{
+  let finish;
+  const settings = makeSettings({ samples: [], rename: () => new Promise(resolve => { finish = resolve; }) });
+  renameButton(settings.render()).props.onClick();
+  nameInput(settings.render()).props.onChange({ target: { value: 'Madior' } });
+  submitRename(settings);
+  await settle();
+  let tree = settings.render();
+  assert.equal(buttons(tree, 'Saving…')[0].props.disabled, true);
+  assert.equal(buttons(tree, 'Cancel')[0].props.disabled, true);
+  assert.equal(nameInput(tree).props.disabled, true);
+  assert.equal(renameButton(tree).props.disabled, true);
+  assert.equal(nodes(tree).find(node => node.props?.title === 'Forget voice').props.disabled, true);
+  nodes(tree).find(node => node.type === 'Dialog').props.onOpenChange(false);
+  submitRename(settings);
+  assert.equal(settings.calls.filter(call => call.command === 'update_speaker_profile').length, 1);
+  assert.ok(nameInput(settings.render()));
+  finish();
+  await settle();
+  assert.equal(nameInput(settings.render()), undefined);
+}
+// Search uses the new name after a save.
+{
+  const settings = makeSettings({ samples: [] });
+  renameButton(settings.render()).props.onClick();
+  nameInput(settings.render()).props.onChange({ target: { value: 'Alice' } });
+  submitRename(settings);
+  await settle();
+  const search = () => nodes(settings.render()).find(node => node.props?.type === 'search');
+  search().props.onChange({ target: { value: 'Madior' } });
+  assert.equal(toggles(settings.render()).length, 0);
+  search().props.onChange({ target: { value: 'Alice' } });
+  assert.equal(toggles(settings.render()).length, 1);
+}
 
 // Opening a voice lists the meetings that make it up.
 {
