@@ -444,27 +444,50 @@ impl WhisperEngine {
         final_text
     }
 
-    // Check for obviously meaningless patterns
+    /// Whether a segment is nothing but phrases Whisper produces from silence,
+    /// music or noise rather than speech. The phrases can repeat and mix in any
+    /// order ("Applause, applause!", "Thanks for watching. Like and subscribe."),
+    /// because a stuck decoder loops them. A segment with any other word is
+    /// speech and is kept, even when it also contains one of these phrases.
+    ///
+    /// The check works on lowercase words with punctuation removed, before any
+    /// repetition cleanup rewrites the text, so case, punctuation and the number
+    /// of repeats do not change the result.
     fn is_meaningless_output(text: &str) -> bool {
-        let text_lower = text.to_lowercase();
-
-        // Check for common meaningless patterns
-        let meaningless_patterns = [
-            "thank you for watching",
-            "thanks for watching",
-            "like and subscribe",
-            "music playing",
-            "applause",
-            "laughter",
-            "um um um",
-            "uh uh uh",
-            "ah ah ah",
+        const HALLUCINATED_PHRASES: &[&[&str]] = &[
+            &["thank", "you", "for", "watching"],
+            &["thanks", "for", "watching"],
+            &["like", "and", "subscribe"],
+            &["music", "playing"],
+            &["laughter", "and", "applause"],
+            &["applause"],
+            &["laughter"],
+            &["um"],
+            &["uh"],
+            &["ah"],
         ];
 
-        for pattern in &meaningless_patterns {
-            if text_lower.contains(pattern) {
-                return true;
+        let words: Vec<String> = text
+            .split(|c: char| !c.is_alphanumeric())
+            .filter(|word| !word.is_empty())
+            .map(str::to_lowercase)
+            .collect();
+        // covered[i] is true when the first i words split into known phrases.
+        let mut covered = vec![false; words.len() + 1];
+        covered[0] = true;
+        for start in 0..words.len() {
+            if !covered[start] {
+                continue;
             }
+            for phrase in HALLUCINATED_PHRASES {
+                let end = start + phrase.len();
+                if end <= words.len() && words[start..end].iter().zip(phrase.iter()).all(|(word, part)| word == part) {
+                    covered[end] = true;
+                }
+            }
+        }
+        if !words.is_empty() && covered[words.len()] {
+            return true;
         }
 
         // Check if text is mostly the same character or very short repetitive patterns
@@ -1293,6 +1316,62 @@ mod tests {
     use tokio::net::TcpListener;
     use tokio::sync::oneshot;
     use tokio::time::{timeout, Duration};
+
+    #[test]
+    fn meaningless_output_drops_hallucinated_phrases() {
+        for text in [
+            "Thank you for watching.",
+            "Thanks for watching!",
+            "[Applause]",
+            "(laughter)",
+            "[Laughter and applause]",
+            "Applause",
+            "Um, um, um.",
+            "Um.",
+            "Like and subscribe.",
+            // A stuck decoder repeats and mixes them.
+            "applause applause applause",
+            "Applause applause applause",
+            "Applause, APPLAUSE, applause!",
+            "Thank you for watching. Thank you for watching.",
+            "Thanks for watching. Like and subscribe.",
+            "um uh um uh",
+        ] {
+            assert!(WhisperEngine::is_meaningless_output(text), "should drop: {text}");
+        }
+    }
+
+    #[test]
+    fn meaningless_output_keeps_real_sentences_that_mention_the_phrases() {
+        for text in [
+            "The whole room burst into laughter when he said that.",
+            "Let's give a round of applause to the team for shipping this.",
+            "Thank you for watching over the deployment last night.",
+            "Thank you for watching him.",
+            "Thanks for watching Alice.",
+            "Thank you for watching everyone",
+            "burst into laughter",
+            "round of applause",
+            "[The room burst into laughter]",
+            "Um, um, um, so I think the budget is fine.",
+            "We should plan the budget review for next week.",
+        ] {
+            assert!(!WhisperEngine::is_meaningless_output(text), "should keep: {text}");
+        }
+    }
+
+    #[test]
+    fn cleaning_a_sentence_that_mentions_laughter_keeps_the_sentence() {
+        let text = "The whole room burst into laughter when he said that.";
+        assert_eq!(WhisperEngine::clean_repetitive_text(text), text);
+    }
+
+    #[test]
+    fn cleaning_a_repeated_hallucination_leaves_nothing() {
+        for text in ["applause applause applause", "Applause applause applause", "Thanks for watching thanks for watching"] {
+            assert_eq!(WhisperEngine::clean_repetitive_text(text), "", "{text}");
+        }
+    }
 
     fn tiny_model(models: &[ModelInfo]) -> &ModelInfo {
         models
