@@ -238,9 +238,6 @@ export default function Home() {
                       onStopInitiated={() => setIsStopping(true)}
                       onStopRequestFinished={() => setIsStopping(false)}
                       barHeights={barHeights}
-                      onTranscriptionError={(message) => {
-                        showModal('errorAlert', message);
-                      }}
                       isRecordingDisabled={isRecordingDisabled}
                       isParentProcessing={isProcessingStop}
                       selectedDevices={selectedDevices}
