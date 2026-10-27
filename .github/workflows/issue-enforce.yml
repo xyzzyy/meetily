@@ -14,7 +14,7 @@ jobs:
     if: >-
       github.event.issue.state == 'open' &&
       (github.event.action != 'unlabeled' || github.event.label.name == 'template-grace')
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 5
     concurrency:
       group: issue-template-${{ github.event.issue.number }}

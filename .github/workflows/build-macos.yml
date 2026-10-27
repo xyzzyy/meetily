@@ -34,7 +34,7 @@ env:
 jobs:
   build-macos:
     name: Build macOS (Apple Silicon)
-    runs-on: macos-latest
+    runs-on: blacksmith-6vcpu-macos-15
     permissions:
       contents: write
 
