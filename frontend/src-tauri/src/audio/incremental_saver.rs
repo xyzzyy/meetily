@@ -506,34 +506,25 @@ mod tests {
         );
     }
 
-    #[test]
-    fn checkpoints_in_a_folder_with_an_apostrophe_merge() {
-        let Some(ffmpeg) = find_ffmpeg_path() else { return };
+    /// Runs the shipped recovery path, so a change to how it builds the concat
+    /// list is caught. Fails rather than skips when ffmpeg is missing.
+    #[tokio::test]
+    async fn recovery_merges_checkpoints_in_a_folder_with_an_apostrophe() {
         let temporary = tempdir().unwrap();
-        let directory = temporary.path().join("John's Standup");
-        std::fs::create_dir_all(&directory).unwrap();
-        let mut list = String::new();
+        let meeting = temporary.path().join("John's Standup");
+        let checkpoints = meeting.join(".checkpoints");
+        std::fs::create_dir_all(&checkpoints).unwrap();
         for index in 0..2 {
-            let chunk = directory.join(format!("chunk{index}.mp4"));
-            let status = std::process::Command::new(&ffmpeg)
-                .args(["-loglevel", "error", "-f", "lavfi", "-i", "sine=duration=1", "-c:a", "aac"])
-                .arg(&chunk)
-                .status()
-                .unwrap();
-            assert!(status.success());
-            list.push_str(&concat_list_line(&chunk));
+            encode_single_audio(bytemuck::cast_slice(&vec![0.25f32; 48000]), 48000, 1,
+                &checkpoints.join(format!("audio_chunk_{index:03}.mp4"))).unwrap();
         }
-        let list_file = directory.join("list.txt");
-        std::fs::write(&list_file, list).unwrap();
-        let output = directory.join("merged.mp4");
-        let status = std::process::Command::new(&ffmpeg)
-            .args(["-loglevel", "error", "-f", "concat", "-safe", "0", "-i"])
-            .arg(&list_file)
-            .args(["-c", "copy"])
-            .arg(&output)
-            .status()
-            .unwrap();
-        assert!(status.success() && output.is_file());
+
+        let folder = meeting.to_string_lossy().to_string();
+        let recovered = recover_audio_from_checkpoints(folder, 48000).await.unwrap();
+        assert_eq!(recovered.status, "success", "{}", recovered.message);
+        assert_eq!(recovered.chunk_count, 2);
+        let merged = super::super::decoder::decode_audio_file(&meeting.join("audio.mp4")).unwrap();
+        assert!((merged.duration_seconds - 2.0).abs() < 0.1, "{}", merged.duration_seconds);
     }
 
     #[test]
