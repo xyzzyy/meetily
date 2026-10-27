@@ -195,7 +195,7 @@ for (const segmentCount of [4, 130]) {
     await expect(target).toHaveCSS('box-shadow', 'none');
     expectSamePosition(await transcriptPosition(page, 'segment-transcript-2'), before);
     await page.screenshot({ path: testInfo.outputPath('reference-highlight.png') });
-    await expect(target).not.toHaveAttribute('data-highlighted', 'true', { timeout: 4000 });
+    await expect(target).not.toHaveAttribute('data-highlighted', 'true', { timeout: 1500 });
     expectSamePosition(await transcriptPosition(page, 'segment-transcript-2'), before);
     expect(errors).toEqual([]);
   });

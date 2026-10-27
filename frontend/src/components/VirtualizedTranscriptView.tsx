@@ -339,7 +339,7 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
 
     useEffect(() => {
         if (!highlight) return;
-        const timer = setTimeout(() => setHighlight(null), 2500);
+        const timer = setTimeout(() => setHighlight(null), 1000);
         return () => clearTimeout(timer);
     }, [highlight]);
 
