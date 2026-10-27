@@ -6,6 +6,7 @@
     "scripts": {
         "dev": "next dev -p 3118",
         "build": "next build",
+        "test:release": "playwright test --config playwright.release.config.ts",
         "export": "next export",
         "start": "next start -p 3118",
         "tauri": "tauri",
@@ -97,6 +98,7 @@
         }
     },
     "devDependencies": {
+        "@playwright/test": "1.64.1",
         "@tailwindcss/container-queries": "^0.1.1",
         "@tailwindcss/typography": "^0.5.15",
         "@tauri-apps/cli": "^2.1.0",

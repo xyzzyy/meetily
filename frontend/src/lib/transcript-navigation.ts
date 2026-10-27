@@ -3,6 +3,31 @@ export interface NavigableSegment {
   endTime?: number; // audio_end_time in seconds
 }
 
+/** Reveal off-screen rows; keep visible oversized rows in place and reveal their start otherwise. */
+export function getTranscriptRevealOffset({
+  scrollTop,
+  viewportTop,
+  viewportHeight,
+  targetTop,
+  targetHeight,
+}: {
+  scrollTop: number;
+  viewportTop: number;
+  viewportHeight: number;
+  targetTop: number;
+  targetHeight: number;
+}): number {
+  const viewportBottom = viewportTop + viewportHeight;
+  const targetBottom = targetTop + targetHeight;
+  if (targetHeight > viewportHeight) {
+    const partlyVisible = targetTop < viewportBottom && targetBottom > viewportTop;
+    return partlyVisible ? scrollTop : Math.max(0, scrollTop + targetTop - viewportTop);
+  }
+  if (targetTop < viewportTop) return Math.max(0, scrollTop + targetTop - viewportTop);
+  if (targetBottom > viewportBottom) return scrollTop + targetBottom - viewportBottom;
+  return scrollTop;
+}
+
 /**
  * Picks the segment a transcript reference points at.
  *
