@@ -479,7 +479,7 @@ impl SpeakerProfilesRepository {
         .await?;
         if other_names.iter().any(|other| other.trim().to_lowercase() == wanted) {
             return Err(SqlxError::Protocol(
-                "A remembered voice already uses this name. Choose a different name.".to_string(),
+                "A remembered voice already uses this name. Please choose a different name.".to_string(),
             ));
         }
         sqlx::query("UPDATE speaker_profiles SET name = ?, updated_at = ? WHERE id = ?")

@@ -85,7 +85,7 @@ export function RememberedVoices() {
 
   const duplicateNameError = renamingProfile && profiles.some(profile =>
     profile.id !== renamingProfile.id && profile.name.trim().toLowerCase() === newName.trim().toLowerCase())
-    ? 'A remembered voice already uses this name. Choose a different name.'
+    ? 'A remembered voice already uses this name. Please choose a different name.'
     : null;
 
   const renameVoice = async () => {
