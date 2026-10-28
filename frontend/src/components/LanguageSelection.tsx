@@ -119,7 +119,7 @@ interface LanguageSelectionProps {
   selectedLanguage: string;
   onLanguageChange: (language: string) => void;
   disabled?: boolean;
-  provider?: 'localWhisper' | 'parakeet' | 'funasr' | 'deepgram' | 'elevenLabs' | 'groq' | 'openai';
+  provider?: 'localWhisper' | 'parakeet' | 'funasr' | 'nemotron' | 'deepgram' | 'elevenLabs' | 'groq' | 'openai';
 }
 
 export function LanguageSelection({
@@ -212,7 +212,7 @@ export function LanguageSelection({
           <p className="text-gray-600 dark:text-ink-300">
             <strong>Current:</strong> {selectedLanguageName}
           </p>
-          {selectedLanguage === 'auto' && (
+          {selectedLanguage === 'auto' && provider !== 'nemotron' && (
             <div className="p-2 bg-yellow-50 dark:bg-yellow-500/10 border border-yellow-200 dark:border-yellow-500/30 rounded text-yellow-800 dark:text-yellow-200">
               <p className="font-medium">⚠️ Auto Detect may produce incorrect results</p>
               <p className="mt-1">For best accuracy, select your specific language (e.g., English, Spanish, etc.)</p>

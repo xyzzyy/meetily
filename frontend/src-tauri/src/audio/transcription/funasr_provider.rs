@@ -12,7 +12,7 @@ const MIN_PIECE_SAMPLES: usize = 16_000;
 /// Each cut is placed at the quietest 30 ms frame in the back half of the
 /// allowed window, where a pause between words is most likely. The pieces
 /// cover the input exactly, so no audio is dropped or sent twice.
-fn request_ranges(audio: &[f32], max_samples: usize) -> Vec<std::ops::Range<usize>> {
+pub(crate) fn request_ranges(audio: &[f32], max_samples: usize) -> Vec<std::ops::Range<usize>> {
     let mut ranges = Vec::new();
     let mut start = 0;
     while audio.len() - start > max_samples {

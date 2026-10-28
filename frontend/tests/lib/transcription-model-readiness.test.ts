@@ -33,3 +33,10 @@ describe('transcription model readiness', () => {
     expect(hasDownloadingModel([{ status: { Downloading: { progress: 42 } } }])).toBeTrue();
   });
 });
+
+test('uses local Nemotron readiness commands', () => {
+  expect(getProviderCommands('nemotron')).toEqual({
+    initialize: 'nemotron_init', hasAvailableModels: 'nemotron_has_available_models',
+    getAvailableModels: 'nemotron_get_available_models',
+  });
+});

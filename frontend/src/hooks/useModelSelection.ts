@@ -3,7 +3,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { toast } from 'sonner';
 
 interface ModelSelectionOptions {
-  provider: 'localWhisper' | 'parakeet' | 'funasr';
+  provider: 'localWhisper' | 'parakeet' | 'funasr' | 'nemotron';
   autoSave: boolean;
   onModelSelect?: (modelName: string) => void;
   displayName: (modelName: string) => string;

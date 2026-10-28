@@ -412,9 +412,11 @@ async fn run_retranscription<R: Runtime>(
     } else {
         None
     };
-    let funasr_provider = if batch_engine == super::common::BatchEngine::FunAsr {
+    let segment_provider = if batch_engine == super::common::BatchEngine::FunAsr {
         let engine = super::common::get_or_init_funasr(&app, model.as_deref(), language.as_deref()).await?;
-        Some(crate::audio::transcription::FunAsrProvider::new(engine))
+        Some(Box::new(crate::audio::transcription::FunAsrProvider::new(engine)) as Box<dyn crate::audio::transcription::TranscriptionProvider>)
+    } else if batch_engine == super::common::BatchEngine::Nemotron {
+        Some(Box::new(crate::nemotron::configured_provider(&app, model.as_deref()).await.map_err(anyhow::Error::msg)?) as Box<dyn crate::audio::transcription::TranscriptionProvider>)
     } else {
         None
     };
@@ -486,12 +488,11 @@ async fn run_retranscription<R: Runtime>(
             continue;
         }
 
-        let (rows, confidence) = if let Some(provider) = funasr_provider.as_ref() {
-            use crate::audio::transcription::TranscriptionProvider;
+        let (rows, confidence) = if let Some(provider) = segment_provider.as_ref() {
             let result = provider
                 .transcribe(segment.samples.clone(), language.clone())
                 .await
-                .map_err(|e| anyhow!("FUN-ASR transcription failed on segment {}: {}", i, e))?;
+                .map_err(|e| anyhow!("{} transcription failed on segment {}: {}", provider.provider_name(), i, e))?;
             // FUN-ASR has no word times. Keep the VAD and speaker-turn spans
             // selected above, without changing Parakeet's token-timed rows.
             let rows = if result.text.trim().is_empty() {

@@ -1,0 +1,559 @@
+//! Managed, offline MLX worker for the full Nemotron 3.5 Transcribe model.
+use crate::audio::transcription::{TranscriptResult, TranscriptionError, TranscriptionProvider};
+use async_trait::async_trait;
+use base64::{engine::general_purpose::STANDARD, Engine};
+use futures_util::StreamExt;
+use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
+use std::{
+    path::{Path, PathBuf},
+    process::Stdio,
+    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
+    time::Duration,
+};
+use tauri::{AppHandle, Emitter, Manager, Runtime};
+use tokio::{
+    io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
+    process::{Child, ChildStdin, ChildStdout, Command},
+    sync::Mutex,
+};
+#[path = "nemotron_artifacts.rs"]
+mod artifacts;
+use artifacts::ARTIFACTS;
+
+pub const MODEL: &str = "nemotron-3.5-transcribe-30b-a4b-mlx-4bit";
+const REPO: &str = "nativ-community/Nemotron-3.5-Transcribe-30B-A4B-EA-4bit";
+const REVISION: &str = "c47153ca2ce4024d43e216b81e6db4f67b886545";
+const UV_URL: &str =
+    "https://github.com/astral-sh/uv/releases/download/0.11.18/uv-aarch64-apple-darwin.tar.gz";
+const UV_SHA: &str = "1a7adf8dadae3b55853115d13a8bf564d219597ad13824b93b213706933863e5";
+const MLX_URL: &str =
+    "https://github.com/Blaizzy/mlx-audio/archive/92decb7577878ef8e9274c1a7e33084760be03aa.tar.gz";
+const MLX_SHA: &str = "e8d717772d94b2bfdc946606511361804da52eb824e42269dfdc9f76dbb02ea2";
+const RUNTIME_VERSION: &str = "mlx-audio-92decb7;mlx-0.32.4;python-3.12.12";
+const CONSTRAINTS: &str = include_str!("../../../nemotron-helper/constraints.txt");
+const WORKER: &str = include_str!("../../../nemotron-helper/main.py");
+static BUSY: AtomicBool = AtomicBool::new(false);
+static ACTIVE: AtomicUsize = AtomicUsize::new(0);
+static CANCEL: AtomicBool = AtomicBool::new(false);
+static INSTALL_LOCK: Mutex<()> = Mutex::const_new(());
+
+fn supported() -> bool {
+    cfg!(all(target_os = "macos", target_arch = "aarch64"))
+}
+fn root<R: Runtime>(app: &AppHandle<R>) -> Result<PathBuf, String> {
+    Ok(crate::model_storage::owned_models_root(app)?.join("nemotron"))
+}
+fn runtime_ready(path: &Path) -> bool {
+    std::fs::read_to_string(path.join("runtime-ready"))
+        .map(|value| value == RUNTIME_VERSION)
+        .unwrap_or(false)
+}
+fn ready(path: &Path) -> bool {
+    runtime_ready(path)
+        && path.join("venv/bin/python").is_file()
+        && ARTIFACTS.iter().all(|(name, size, _)| {
+            path.join("model")
+                .join(name)
+                .metadata()
+                .map(|m| m.len() == *size)
+                .unwrap_or(false)
+        })
+}
+pub fn validate_install<R: Runtime>(app: &AppHandle<R>, model: &str) -> Result<(), String> {
+    if !supported() {
+        return Err("Nemotron Transcribe requires macOS on Apple silicon.".into());
+    }
+    if model != MODEL {
+        return Err("Unknown Nemotron model.".into());
+    }
+    if !ready(&root(app)?) {
+        return Err("Download Nemotron and its runtime in Settings first.".into());
+    }
+    Ok(())
+}
+#[tauri::command]
+pub async fn nemotron_init() -> Result<(), String> {
+    Ok(())
+}
+#[tauri::command]
+pub async fn nemotron_get_available_models<R: Runtime>(
+    app: AppHandle<R>,
+) -> Result<Vec<Value>, String> {
+    let path = root(&app)?;
+    let status = if BUSY.load(Ordering::SeqCst) {
+        json!({"Downloading":{"progress":0}})
+    } else if ready(&path) && supported() {
+        json!("Available")
+    } else {
+        json!("Missing")
+    };
+    Ok(vec![
+        json!({"name":MODEL, "display_name":"Nemotron 3.5 Transcribe · MLX 4-bit", "size_mb":ARTIFACTS.iter().map(|(_,s,_)|s).sum::<u64>() / 1_000_000,
+        "supported":supported(), "status":status}),
+    ])
+}
+#[tauri::command]
+pub async fn nemotron_has_available_models<R: Runtime>(app: AppHandle<R>) -> Result<bool, String> {
+    Ok(supported() && ready(&root(&app)?))
+}
+fn cancelled() -> Result<(), String> {
+    if CANCEL.load(Ordering::SeqCst) {
+        Err("Download cancelled.".into())
+    } else {
+        Ok(())
+    }
+}
+fn progress<R: Runtime>(app: &AppHandle<R>, phase: &str, percent: u64) {
+    let _ = app.emit(
+        "nemotron-download-progress",
+        json!({"phase":phase,"percent":percent}),
+    );
+}
+async fn digest(path: &Path) -> Result<String, String> {
+    let mut file = tokio::fs::File::open(path)
+        .await
+        .map_err(|e| e.to_string())?;
+    let mut hash = Sha256::new();
+    let mut buf = vec![0; 1024 * 1024];
+    loop {
+        cancelled()?;
+        let n = file.read(&mut buf).await.map_err(|e| e.to_string())?;
+        if n == 0 {
+            break;
+        }
+        hash.update(&buf[..n]);
+    }
+    Ok(format!("{:x}", hash.finalize()))
+}
+async fn download<R: Runtime>(
+    app: &AppHandle<R>,
+    url: &str,
+    dest: &Path,
+    sha: &str,
+    size: Option<u64>,
+    completed: u64,
+    total: u64,
+) -> Result<(), String> {
+    cancelled()?;
+    if dest.is_file() && digest(dest).await? == sha {
+        return Ok(());
+    }
+    let part = dest.with_extension("part");
+    let client = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(30))
+        .timeout(Duration::from_secs(7200))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let response = client
+        .get(url)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?
+        .error_for_status()
+        .map_err(|e| e.to_string())?;
+    let mut stream = response.bytes_stream();
+    let mut file = tokio::fs::File::create(&part)
+        .await
+        .map_err(|e| e.to_string())?;
+    let mut hash = Sha256::new();
+    let mut bytes = 0;
+    let mut last_percent = u64::MAX;
+    loop {
+        cancelled()?;
+        let chunk = tokio::select! {
+            chunk = stream.next() => chunk,
+            _ = tokio::time::sleep(Duration::from_millis(250)) => continue,
+        };
+        let Some(chunk) = chunk else {
+            break;
+        };
+        cancelled()?;
+        let chunk = chunk.map_err(|e| e.to_string())?;
+        bytes += chunk.len() as u64;
+        if size.is_some_and(|s| bytes > s) {
+            return Err("Download exceeds the expected file size.".into());
+        }
+        file.write_all(&chunk).await.map_err(|e| e.to_string())?;
+        hash.update(&chunk);
+        let percent = ((completed + bytes) * 100 / total.max(1)).min(99);
+        if percent != last_percent {
+            progress(app, "Downloading model and runtime", percent);
+            last_percent = percent;
+        }
+    }
+    file.flush().await.map_err(|e| e.to_string())?;
+    drop(file);
+    if size.is_some_and(|s| bytes != s) || format!("{:x}", hash.finalize()) != sha {
+        return Err("Download verification failed. Try the download again.".into());
+    }
+    tokio::fs::rename(part, dest)
+        .await
+        .map_err(|e| e.to_string())
+}
+async fn run(command: &mut Command) -> Result<(), String> {
+    cancelled()?;
+    let status = command
+        .kill_on_drop(true)
+        .status()
+        .await
+        .map_err(|e| e.to_string())?;
+    cancelled()?;
+    if !status.success() {
+        return Err(format!(
+            "Runtime setup failed ({status}). See nemotron/runtime.log."
+        ));
+    }
+    Ok(())
+}
+async fn install<R: Runtime>(app: &AppHandle<R>, path: &Path) -> Result<(), String> {
+    tokio::fs::create_dir_all(path.join("model"))
+        .await
+        .map_err(|e| e.to_string())?;
+    let total = ARTIFACTS.iter().map(|(_, s, _)| s).sum::<u64>();
+    if !runtime_ready(path) {
+        progress(app, "Downloading runtime installer", 0);
+        download(app, UV_URL, &path.join("uv.tar.gz"), UV_SHA, None, 0, total).await?;
+        run(Command::new("/usr/bin/tar")
+            .args(["-xzf"])
+            .arg(path.join("uv.tar.gz"))
+            .arg("-C")
+            .arg(path))
+        .await?;
+        download(
+            app,
+            MLX_URL,
+            &path.join("mlx-audio.tar.gz"),
+            MLX_SHA,
+            None,
+            0,
+            total,
+        )
+        .await?;
+        // uv manages its own Python. No system Python or package state is changed.
+        let uv = path.join("uv-aarch64-apple-darwin/uv");
+        let log = std::fs::File::create(path.join("runtime.log")).map_err(|e| e.to_string())?;
+        progress(
+            app,
+            "Installing Python and MLX (cancel takes effect after this step)",
+            0,
+        );
+        run(Command::new(&uv)
+            .arg("--no-config")
+            .env("UV_CACHE_DIR", path.join("cache"))
+            .env_remove("PYTHONHOME")
+            .env_remove("PYTHONPATH")
+            .args(["venv", "--python", "3.12.12", "--managed-python", "--clear"])
+            .arg(path.join("venv"))
+            .env("UV_PYTHON_INSTALL_DIR", path.join("python"))
+            .stdout(Stdio::null())
+            .stderr(log.try_clone().map_err(|e| e.to_string())?))
+        .await?;
+        tokio::fs::write(path.join("constraints.txt"), CONSTRAINTS)
+            .await
+            .map_err(|e| e.to_string())?;
+        run(Command::new(&uv)
+            .arg("--no-config")
+            .env("UV_CACHE_DIR", path.join("cache"))
+            .env_remove("PYTHONHOME")
+            .env_remove("PYTHONPATH")
+            .args(["pip", "install", "--constraint"])
+            .arg(path.join("constraints.txt"))
+            .arg("--python")
+            .arg(path.join("venv/bin/python"))
+            .arg(format!(
+                "mlx-audio[stt] @ {}",
+                reqwest::Url::from_file_path(path.join("mlx-audio.tar.gz"))
+                    .map_err(|_| "Invalid runtime archive path.")?
+            ))
+            .arg("mlx==0.32.4")
+            .stdout(Stdio::null())
+            .stderr(log))
+        .await?;
+        run(Command::new(path.join("venv/bin/python"))
+            .args(["-c", "from mlx_audio.stt import load; import numpy"])
+            .stdout(Stdio::null()))
+        .await?;
+        tokio::fs::write(path.join("runtime-ready"), RUNTIME_VERSION.as_bytes())
+            .await
+            .map_err(|e| e.to_string())?;
+    }
+    let mut completed = 0;
+    for (name, size, sha) in ARTIFACTS {
+        download(
+            app,
+            &format!("https://huggingface.co/{REPO}/resolve/{REVISION}/{name}"),
+            &path.join("model").join(name),
+            sha,
+            Some(*size),
+            completed,
+            total,
+        )
+        .await?;
+        completed += size;
+    }
+    progress(app, "Download complete", 100);
+    Ok(())
+}
+struct BusyGuard;
+impl Drop for BusyGuard {
+    fn drop(&mut self) {
+        BUSY.store(false, Ordering::SeqCst);
+    }
+}
+#[tauri::command]
+pub async fn nemotron_download_model<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
+    if !supported() {
+        return Err("Nemotron Transcribe requires macOS on Apple silicon.".into());
+    }
+    if BUSY
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return Err("A Nemotron download is already running.".into());
+    }
+    let _busy = BusyGuard;
+    let _lock = INSTALL_LOCK.lock().await;
+    if ACTIVE.load(Ordering::SeqCst) > 0 {
+        return Err("Stop transcription before downloading Nemotron.".into());
+    }
+    CANCEL.store(false, Ordering::SeqCst);
+    let result = install(&app, &root(&app)?).await;
+    let _ = app.emit(
+        "nemotron-download-finished",
+        json!({"error":result.as_ref().err()}),
+    );
+    result
+}
+#[tauri::command]
+pub async fn nemotron_cancel_download() {
+    CANCEL.store(true, Ordering::SeqCst);
+}
+#[tauri::command]
+pub async fn nemotron_delete_model<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
+    let _lock = INSTALL_LOCK.lock().await;
+    if BUSY.load(Ordering::SeqCst) {
+        return Err("Wait for the download to stop.".into());
+    }
+    if ACTIVE.load(Ordering::SeqCst) > 0 {
+        return Err("Stop transcription before deleting Nemotron.".into());
+    }
+    let path = root(&app)?;
+    if path.exists() {
+        tokio::fs::remove_dir_all(path)
+            .await
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+struct Worker {
+    child: Child,
+    input: ChildStdin,
+    output: BufReader<ChildStdout>,
+}
+impl Drop for Worker {
+    fn drop(&mut self) {
+        let _ = self.child.start_kill();
+    }
+}
+impl Worker {
+    async fn reply(&mut self) -> Result<Value, String> {
+        let mut line = String::new();
+        let n = tokio::time::timeout(Duration::from_secs(600), self.output.read_line(&mut line))
+            .await
+            .map_err(|_| "Nemotron request timed out.")?
+            .map_err(|e| e.to_string())?;
+        if n == 0 || line.len() > 4 * 1024 * 1024 {
+            return Err("Nemotron worker stopped or sent an invalid reply.".into());
+        }
+        let value: Value = serde_json::from_str(&line).map_err(|e| e.to_string())?;
+        if let Some(error) = value.get("error") {
+            return Err(format!("Nemotron: {error}"));
+        }
+        Ok(value)
+    }
+    async fn spawn(path: &Path) -> Result<Self, String> {
+        let log = std::fs::File::create(path.join("worker.log")).map_err(|e| e.to_string())?;
+        let mut child = Command::new(path.join("venv/bin/python"))
+            .args(["-u", "-c", WORKER])
+            .arg(path.join("model"))
+            .env_remove("PYTHONHOME")
+            .env_remove("PYTHONPATH")
+            .env("HF_HUB_OFFLINE", "1")
+            .env("TRANSFORMERS_OFFLINE", "1")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(log)
+            .kill_on_drop(true)
+            .spawn()
+            .map_err(|e| e.to_string())?;
+        let input = child.stdin.take().ok_or("Nemotron input is unavailable.")?;
+        let output = BufReader::new(
+            child
+                .stdout
+                .take()
+                .ok_or("Nemotron output is unavailable.")?,
+        );
+        let mut worker = Self {
+            child,
+            input,
+            output,
+        };
+        if worker.reply().await?.get("ready") != Some(&json!(true)) {
+            return Err("Nemotron did not start.".into());
+        }
+        Ok(worker)
+    }
+}
+pub struct NemotronProvider {
+    worker: Mutex<Option<Worker>>,
+}
+impl Drop for NemotronProvider {
+    fn drop(&mut self) {
+        ACTIVE.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+pub async fn configured_provider<R: Runtime>(
+    app: &AppHandle<R>,
+    requested: Option<&str>,
+) -> Result<NemotronProvider, String> {
+    let selected = match requested {
+        Some(s) => s.to_string(),
+        None => {
+            let config = crate::api::api::api_get_transcript_config(app.clone(), app.state(), None)
+                .await?
+                .ok_or("Select a transcription model.")?;
+            if config.provider != "nemotron" {
+                return Err("The saved model is not Nemotron.".into());
+            }
+            config.model
+        }
+    };
+    validate_install(app, &selected)?;
+    let _lock = INSTALL_LOCK.lock().await;
+    if ACTIVE.load(Ordering::SeqCst) > 0 {
+        return Err("Nemotron is in use. Stop the current transcription first.".into());
+    }
+    let worker = Worker::spawn(&root(app)?).await?;
+    ACTIVE.fetch_add(1, Ordering::SeqCst);
+    Ok(NemotronProvider {
+        worker: Mutex::new(Some(worker)),
+    })
+}
+#[async_trait]
+impl TranscriptionProvider for NemotronProvider {
+    async fn transcribe(
+        &self,
+        audio: Vec<f32>,
+        _language: Option<String>,
+    ) -> Result<TranscriptResult, TranscriptionError> {
+        if audio.len() < 1600 {
+            return Err(TranscriptionError::AudioTooShort {
+                samples: audio.len(),
+                minimum: 1600,
+            });
+        }
+        if audio.iter().any(|s| !s.is_finite()) {
+            return Err(TranscriptionError::EngineFailed(
+                "Audio contains invalid samples.".into(),
+            ));
+        }
+        let mut guard = self.worker.lock().await;
+        let mut text = Vec::new();
+        // The full model is offline. Each request is a complete audio segment.
+        for range in
+            crate::audio::transcription::funasr_provider::request_ranges(&audio, 30 * 16000)
+        {
+            let piece = &audio[range];
+            if piece.len() < 1600 {
+                return Err(TranscriptionError::EngineFailed(
+                    "Audio split is too short.".into(),
+                ));
+            }
+            let result = async {
+                let worker = guard.as_mut().ok_or("Nemotron worker is not running.")?;
+                let bytes: Vec<u8> = piece.iter().flat_map(|v| v.to_le_bytes()).collect();
+                let request = json!({"audio":STANDARD.encode(bytes)}).to_string() + "\n";
+                worker
+                    .input
+                    .write_all(request.as_bytes())
+                    .await
+                    .map_err(|e| e.to_string())?;
+                worker.input.flush().await.map_err(|e| e.to_string())?;
+                let reply = worker.reply().await?;
+                reply
+                    .get("text")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+                    .ok_or("Nemotron reply has no transcript.".to_string())
+            }
+            .await;
+            match result {
+                Ok(part) => text.push(part),
+                Err(error) => {
+                    *guard = None;
+                    return Err(TranscriptionError::EngineFailed(error));
+                }
+            }
+        }
+        Ok(TranscriptResult {
+            text: text.join(" "),
+            confidence: None,
+            is_partial: false,
+        })
+    }
+    async fn is_model_loaded(&self) -> bool {
+        self.worker.lock().await.is_some()
+    }
+    async fn get_current_model(&self) -> Option<String> {
+        self.is_model_loaded().await.then(|| MODEL.to_string())
+    }
+    fn provider_name(&self) -> &'static str {
+        "Nemotron"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn incomplete_install_is_not_available() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("runtime-ready"), "ready").unwrap();
+        assert!(!ready(dir.path()));
+    }
+    #[test]
+    fn incomplete_or_changed_model_files_are_not_ready() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("venv/bin")).unwrap();
+        std::fs::create_dir_all(dir.path().join("model")).unwrap();
+        std::fs::write(dir.path().join("venv/bin/python"), "").unwrap();
+        std::fs::write(dir.path().join("runtime-ready"), RUNTIME_VERSION).unwrap();
+        // Sparse test files check the catalog without downloading model weights.
+        for (name, size, _) in ARTIFACTS {
+            std::fs::File::create(dir.path().join("model").join(name))
+                .unwrap()
+                .set_len(*size)
+                .unwrap();
+        }
+        assert!(ready(dir.path()));
+        std::fs::write(dir.path().join("model/config.json"), "incomplete").unwrap();
+        assert!(!ready(dir.path()));
+    }
+    #[test]
+    fn catalog_has_pinned_hashes_and_complete_shards() {
+        assert_eq!(
+            ARTIFACTS
+                .iter()
+                .filter(|(n, _, _)| n.ends_with(".safetensors"))
+                .count(),
+            4
+        );
+        for (_, size, sha) in ARTIFACTS {
+            assert!(*size > 0);
+            assert_eq!(sha.len(), 64);
+            assert!(sha.bytes().all(|b| b.is_ascii_hexdigit()));
+        }
+    }
+}

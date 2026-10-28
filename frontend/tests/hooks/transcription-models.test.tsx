@@ -48,7 +48,7 @@ test('shows initialization errors without selecting a different provider', async
   };
   await show({ provider: 'funasr', model: 'test' });
   await act(async () => { await state.fetchModels(); });
-  expect(state.availableModels.length).toBe(2);
+  expect(state.availableModels.length).toBe(3);
   expect(state.selectedModelKey).toBe('');
   expect(state.modelNotice).toContain('model directory unavailable');
 });
@@ -69,4 +69,14 @@ test('applies settings loaded after the dialog opens, but keeps a manual choice'
   await act(async () => { state.setSelectedModelKey('parakeet:test'); });
   await act(async () => { await state.fetchModels(); });
   expect(state.selectedModelKey).toBe('parakeet:test');
+});
+
+test('lists and restores the downloaded local Nemotron model', async () => {
+  respond = command => command.endsWith('_init') ? undefined : command.startsWith('nemotron_')
+    ? [{ name: 'nemotron-mlx', display_name: 'Nemotron 3.5 Transcribe', size_mb: 19300, status: 'Available' }]
+    : models;
+  await show({ provider: 'nemotron', model: 'nemotron-mlx' });
+  await act(async () => { await state.fetchModels(); });
+  expect(state.selectedModelKey).toBe('nemotron:nemotron-mlx');
+  expect(state.availableModels.find(m => m.provider === 'nemotron')?.displayName).toContain('Nemotron 3.5 Transcribe');
 });

@@ -19,6 +19,11 @@ const PROVIDER_COMMANDS: Record<string, ProviderCommands> = {
     hasAvailableModels: 'parakeet_has_available_models',
     getAvailableModels: 'parakeet_get_available_models',
   },
+  nemotron: {
+    initialize: 'nemotron_init',
+    hasAvailableModels: 'nemotron_has_available_models',
+    getAvailableModels: 'nemotron_get_available_models',
+  },
   funasr: {
     initialize: 'funasr_init',
     hasAvailableModels: 'funasr_has_available_models',

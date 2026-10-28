@@ -8,11 +8,12 @@ import { Eye, EyeOff, Lock, Unlock } from 'lucide-react';
 import { ModelManager } from './WhisperModelManager';
 import { ParakeetModelManager } from './ParakeetModelManager';
 import { FunAsrModelManager } from './FunAsrModelManager';
+import { NemotronModelManager } from './NemotronModelManager';
 import { SpeakerDiarizationSettings } from './SpeakerDiarizationSettings';
 
 
 export interface TranscriptModelProps {
-    provider: '' | 'localWhisper' | 'parakeet' | 'funasr' | 'deepgram' | 'elevenLabs' | 'groq' | 'openai';
+    provider: '' | 'localWhisper' | 'parakeet' | 'funasr' | 'nemotron' | 'deepgram' | 'elevenLabs' | 'groq' | 'openai';
     model: string;
     apiKey?: string | null;
 }
@@ -24,14 +25,15 @@ export interface TranscriptSettingsProps {
 }
 
 /** Providers that run on this device and manage their own models. */
-const LOCAL_PROVIDERS = new Set(['localWhisper', 'parakeet', 'funasr']);
+const LOCAL_PROVIDERS = new Set(['localWhisper', 'parakeet', 'funasr', 'nemotron']);
 const isLocalProvider = (provider: string) => LOCAL_PROVIDERS.has(provider);
-type LocalProvider = 'localWhisper' | 'parakeet' | 'funasr';
+type LocalProvider = 'localWhisper' | 'parakeet' | 'funasr' | 'nemotron';
 
 /** What sets each local engine apart, shown above its models. */
 const LOCAL_ENGINE_NOTES: Record<LocalProvider, string> = {
     localWhisper: 'Runs on this device and uses GPU acceleration when available. Larger models are more accurate but slower and need more disk space.',
     parakeet: 'Runs on this device and is fast enough for real-time transcription. Precise is larger and more accurate; Lightning and Compact are smaller and faster.',
+    nemotron: 'Runs on Apple silicon with a managed MLX runtime. The 4-bit model needs about 19.3 GB of disk space plus runtime files. Use a Mac with at least 32 GB of unified memory. First use can take several minutes.',
     funasr: 'Runs on this device on the CPU (no GPU acceleration yet). Supports auto-detect, English, Chinese and Japanese. Needs a one-time download of about 950 MB: a shared speech encoder plus the decoder you choose.',
 };
 
@@ -68,6 +70,7 @@ export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelCo
         localWhisper: [], // Model selection handled by ModelManager component
         parakeet: [], // Model selection handled by ParakeetModelManager component
         funasr: [], // Model selection handled by FunAsrModelManager component
+        nemotron: [],
         deepgram: ['nova-2-phonecall'],
         elevenLabs: ['eleven_multilingual_v2'],
         groq: ['llama-3.3-70b-versatile'],
@@ -129,6 +132,7 @@ export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelCo
                                     <SelectItem value="parakeet">⚡ Parakeet (Recommended - Real-time / Accurate)</SelectItem>
                                     <SelectItem value="localWhisper">🏠 Local Whisper (High Accuracy)</SelectItem>
                                     <SelectItem value="funasr">🌏 FUN-ASR Nano (English, Chinese, Japanese)</SelectItem>
+                                    <SelectItem value="nemotron">Nemotron 3.5 Transcribe (Apple silicon)</SelectItem>
                                     {/* <SelectItem value="deepgram">☁️ Deepgram (Backup)</SelectItem>
                                     <SelectItem value="elevenLabs">☁️ ElevenLabs</SelectItem>
                                     <SelectItem value="groq">☁️ Groq</SelectItem>
@@ -171,6 +175,7 @@ export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelCo
                             </p>
                             {uiProvider === 'localWhisper' && <ModelManager {...localManagerProps('localWhisper')} />}
                             {uiProvider === 'parakeet' && <ParakeetModelManager {...localManagerProps('parakeet')} />}
+                            {uiProvider === 'nemotron' && <NemotronModelManager {...localManagerProps('nemotron')} />}
                             {uiProvider === 'funasr' && <FunAsrModelManager {...localManagerProps('funasr')} />}
                         </div>
                     )}

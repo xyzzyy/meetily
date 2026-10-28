@@ -144,6 +144,9 @@ pub async fn validate_transcription_model_ready<R: Runtime>(app: &AppHandle<R>) 
                 }
             }
         }
+        "nemotron" => {
+            crate::nemotron::validate_install(app, &config.model)
+        }
         "funasr" => {
             // Every chunk would fail with an unsupported language, so refuse
             // to start rather than record without a transcript.
@@ -208,6 +211,11 @@ pub async fn get_or_init_transcription_engine<R: Runtime>(
                     Err("Parakeet engine not initialized. This should not happen after validation.".to_string())
                 }
             }
+        }
+        "nemotron" => {
+            Ok(TranscriptionEngine::Provider(Arc::new(
+                crate::nemotron::configured_provider(app, Some(&config.model)).await?,
+            )))
         }
         "funasr" => {
             info!("Initializing FUN-ASR transcription engine");

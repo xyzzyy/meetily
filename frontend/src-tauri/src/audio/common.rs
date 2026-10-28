@@ -20,6 +20,7 @@ pub(crate) enum BatchEngine {
     Whisper,
     Parakeet,
     FunAsr,
+    Nemotron,
 }
 
 impl BatchEngine {
@@ -29,6 +30,7 @@ impl BatchEngine {
         match provider {
             Some("parakeet") => Self::Parakeet,
             Some("funasr") => Self::FunAsr,
+            Some("nemotron") => Self::Nemotron,
             _ => Self::Whisper,
         }
     }
@@ -56,7 +58,7 @@ pub(crate) async fn unload_engine_after_batch(engine: BatchEngine) {
                 e.unload_model().await;
             }
         }
-        BatchEngine::FunAsr => {
+        BatchEngine::FunAsr | BatchEngine::Nemotron => {
             // Batch helpers belong to the job and stop when its provider drops.
             // Never unload the global recording engine here.
         }
