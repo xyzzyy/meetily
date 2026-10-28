@@ -230,7 +230,7 @@ jobs:
         run: |
           app="target/release/bundle/macos/Meetily Branch.app"
           test -d "$app"
-          lipo -verify_arch arm64 "$app/Contents/MacOS/meetily"
+          lipo "$app/Contents/MacOS/meetily" -verify_arch arm64
           codesign --verify --deep --strict "$app"
           # A single archive keeps executable permissions and framework symlinks.
           ditto -c -k --keepParent "$app" "$RUNNER_TEMP/meetily-macos-arm64.app.zip"
