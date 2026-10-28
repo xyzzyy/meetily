@@ -44,8 +44,10 @@ jobs:
           # then continues with the repository checkout.
           # A step limit lets the agent return its findings before the timeout.
           # Do not delegate more work or edit the checkout during a review.
+          # The GitHub runner can omit the agent input, so also set its default.
           OPENCODE_CONFIG_CONTENT: >-
             {"permission":{"external_directory":"deny","doom_loop":"deny"},
+             "default_agent":"pr-review",
              "agent":{"pr-review":{"mode":"primary","steps":12,
              "permission":{"task":"deny","edit":"deny"}}}}
         with:
