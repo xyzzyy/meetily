@@ -288,12 +288,11 @@ fn convert_to_wav_with_ffmpeg(
         )
     })?;
 
-    // Create temp file in the same directory as the input to avoid cross-device issues
-    let parent_dir = input_path.parent().unwrap_or_else(|| Path::new("."));
+    // The input can be read-only. Keep conversion output in the system temp directory.
     let temp_file = tempfile::Builder::new()
         .prefix(".meetily_decode_")
         .suffix(".wav")
-        .tempfile_in(parent_dir)
+        .tempfile()
         .map_err(|e| anyhow!("Failed to create temporary WAV file: {}", e))?;
 
     let temp_path = temp_file.into_temp_path();
@@ -593,6 +592,44 @@ pub fn decode_audio_file_with_progress(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Imported files can sit on read-only media, so conversion must not write
+    /// anything next to the source. Checked directly by watching the source
+    /// folder while the converted file exists, rather than by simulating
+    /// read-only media with permissions, which privileged processes bypass.
+    #[test]
+    fn ffmpeg_conversion_writes_nothing_next_to_the_source() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("recording.mkv");
+        let output = Command::new(find_ffmpeg_path().expect("ffmpeg is required for this test"))
+            .args(["-loglevel", "error", "-f", "lavfi", "-i", "sine=duration=0.2", "-c:a", "pcm_s16le"])
+            .arg(&source)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        let original = std::fs::read(&source).unwrap();
+        let listing = || {
+            let mut names: Vec<_> = std::fs::read_dir(directory.path())
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name())
+                .collect();
+            names.sort();
+            names
+        };
+        let before = listing();
+
+        let converted = convert_to_wav_with_ffmpeg(&source, None).unwrap();
+        let converted_path = converted.to_path_buf();
+        assert_eq!(listing(), before, "nothing is written next to the source");
+        let decoded = decode_audio_file(&converted_path).unwrap();
+        assert!((decoded.duration_seconds - 0.2).abs() < 0.01);
+        assert!(!decoded.samples.is_empty());
+        assert_eq!(std::fs::read(&source).unwrap(), original);
+
+        drop(converted);
+        assert!(!converted_path.exists(), "temporary WAV must be removed after use");
+        assert_eq!(listing(), before);
+    }
 
     #[test]
     fn test_decode_he_aac_uses_decoded_rate_not_container_rate() {

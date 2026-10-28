@@ -23,6 +23,8 @@ whisper-server-package/
 
 # testing
 /coverage
+/test-results/
+/playwright-report/
 /dist
 
 # next.js

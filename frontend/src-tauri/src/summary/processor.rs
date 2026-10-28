@@ -79,6 +79,18 @@ fn should_retry_chunk_failure(
 const ENGLISH_BASE_SUMMARY_INSTRUCTION: &str =
     "**Write the summary/report in English regardless of transcript language; non-English prose is invalid.**";
 
+const REFERENCE_INSTRUCTION: &str = "**TRANSCRIPT REFERENCE REQUIREMENT:**\
+\nAfter each key point, decision, action item, or important detail, include the \
+timestamp range from the transcript where this was discussed, in the format `[MM:SS-MM:SS]`. \
+Take the times from the `[MM:SS–MM:SS]` prefixes shown in the transcript text. \
+If the relevant transcript lines have no time prefix, omit the reference; never invent a time.\
+\nExample: \"Decision: Migrate authentication to OAuth2. [14:32-15:18]\"\
+\nExample: \"Alice will prepare the migration plan. [27:41-28:05]\"\
+\nInclude the reference at the end of each relevant item. In a table with a timestamp column, \
+put the reference only in that column. Keep supporting transcript text in its text column; \
+never replace the supporting text with a timestamp or repeat the same reference in multiple columns.";
+
+
 fn resolve_cached_english<'a>(
     cached: Option<&'a str>,
     summary_language: Option<&str>,
@@ -217,13 +229,13 @@ fn translation_system_prompt(target_language: &str) -> String {
 
 fn build_chunk_summary_user_prompt(chunk: &str) -> String {
     format!(
-        "{ENGLISH_BASE_SUMMARY_INSTRUCTION}\n\nProvide a concise but comprehensive summary of the following transcript chunk. Capture all key points, decisions, action items, and mentioned individuals. Do not include reasoning, self-correction, or meta-commentary — output only the summary content.\n\n<transcript_chunk>\n{chunk}\n</transcript_chunk>"
+        "{ENGLISH_BASE_SUMMARY_INSTRUCTION}\n\n{REFERENCE_INSTRUCTION}\n\nProvide a concise but comprehensive summary of the following transcript chunk. Capture all key points, decisions, action items, and mentioned individuals. Do not include reasoning, self-correction, or meta-commentary — output only the summary content.\n\n<transcript_chunk>\n{chunk}\n</transcript_chunk>"
     )
 }
 
 fn build_combine_summary_user_prompt(combined_text: &str) -> String {
     format!(
-        "{ENGLISH_BASE_SUMMARY_INSTRUCTION}\n\nThe following are consecutive summaries of a meeting. Combine them into a single, coherent, and detailed narrative summary that retains all important details, organized logically. Do not include reasoning, self-correction, or meta-commentary — output only the summary content.\n\n<summaries>\n{combined_text}\n</summaries>"
+        "{ENGLISH_BASE_SUMMARY_INSTRUCTION}\n\n{REFERENCE_INSTRUCTION}\n\nThe following are consecutive summaries of a meeting. Combine them into a single, coherent, and detailed narrative summary that retains all important details, organized logically. Preserve the transcript timestamp references from the individual summaries. Do not include reasoning, self-correction, or meta-commentary — output only the summary content.\n\n<summaries>\n{combined_text}\n</summaries>"
     )
 }
 fn build_final_report_system_prompt(
@@ -241,7 +253,8 @@ fn build_final_report_system_prompt(
 5. If a section has no relevant info, write "None noted in this section."
 6. Output **only** the completed Markdown report.
 7. Do not include reasoning, thinking, self-correction, decision strategy, or any meta-commentary sections — output only the completed Markdown report.
-8. If unsure about something, omit it.
+8. {REFERENCE_INSTRUCTION}
+9. If unsure about something, omit it.
 
 **SECTION-SPECIFIC INSTRUCTIONS:**
 {section_instructions}
@@ -916,5 +929,34 @@ mod tests {
         assert_eq!(cleaned.markdown, markdown);
         assert!(!cleaned.reasoning_stripped);
         assert_eq!(clean_llm_markdown_detailed(markdown).markdown, markdown);
+    }
+
+    #[test]
+    fn prompt_tests_check_reference_instructions() {
+        let chunk_prompt = build_chunk_summary_user_prompt("chunk text");
+        assert!(chunk_prompt.contains(REFERENCE_INSTRUCTION));
+
+        let combine_prompt = build_combine_summary_user_prompt("combine text");
+        assert!(combine_prompt.contains(REFERENCE_INSTRUCTION));
+
+        let final_prompt = build_final_report_system_prompt("instructions", "template");
+        assert!(final_prompt.contains(REFERENCE_INSTRUCTION));
+    }
+
+    #[test]
+    fn standard_meeting_prompt_keeps_evidence_text_and_time_in_separate_columns() {
+        let template = crate::summary::templates::validate_and_parse_template(
+            include_str!("../../templates/standard_meeting.json"),
+        ).expect("standard meeting template must be valid");
+        let prompt = build_final_report_system_prompt(
+            &template.to_section_instructions(),
+            &template.to_markdown_structure(),
+        );
+
+        assert!(prompt.contains("| Reference Transcript Segment | Segment Time stamp |"));
+        assert!(prompt.contains("In Reference Transcript Segment, include the supporting transcript words"));
+        assert!(prompt.contains("In Segment Time stamp, include one transcript timestamp range"));
+        assert!(prompt.contains("never replace the supporting text with a timestamp"));
+        assert!(template.to_section_instructions().contains("Do not put timestamps in this column."));
     }
 }

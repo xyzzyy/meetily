@@ -24,12 +24,14 @@ const nextConfig = {
         os: false,
       };
 
-      // Keep ProseMirror single-instanced for BlockNote/Tiptap.
+      // BlockNote checks Tiptap extension identity with instanceof. Keep its CJS
+      // dependency and our ESM imports on the same Tiptap/ProseMirror instances.
       config.resolve.alias = {
         ...config.resolve.alias,
         '@blocknote/core$': require.resolve('@blocknote/core'),
         '@blocknote/react$': require.resolve('@blocknote/react'),
         '@blocknote/shadcn$': require.resolve('@blocknote/shadcn'),
+        '@tiptap/core$': resolveFromTiptapPm('@tiptap/core'),
         'prosemirror-model': resolveFromTiptapPm('prosemirror-model'),
         'prosemirror-state': resolveFromTiptapPm('prosemirror-state'),
         'prosemirror-view': resolveFromTiptapPm('prosemirror-view'),

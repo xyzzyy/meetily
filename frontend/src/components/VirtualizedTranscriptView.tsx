@@ -11,6 +11,7 @@ import { RecordingStatusBar } from "./RecordingStatusBar";
 import { motion, AnimatePresence } from "framer-motion";
 import { TranscriptSegmentData } from "@/types";
 import type { DiarizationStatus } from "@/types/diarization";
+import { findTargetSegmentIndex, getTranscriptRevealOffset, targetMayBeUnloaded } from "@/lib/transcript-navigation";
 
 export interface VirtualizedTranscriptViewProps {
     /** Transcript segments to display */
@@ -29,6 +30,10 @@ export interface VirtualizedTranscriptViewProps {
     showConfidence?: boolean;
     /** Completely disable auto-scroll behavior (for meeting details page) */
     disableAutoScroll?: boolean;
+    /** When set, scrolls to the segment whose timestamp contains this time (seconds) */
+    scrollToTime?: number;
+    /** Increment to trigger scrollToTime even if time value is the same */
+    scrollToKey?: number;
 
     // Pagination props (infinite scroll)
     hasMore?: boolean;
@@ -42,6 +47,8 @@ export interface VirtualizedTranscriptViewProps {
 
 // Threshold for enabling virtualization (below this, use simple rendering)
 const VIRTUALIZATION_THRESHOLD = 10;
+// Page requests a reference jump may make without the transcript growing before it settles
+const MAX_JUMP_LOAD_ATTEMPTS = 10;
 
 // Helper function to format seconds as recording-relative time [MM:SS]
 function formatRecordingTime(seconds: number | undefined): string {
@@ -93,6 +100,7 @@ const TranscriptSegment = memo(function TranscriptSegment({
     showConfidence,
     selected,
     onToggle,
+    highlighted,
 }: {
     id: string;
     timestamp: number;
@@ -108,6 +116,7 @@ const TranscriptSegment = memo(function TranscriptSegment({
     showConfidence: boolean;
     selected?: boolean;
     onToggle?: (id: string) => void;
+    highlighted?: boolean;
 }) {
     const displayText = cleanStopWords(text) || (text.trim() === '' ? '[Silence]' : text);
     const duration = endTime !== undefined && endTime >= timestamp
@@ -131,7 +140,17 @@ const TranscriptSegment = memo(function TranscriptSegment({
             : null;
 
     return (
-        <div id={`segment-${id}`} className="mb-3">
+        <div
+            id={`segment-${id}`}
+            data-highlighted={highlighted || undefined}
+            className={`relative mb-3 rounded-sm transition-colors duration-200 motion-reduce:transition-none ${
+                highlighted ? 'bg-blue-50 dark:bg-blue-400/10' : ''
+            }`}
+        >
+            <span
+                aria-hidden="true"
+                className={`pointer-events-none absolute inset-y-0 -left-2 w-0.5 rounded-full bg-blue-500 transition-opacity duration-200 motion-reduce:transition-none ${highlighted ? 'opacity-100' : 'opacity-0'}`}
+            />
             <div className="flex items-start gap-2">
                 {onToggle && (
                     <input
@@ -202,6 +221,8 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
     enableStreaming = false,
     showConfidence = true,
     disableAutoScroll = false,
+    scrollToTime,
+    scrollToKey,
     hasMore = false,
     isLoadingMore = false,
     totalCount = 0,
@@ -308,8 +329,76 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
     // Use simple rendering for small lists, virtualization for large lists
     const useVirtualization = segments.length >= VIRTUALIZATION_THRESHOLD;
 
+    // Jump to a transcript reference when scrollToKey changes, paging in segments if needed
+    const lastHandledKeyRef = useRef(0);
+    const pendingKeyRef = useRef(0);
+    const loadAttemptsRef = useRef({ key: 0, loaded: 0, count: 0 });
+    const [loadRecheck, setLoadRecheck] = useState(0);
+    const [highlight, setHighlight] = useState<{ id: string; key: number } | null>(null);
+    const highlightedSegmentId = highlight?.id ?? null;
+
+    useEffect(() => {
+        if (!highlight) return;
+        const timer = setTimeout(() => setHighlight(null), 1000);
+        return () => clearTimeout(timer);
+    }, [highlight]);
+
+    useEffect(() => {
+        if (scrollToTime === undefined || !scrollToKey) return;
+        if (segments.length === 0) {
+            // Transcript was reset: drop any in-flight jump
+            pendingKeyRef.current = 0;
+            return;
+        }
+        if (scrollToKey === lastHandledKeyRef.current && scrollToKey !== pendingKeyRef.current) return;
+        lastHandledKeyRef.current = scrollToKey;
+
+        const attempts = loadAttemptsRef.current;
+        if (attempts.key !== scrollToKey || segments.length > attempts.loaded) {
+            loadAttemptsRef.current = { key: scrollToKey, loaded: segments.length, count: 0 };
+        }
+
+        if (
+            targetMayBeUnloaded(segments, scrollToTime) && hasMore && onLoadMore &&
+            loadAttemptsRef.current.count < MAX_JUMP_LOAD_ATTEMPTS
+        ) {
+            pendingKeyRef.current = scrollToKey;
+            // An in-flight page re-runs this effect when it finishes
+            if (isLoadingMore) return;
+            loadAttemptsRef.current.count += 1;
+            onLoadMore();
+            // loadMore ignores calls less than 100ms apart; re-check in case this one was dropped
+            const timer = setTimeout(() => setLoadRecheck(n => n + 1), 150);
+            return () => clearTimeout(timer);
+        }
+
+        // Target is loaded, or no more pages can be loaded: jump to the best loaded segment
+        pendingKeyRef.current = 0;
+        const targetIndex = findTargetSegmentIndex(segments, scrollToTime);
+        const targetSegment = segments[targetIndex];
+        if (!targetSegment) return;
+        setHighlight({ id: targetSegment.id, key: scrollToKey });
+        const container = scrollRef.current;
+        const target = document.getElementById(`segment-${targetSegment.id}`);
+        if (container && target && container.contains(target)) {
+            const viewport = container.getBoundingClientRect();
+            const row = target.getBoundingClientRect();
+            const top = getTranscriptRevealOffset({
+                scrollTop: container.scrollTop,
+                viewportTop: viewport.top + container.clientTop,
+                viewportHeight: container.clientHeight,
+                targetTop: row.top,
+                targetHeight: row.height,
+            });
+            if (top !== container.scrollTop) container.scrollTo({ top, behavior: 'instant' });
+        } else if (useVirtualization) {
+            // The height is unknown until mounting. Keep the timestamp visible even for long rows.
+            virtualizer.scrollToIndex(targetIndex, { align: 'start' });
+        }
+    }, [scrollToTime, scrollToKey, segments, hasMore, isLoadingMore, onLoadMore, useVirtualization, virtualizer, loadRecheck]);
+
     return (
-        <div ref={scrollRef} className="flex flex-col h-full overflow-y-auto px-4 py-2">
+        <div ref={scrollRef} data-transcript-scroll-container className="flex flex-col h-full overflow-y-auto px-4 py-2">
             {/* Recording Status Bar - Sticky at top, always visible when recording */}
             <AnimatePresence>
                 {isRecording && (
@@ -389,6 +478,7 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
                                         showConfidence={showConfidence}
                                         selected={selectedSegmentIds?.has(segment.id)}
                                         onToggle={onToggleSegment}
+                                        highlighted={highlightedSegmentId === segment.id}
                                     />
                                 </div>
                             );
@@ -453,6 +543,7 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
                                         showConfidence={showConfidence}
                                         selected={selectedSegmentIds?.has(segment.id)}
                                         onToggle={onToggleSegment}
+                                        highlighted={highlightedSegmentId === segment.id}
                                     />
                                 </motion.div>
                             );

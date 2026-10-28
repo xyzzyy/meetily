@@ -18,6 +18,7 @@ function loadSummaryView() {
     if (name === '@blocknote/shadcn') return { BlockNoteView: () => null };
     if (name === '@blocknote/shadcn/style.css') return {};
     if (name === '@/lib/blocknote-markdown') return {};
+    if (name === '@/lib/transcript-reference-plugin') return { TranscriptReferenceExtension: {} };
     if (name === '@/contexts/ThemeContext') return { useTheme: () => ({ resolvedTheme: 'light' }) };
     if (name === './index') return { AISummary: ({ onSummaryChange }) => React.createElement('button', {
       onClick: () => onSummaryChange({ Agenda: { title: 'Agenda', blocks: [{ id: 'a', content: 'Unsaved edit' }] } }),

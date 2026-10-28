@@ -466,12 +466,29 @@ impl SpeakerProfilesRepository {
     }
 
     pub async fn rename(pool: &SqlitePool, id: &str, name: &str) -> Result<(), SqlxError> {
+        let name = name.trim();
+        let wanted = name.to_lowercase();
+        // Check and write in one transaction so a concurrent edit cannot
+        // introduce a duplicate between the name check and the update.
+        let mut transaction = pool.begin().await?;
+        let other_names: Vec<String> = sqlx::query_scalar(
+            "SELECT name FROM speaker_profiles WHERE id != ?",
+        )
+        .bind(id)
+        .fetch_all(&mut *transaction)
+        .await?;
+        if other_names.iter().any(|other| other.trim().to_lowercase() == wanted) {
+            return Err(SqlxError::Protocol(
+                "A remembered voice already uses this name. Please choose a different name.".to_string(),
+            ));
+        }
         sqlx::query("UPDATE speaker_profiles SET name = ?, updated_at = ? WHERE id = ?")
             .bind(name)
             .bind(Utc::now())
             .bind(id)
-            .execute(pool)
+            .execute(&mut *transaction)
             .await?;
+        transaction.commit().await?;
         Ok(())
     }
 
@@ -601,6 +618,55 @@ mod tests {
             .unwrap();
         assert_eq!(found.map(|profile| profile.name).as_deref(), Some("Scrum Master Madior"));
         assert!(SpeakerProfilesRepository::find_by_name(&pool, "Someone Else").await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn rename_rejects_another_voices_name_without_changing_either_voice() {
+        for model_version in ["v1", "v2"] {
+            let pool = speaker_store().await;
+            let alice = SpeakerProfilesRepository::create_from_sample(
+                &pool, "  Élodie  ", &[1.0, 0.0], "v1", 2, 20.0,
+                SampleSource { meeting_id: "m1", speaker_id: "S1" },
+            ).await.unwrap();
+            let bob = SpeakerProfilesRepository::create_from_sample(
+                &pool, "Bob", &[0.0, 1.0], model_version, 3, 30.0,
+                SampleSource { meeting_id: "m2", speaker_id: "S2" },
+            ).await.unwrap();
+            let before = SpeakerProfilesRepository::list(&pool).await.unwrap();
+            for name in ["Élodie", "  éLODIE \t"] {
+                let error = SpeakerProfilesRepository::rename(&pool, &bob, name).await.unwrap_err();
+                assert!(error.to_string().contains("already uses this name"));
+            }
+            assert_eq!(
+                SpeakerProfilesRepository::merge_duplicate_names(&pool).await.unwrap(), 0,
+                "a rejected rename must not create voices that merge on restart",
+            );
+            let after = SpeakerProfilesRepository::list(&pool).await.unwrap();
+            assert_eq!(serde_json::to_value(&after).unwrap(), serde_json::to_value(&before).unwrap());
+            for id in [&alice, &bob] {
+                let previous = before.iter().find(|profile| &profile.id == id).unwrap();
+                let current = after.iter().find(|profile| &profile.id == id).unwrap();
+                assert_eq!(current.embedding, previous.embedding);
+                assert_eq!(SpeakerProfilesRepository::list_samples(&pool, id).await.unwrap().len(), 1);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn rename_allows_a_new_name_and_changes_to_its_own_case() {
+        let pool = speaker_store().await;
+        let id = SpeakerProfilesRepository::create_from_sample(
+            &pool, "Élodie", &[1.0, 0.0], "v1", 2, 20.0,
+            SampleSource { meeting_id: "m1", speaker_id: "S1" },
+        ).await.unwrap();
+        for name in ["éLODIE", "Alice"] {
+            SpeakerProfilesRepository::rename(&pool, &id, &format!("  {name}  ")).await.unwrap();
+            let renamed = SpeakerProfilesRepository::get(&pool, &id).await.unwrap().unwrap();
+            assert_eq!(renamed.name, name);
+            assert_eq!(renamed.embedding, vec![1.0, 0.0]);
+            assert_eq!((renamed.sample_count, renamed.speech_seconds), (2, 20.0));
+            assert_eq!(SpeakerProfilesRepository::list_samples(&pool, &id).await.unwrap().len(), 1);
+        }
     }
 
     #[tokio::test]
