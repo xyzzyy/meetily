@@ -26,26 +26,30 @@ env:
 jobs:
   build-devtest:
     name: Build ${{ matrix.platform-name }}
-    runs-on: ${{ matrix.platform }}
+    runs-on: ${{ matrix.runner }}
     permissions:
       contents: write
     strategy:
       fail-fast: false
       matrix:
         include:
-          - platform: blacksmith-6vcpu-macos-15
+          - platform: macos-latest
+            runner: blacksmith-6vcpu-macos-15
             platform-name: macOS
             target: aarch64-apple-darwin
             args: --target aarch64-apple-darwin
-          - platform: blacksmith-4vcpu-windows-2025
+          - platform: windows-latest
+            runner: blacksmith-4vcpu-windows-2025
             platform-name: Windows
             target: x86_64-pc-windows-msvc
             args: --target x86_64-pc-windows-msvc
-          - platform: blacksmith-4vcpu-ubuntu-2204
+          - platform: ubuntu-22.04
+            runner: ubuntu-22.04
             platform-name: Linux (Ubuntu 22.04)
             target: x86_64-unknown-linux-gnu
             args: --target x86_64-unknown-linux-gnu --bundles deb
-          - platform: blacksmith-4vcpu-ubuntu-2404
+          - platform: ubuntu-24.04
+            runner: blacksmith-4vcpu-ubuntu-2404
             platform-name: Linux (Ubuntu 24.04)
             target: x86_64-unknown-linux-gnu
             args: --target x86_64-unknown-linux-gnu --bundles appimage,rpm
