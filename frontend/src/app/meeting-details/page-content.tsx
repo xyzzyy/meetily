@@ -13,6 +13,7 @@ import { ModelConfig } from '@/components/ModelSettingsModal';
 
 // Custom hooks
 import { useMeetingData } from '@/hooks/meeting-details/useMeetingData';
+import { useAutomaticSummary } from '@/hooks/meeting-details/useAutomaticSummary';
 import { useSummaryGeneration } from '@/hooks/meeting-details/useSummaryGeneration';
 import { useTemplates } from '@/hooks/meeting-details/useTemplates';
 import { useCopyOperations } from '@/hooks/meeting-details/useCopyOperations';
@@ -75,7 +76,6 @@ export default function PageContent({
   const openModelSettingsRef = useRef<(() => void) | null>(null);
   const autoSwitchedSummaryMeetingIdsRef = useRef(new Set<string>());
   const manuallySelectedTabMeetingIdsRef = useRef(new Set<string>());
-  const autoGenerationStartedMeetingIdRef = useRef<string | null>(null);
 
   // Sidebar context
   const { serverAddress } = useSidebar();
@@ -167,33 +167,13 @@ export default function PageContent({
     }
   }, [meeting.id, meetingData.aiSummary, summaryGeneration.summaryStatus]);
 
-  // Auto-generate only after the model configuration has settled.
-  useEffect(() => {
-    if (
-      !shouldAutoGenerate
-      || summaryGeneration.summaryStatus !== 'idle'
-      || isModelConfigLoading
-      || meetingData.transcripts.length === 0
-      || autoGenerationStartedMeetingIdRef.current === meeting.id
-    ) {
-      return;
-    }
-
-    autoGenerationStartedMeetingIdRef.current = meeting.id;
-    console.log(`🤖 Auto-generating summary with ${modelConfig.provider}/${modelConfig.model}...`);
-    onAutoGenerateComplete?.();
-    void summaryGeneration.handleGenerateSummary('');
-  }, [
-    shouldAutoGenerate,
-    meeting.id,
-    meetingData.transcripts.length,
-    isModelConfigLoading,
-    modelConfig.provider,
-    modelConfig.model,
-    summaryGeneration.handleGenerateSummary,
-    summaryGeneration.summaryStatus,
-    onAutoGenerateComplete,
-  ]);
+  const { waiting: waitingForSpeakers, cancel: cancelAutomaticSummary } = useAutomaticSummary({
+    meetingId: meeting.id,
+    enabled: shouldAutoGenerate && summaryGeneration.summaryStatus === 'idle'
+      && !isModelConfigLoading && meetingData.transcripts.length > 0,
+    generate: () => summaryGeneration.handleGenerateSummary(''),
+    onStarted: onAutoGenerateComplete,
+  });
 
   return (
     <motion.div
@@ -202,6 +182,11 @@ export default function PageContent({
       transition={{ duration: 0.3, ease: 'easeOut' }}
       className="flex flex-col h-screen min-w-0 bg-gray-50 dark:bg-ink-950"
     >
+      {waitingForSpeakers && (
+        <p role="status" className="px-4 py-2 text-sm text-muted-foreground">
+          Waiting for speaker analysis before generating the summary.
+        </p>
+      )}
       <div className="flex flex-1 min-w-0 overflow-hidden">
         <MeetingDetailsSplitView
           activeTab={activeTab}
@@ -247,14 +232,22 @@ export default function PageContent({
               modelConfig={modelConfig}
               setModelConfig={setModelConfig}
               onSaveModelConfig={handleSaveModelConfig}
-              onGenerateSummary={summaryGeneration.handleGenerateSummary}
+              onGenerateSummary={prompt => {
+                cancelAutomaticSummary();
+                onAutoGenerateComplete?.();
+                return summaryGeneration.handleGenerateSummary(prompt);
+              }}
               onStopGeneration={summaryGeneration.handleStopGeneration}
               customPrompt={customPrompt}
               onSaveSummary={meetingData.handleSaveSummary}
               onSummaryChange={meetingData.handleSummaryChange}
               onDirtyChange={meetingData.setIsSummaryDirty}
               summaryError={summaryGeneration.summaryError}
-              onRegenerateSummary={summaryGeneration.handleRegenerateSummary}
+              onRegenerateSummary={() => {
+                cancelAutomaticSummary();
+                onAutoGenerateComplete?.();
+                return summaryGeneration.handleRegenerateSummary();
+              }}
               getSummaryStatusMessage={summaryGeneration.getSummaryStatusMessage}
               availableTemplates={templates.availableTemplates}
               selectedTemplate={templates.selectedTemplate}

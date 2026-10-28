@@ -93,6 +93,7 @@ async function loadHook({
       applyPinnedSummaryLanguageToMeeting: async () => true,
     };
     if (name === '@tauri-apps/api/core') return { invoke: async () => ({ enabled: false }) };
+    if (name === '@/lib/recording-speaker-analysis') return { runRecordingSpeakerAnalysis: (_id, work) => Promise.resolve().then(work) };
     if (name === '@/lib/analytics') return { default: {
       trackTranscriptionSuccess: () => calls.transcriptionSuccess++,
       trackPageView() {}, getMeetingsCountToday: async () => 1,

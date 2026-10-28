@@ -12,6 +12,7 @@ import type { Transcript } from '@/types';
 import type { RecordingStoppedPayload } from '@/services/recordingService';
 import { transcriptService } from '@/services/transcriptService';
 import Analytics from '@/lib/analytics';
+import { runRecordingSpeakerAnalysis } from '@/lib/recording-speaker-analysis';
 import {
   applyPinnedSummaryLanguageToMeeting,
   detectAndCacheSummaryLanguage,
@@ -471,7 +472,7 @@ export function useRecordingStop(
           console.log('   Transcripts:', freshTranscripts.length);
           console.log('   folder_path:', folderPath);
 
-          void (async () => {
+          void runRecordingSpeakerAnalysis(meetingId, async () => {
             try {
               const settings = await invoke<{ enabled: boolean; postCallRefinementEnabled: boolean }>(
                 'get_diarization_settings'
@@ -489,7 +490,7 @@ export function useRecordingStop(
             } catch (error) {
               console.warn('Final speaker refinement kept the live transcript:', error);
             }
-          })();
+          });
 
           await refetchMeetings();
           // Only the current mounted page may change shared UI or navigation.

@@ -23,12 +23,14 @@ mock.module('../../src/lib/analytics', () => ({ default: {
   trackBackendConnection() {}, trackSummaryGenerationStarted: async () => {},
   trackSummaryGenerationCompleted: trackCompletion,
 } }));
+let autoEnabled = false;
+let finalSpeaker = false;
 let startProcess: () => Promise<{ process_id: string }>;
 let getSummary: (meetingId: string) => Promise<SummaryProcessResponse>;
 const invoke = mock(async (command: string, args?: Record<string, unknown>): Promise<unknown> => {
   if (command === 'api_get_meetings') return [];
   if (command === 'api_get_summary') return getSummary(args!.meetingId as string);
-  if (command === 'api_get_meeting_transcripts') return { transcripts: [{ text: 'Meeting transcript', timestamp: '00:00' }], total_count: 1 };
+  if (command === 'api_get_meeting_transcripts') return { transcripts: [{ text: 'Meeting transcript', timestamp: '00:00', speaker_label: 'Alex', diarization_status: finalSpeaker ? 'final' : 'provisional' }], total_count: 1 };
   if (command === 'get_ollama_models') return [{ name: 'test' }];
   if (command === 'api_process_transcript') return startProcess();
   if (command === 'api_cancel_summary') return { cancelled: true };
@@ -42,6 +44,8 @@ mock.module('../../src/lib/summary-language-preferences', () => ({
 }));
 const { SidebarProvider, useSidebar } = await import('../../src/components/Sidebar/SidebarProvider');
 const { useSummaryGeneration } = await import('../../src/hooks/meeting-details/useSummaryGeneration');
+const { useAutomaticSummary } = await import('../../src/hooks/meeting-details/useAutomaticSummary');
+const { runRecordingSpeakerAnalysis } = await import('../../src/lib/recording-speaker-analysis');
 
 const response = (overrides: Partial<SummaryProcessResponse> = {}): SummaryProcessResponse => ({
   meeting_id: 'meeting-a', status: 'pending', start: 'attempt-a', end: null,
@@ -60,6 +64,8 @@ function Status({ initialSummary, meetingId = 'meeting-a' }: {
     isModelConfigLoading: false, selectedTemplate: 'daily_standup',
     setAiSummary, updateMeetingTitle, initialSummary,
   });
+  useAutomaticSummary({ meetingId, enabled: autoEnabled && state.summaryStatus === 'idle',
+    generate: () => state.handleGenerateSummary('') });
   return <output>{state.summaryStatus}:{state.summaryError}:{title}:{JSON.stringify(summary)}</output>;
 }
 
@@ -70,7 +76,7 @@ const realSetInterval = globalThis.setInterval;
 const realClearInterval = globalThis.clearInterval;
 beforeEach(() => {
   renderer = undefined as unknown as ReactTestRenderer;
-  configuredModel = 'test';
+  configuredModel = 'test'; autoEnabled = false; finalSpeaker = false;
   timers.clear(); notify.mockClear(); trackCompletion.mockClear(); invoke.mockClear();
   getSummary = async () => response();
   startProcess = async () => ({ process_id: 'attempt-a' });
@@ -270,4 +276,19 @@ describe('summary state restored when returning to a meeting', () => {
     expect(state.summaryStatus).toBe('completed');
     expect(text()).toContain('Finished summary');
   });
+});
+
+test('automatic summary sends speaker names only after final analysis is saved', async () => {
+  autoEnabled = true;
+  let finish!: () => void;
+  const task = runRecordingSpeakerAnalysis('meeting-a', async () => {
+    await new Promise<void>(resolve => { finish = resolve; });
+    finalSpeaker = true;
+  });
+  await show(response({ status: 'idle', data: null, start: null }));
+  expect(invoke.mock.calls.filter(([command]) => command === 'api_process_transcript')).toHaveLength(0);
+  await act(async () => { finish(); await task; });
+  const requests = invoke.mock.calls.filter(([command]) => command === 'api_process_transcript');
+  expect(requests).toHaveLength(1);
+  expect(requests[0][1]?.text).toContain('Alex: Meeting transcript');
 });
