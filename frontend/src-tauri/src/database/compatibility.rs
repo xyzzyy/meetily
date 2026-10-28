@@ -101,19 +101,7 @@ async fn separate_legacy_speaker_data(
     let feature_store = super::speaker_store::SpeakerFeatureStore::new(temp_feature_path)
         .await
         .map_err(stringify)?;
-    let expected_feature_counts = expected_legacy_feature_counts(pool).await?;
-    copy_legacy_feature_data(pool, feature_store.pool()).await?;
-    marker.feature_row_counts = feature_counts(feature_store.pool()).await?;
-    if marker.feature_row_counts != expected_feature_counts {
-        return Err(format!(
-            "Speaker-data row-count verification failed. Expected {:?}, copied {:?}. The branch core database remains unchanged and its verified backup is at {}.",
-            expected_feature_counts,
-            marker.feature_row_counts,
-            marker.backup_path.display()
-        ));
-    }
-    verify_pool(feature_store.pool()).await?;
-    feature_store.pool().close().await;
+    copy_and_verify_feature_store(pool, &feature_store, &mut marker).await?;
     marker.phase = "feature_verified".to_string();
     write_marker(marker_path, &marker)?;
 
@@ -139,6 +127,32 @@ async fn separate_legacy_speaker_data(
     write_marker(marker_path, &marker)?;
     std::fs::remove_file(marker_path).map_err(stringify)?;
     Ok(())
+}
+
+// Close the temporary store before any error reaches the caller, which can
+// remove the file on its next attempt.
+async fn copy_and_verify_feature_store(
+    pool: &SqlitePool,
+    feature_store: &super::speaker_store::SpeakerFeatureStore,
+    marker: &mut MigrationMarker,
+) -> Result<(), String> {
+    let result = async {
+        let expected_feature_counts = expected_legacy_feature_counts(pool).await?;
+        copy_legacy_feature_data(pool, feature_store.pool()).await?;
+        marker.feature_row_counts = feature_counts(feature_store.pool()).await?;
+        if marker.feature_row_counts != expected_feature_counts {
+            return Err(format!(
+                "Speaker-data row-count verification failed. Expected {:?}, copied {:?}. The branch core database remains unchanged and its verified backup is at {}.",
+                expected_feature_counts,
+                marker.feature_row_counts,
+                marker.backup_path.display()
+            ));
+        }
+        verify_pool(feature_store.pool()).await?;
+        Ok(())
+    }.await;
+    feature_store.pool().close().await;
+    result
 }
 
 async fn has_legacy_feature_schema(pool: &SqlitePool) -> Result<bool, String> {
@@ -317,8 +331,9 @@ async fn recover_interrupted_conversion(core_path: &Path, marker_path: &Path, te
     let marker: MigrationMarker = serde_json::from_slice(&std::fs::read(marker_path).map_err(stringify)?).map_err(stringify)?;
     verify_database(&marker.backup_path).await?;
     let pool = SqlitePool::connect(&core_path.to_string_lossy()).await.map_err(stringify)?;
-    let legacy = has_legacy_feature_schema(&pool).await?;
+    let legacy = has_legacy_feature_schema(&pool).await;
     pool.close().await;
+    let legacy = legacy?;
     if !legacy {
         if feature.exists() {
             verify_database(feature).await?;
@@ -514,6 +529,64 @@ fn stringify(error: impl std::fmt::Display) -> String { error.to_string() }
 mod tests {
     use super::*;
     use sqlx::{migrate::MigrateDatabase, Sqlite};
+
+    #[tokio::test]
+    async fn temporary_feature_store_closes_after_each_copy_and_verification_result() {
+        for failure in ["source", "copy", "counts", "mismatch", "verify", "none"] {
+            let dir = tempfile::tempdir().unwrap();
+            let core_path = dir.path().join("core.sqlite");
+            Sqlite::create_database(&core_path.to_string_lossy()).await.unwrap();
+            let core = SqlitePool::connect(&core_path.to_string_lossy()).await.unwrap();
+            let temporary = dir.path().join("speaker_recognition.sqlite.tmp");
+            let store = super::super::speaker_store::SpeakerFeatureStore::new(&temporary).await.unwrap();
+            match failure {
+                "source" => core.close().await,
+                "copy" => {
+                    sqlx::raw_sql("CREATE TABLE speaker_profiles (id TEXT); INSERT INTO speaker_profiles VALUES ('p1');")
+                        .execute(&core).await.unwrap();
+                }
+                "counts" => {
+                    sqlx::query("DROP TABLE meeting_diarization_status").execute(store.pool()).await.unwrap();
+                }
+                "mismatch" => {
+                    sqlx::query("INSERT INTO transcript_speakers (transcript_id, meeting_id) VALUES ('t1', 'm1')")
+                        .execute(store.pool()).await.unwrap();
+                }
+                "verify" => {
+                    sqlx::raw_sql("CREATE TABLE invalid_check (value INTEGER CHECK (value > 0)); PRAGMA ignore_check_constraints=ON; INSERT INTO invalid_check VALUES (-1); PRAGMA ignore_check_constraints=OFF;")
+                        .execute(store.pool()).await.unwrap();
+                }
+                _ => {}
+            }
+            let mut marker = MigrationMarker {
+                backup_path: dir.path().join("backup.sqlite"),
+                source_database_hash: String::new(),
+                meeting_count: 0,
+                transcript_count: 0,
+                feature_row_counts: BTreeMap::new(),
+                phase: "backup_verified".to_string(),
+            };
+
+            let result = copy_and_verify_feature_store(&core, &store, &mut marker).await;
+            assert_eq!(result.is_ok(), failure == "none", "{failure}: {result:?}");
+            if let Err(error) = &result {
+                let expected = match failure {
+                    "source" => "closed pool",
+                    "copy" => "NOT NULL",
+                    "counts" => "no such table",
+                    "mismatch" => "row-count",
+                    "verify" => "integrity check failed",
+                    _ => unreachable!(),
+                };
+                assert!(error.contains(expected), "{failure}: {error}");
+            }
+            assert!(store.pool().is_closed(), "temporary store stays open after {failure}");
+            core.close().await;
+            std::fs::remove_file(&temporary).unwrap();
+            let retry = super::super::speaker_store::SpeakerFeatureStore::new(&temporary).await.unwrap();
+            retry.pool().close().await;
+        }
+    }
 
     #[tokio::test]
     async fn separates_legacy_speaker_schema_and_accepts_future_core_migration() {
