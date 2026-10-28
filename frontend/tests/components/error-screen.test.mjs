@@ -6,7 +6,7 @@ import ts from 'typescript';
 import React from 'react';
 import { act, create } from 'react-test-renderer';
 
-function load(file, { assigned = [] } = {}) {
+function load(file, { assigned = [], browser = {} } = {}) {
   const source = fs.readFileSync(new URL(`../../src/${file}`, import.meta.url), 'utf8');
   const compiled = ts.transpileModule(source, {
     compilerOptions: { module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.React, esModuleInterop: true },
@@ -20,9 +20,10 @@ function load(file, { assigned = [] } = {}) {
     require: name => {
       if (name === 'react') return React;
       if (name === '@/components/ErrorScreen') return { ErrorScreen: load('components/ErrorScreen.tsx', { assigned }).module.exports.ErrorScreen };
-      if (name === '@/lib/theme') return { themeInitScript: '/* theme */' };
+      if (name === '@/lib/theme') return load('lib/theme.ts').module.exports;
       return {};
     },
+    ...browser,
   });
   return { module, logged };
 }
@@ -63,12 +64,42 @@ test('the route-level boundary renders the shared screen', async () => {
   await act(async () => renderer.unmount());
 });
 
-test('the global boundary supplies its own document with the saved theme', async () => {
-  const { module } = load('app/global-error.tsx');
-  const tree = module.exports.default({ error: new Error('boom'), reset() {} });
-  assert.equal(tree.type, 'html');
-  const head = tree.props.children.find(child => child.type === 'head');
-  assert.equal(head.props.children.props.dangerouslySetInnerHTML.__html, '/* theme */');
-  const body = tree.props.children.find(child => child.type === 'body');
-  assert.equal(body.props.children.props.error.message, 'boom');
-});
+for (const [saved, systemDark, blocked, expected] of [
+  ['dark', false, false, 'dark'],
+  ['light', true, false, 'light'],
+  ['system', true, false, 'dark'],
+  [null, false, false, 'light'],
+  ['invalid', true, false, 'dark'],
+  [null, true, true, 'dark'],
+]) {
+  test(`the global boundary restores the theme (${saved}, system dark: ${systemDark}, storage blocked: ${blocked})`, async () => {
+    let dark;
+    const style = {};
+    const { module } = load('app/global-error.tsx', { browser: {
+      window: {
+        localStorage: { getItem(key) {
+          assert.equal(key, 'meetily-theme');
+          if (blocked) throw new Error('Storage blocked');
+          return saved;
+        } },
+        matchMedia(query) {
+          assert.equal(query, '(prefers-color-scheme: dark)');
+          return { matches: systemDark };
+        },
+      },
+      document: { documentElement: { style, classList: { toggle(name, enabled) {
+        assert.equal(name, 'dark');
+        dark = enabled;
+      } } } },
+    } });
+    let renderer;
+    await act(async () => {
+      renderer = create(React.createElement(module.exports.default, { error: new Error('boom'), reset() {} }));
+    });
+    assert.equal(renderer.toJSON().type, 'html');
+    assert.match(textOf(renderer.toJSON()), /boom/);
+    assert.equal(dark, expected === 'dark');
+    assert.equal(style.colorScheme, expected);
+    await act(async () => renderer.unmount());
+  });
+}
