@@ -11,14 +11,15 @@ const invoke = mock((command: string) => Promise.resolve().then(() => response(c
 mock.module('@tauri-apps/api/core', () => ({ ...core, invoke }));
 mock.module('@tauri-apps/api/event', () => ({ ...events, listen: async () => () => {} }));
 mock.module('@tauri-apps/plugin-dialog', () => ({ ...dialogs, confirm: async () => true }));
-mock.module('sonner', () => ({ ...notices, toast: { success: mock(() => {}), error: mock(() => {}) } }));
+const toast = { success: mock(() => {}), error: mock(() => {}) };
+mock.module('sonner', () => ({ ...notices, toast }));
 let card: any;
 mock.module('../../src/components/TranscriptionModelCard', () => ({ ...cards, TranscriptionModelCard: (props: any) => { card = props; return <div />; } }));
 const { NemotronModelManager } = await import('../../src/components/NemotronModelManager');
 let renderer: ReactTestRenderer | undefined;
 const selected = mock(() => {});
 const model = { name: 'nemotron-test', display_name: 'Nemotron', supported: true, status: 'Available' };
-beforeEach(() => { card = undefined; selected.mockClear(); invoke.mockClear(); response = command => command === 'nemotron_get_available_models' ? [model] : undefined; });
+beforeEach(() => { card = undefined; selected.mockClear(); invoke.mockClear(); toast.error.mockClear(); response = command => command === 'nemotron_get_available_models' ? [model] : undefined; });
 afterEach(async () => { if (renderer) await act(async () => renderer!.unmount()); renderer = undefined; });
 afterAll(() => {
   mock.module('@tauri-apps/api/core', () => core);
@@ -27,7 +28,8 @@ afterAll(() => {
   mock.module('sonner', () => notices);
   mock.module('../../src/components/TranscriptionModelCard', () => cards);
 });
-async function show() { await act(async () => { renderer = create(<NemotronModelManager autoSave onModelSelect={selected} />); }); }
+async function show(selectedModel?: string) { await act(async () => { renderer = create(<NemotronModelManager autoSave selectedModel={selectedModel} onModelSelect={selected} />); }); }
+const deleted = () => invoke.mock.calls.some(([command]) => command === 'nemotron_delete_model');
 test('saves the model before reporting a selection, and keeps settings open if save fails', async () => {
   response = command => { if (command === 'api_save_transcript_config') throw new Error('database locked'); return [model]; };
   await show();
@@ -49,4 +51,14 @@ test('shows download errors and returns the card to a retry state', async () => 
   await act(async () => { await card.onDownload(); });
   expect(card.status.kind).toBe('missing');
   expect(JSON.stringify(renderer!.toJSON())).toContain('verification failed');
+});
+test('keeps the selected model and deletes it only after another model is selected', async () => {
+  await show(model.name);
+  await act(async () => { await card.onDelete(); });
+  expect(deleted()).toBe(false);
+  expect(toast.error).toHaveBeenCalledWith('Select another model before deleting this one');
+  await act(async () => renderer!.unmount());
+  await show('another-model');
+  await act(async () => { await card.onDelete(); });
+  expect(deleted()).toBe(true);
 });

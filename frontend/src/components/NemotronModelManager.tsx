@@ -49,6 +49,11 @@ export function NemotronModelManager({ selectedModel, onModelSelect, autoSave = 
     finally { setProgress(undefined); setCancelling(false); await refresh(); }
   };
   const remove = async () => {
+    // The saved selection would point at missing files until it is downloaded again.
+    if (model && selectedModel === model.name && model.status === 'Available') {
+      toast.error('Select another model before deleting this one');
+      return;
+    }
     if (!await confirm('Delete the Nemotron model and its local runtime? This frees about 20 GB.', { title: 'Delete Nemotron', kind: 'warning' })) return;
     try { await invoke('nemotron_delete_model'); await refresh(); }
     catch (e) { toast.error('Could not delete Nemotron', { description: String(e) }); }

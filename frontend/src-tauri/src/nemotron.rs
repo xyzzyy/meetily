@@ -312,8 +312,10 @@ pub async fn nemotron_download_model<R: Runtime>(app: AppHandle<R>) -> Result<()
     {
         return Err("A Nemotron download is already running.".into());
     }
-    let _busy = BusyGuard;
+    let busy = BusyGuard;
     let _lock = INSTALL_LOCK.lock().await;
+    // Bound after the lock so BUSY clears before a waiting delete can take the lock.
+    let _busy = busy;
     if ACTIVE.load(Ordering::SeqCst) > 0 {
         return Err("Stop transcription before downloading Nemotron.".into());
     }
@@ -347,6 +349,13 @@ pub async fn nemotron_delete_model<R: Runtime>(app: AppHandle<R>) -> Result<(), 
     Ok(())
 }
 
+/// Why a segment failed, and whether its worker can take the next segment.
+enum RequestError {
+    /// The worker rejected this segment and is waiting for the next request.
+    Segment(String),
+    /// The worker stopped or lost protocol sync. It must be replaced.
+    Worker(String),
+}
 struct Worker {
     child: Child,
     input: ChildStdin,
@@ -358,7 +367,8 @@ impl Drop for Worker {
     }
 }
 impl Worker {
-    async fn reply(&mut self) -> Result<Value, String> {
+    /// Reads one protocol message. Any error leaves the worker unusable.
+    async fn read(&mut self) -> Result<Value, String> {
         let mut line = String::new();
         let n = tokio::time::timeout(Duration::from_secs(600), self.output.read_line(&mut line))
             .await
@@ -367,11 +377,28 @@ impl Worker {
         if n == 0 || line.len() > 4 * 1024 * 1024 {
             return Err("Nemotron worker stopped or sent an invalid reply.".into());
         }
-        let value: Value = serde_json::from_str(&line).map_err(|e| e.to_string())?;
-        if let Some(error) = value.get("error") {
-            return Err(format!("Nemotron: {error}"));
+        serde_json::from_str(&line).map_err(|e| e.to_string())
+    }
+    async fn transcribe(&mut self, audio: &[f32]) -> Result<String, RequestError> {
+        let bytes: Vec<u8> = audio.iter().flat_map(|v| v.to_le_bytes()).collect();
+        let request = json!({"audio":STANDARD.encode(bytes)}).to_string() + "\n";
+        self.input
+            .write_all(request.as_bytes())
+            .await
+            .map_err(|e| RequestError::Worker(e.to_string()))?;
+        self.input
+            .flush()
+            .await
+            .map_err(|e| RequestError::Worker(e.to_string()))?;
+        let reply = self.read().await.map_err(RequestError::Worker)?;
+        if let Some(error) = reply.get("error") {
+            return Err(RequestError::Segment(format!("Nemotron: {error}")));
         }
-        Ok(value)
+        reply
+            .get("text")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .ok_or_else(|| RequestError::Worker("Nemotron reply has no transcript.".into()))
     }
     async fn spawn(path: &Path) -> Result<Self, String> {
         let log = std::fs::File::create(path.join("worker.log")).map_err(|e| e.to_string())?;
@@ -400,14 +427,30 @@ impl Worker {
             input,
             output,
         };
-        if worker.reply().await?.get("ready") != Some(&json!(true)) {
+        let ready = worker.read().await?;
+        if let Some(error) = ready.get("error") {
+            return Err(format!("Nemotron: {error}"));
+        }
+        if ready.get("ready") != Some(&json!(true)) {
             return Err("Nemotron did not start.".into());
         }
         Ok(worker)
     }
 }
 pub struct NemotronProvider {
+    path: PathBuf,
+    /// Empty after a worker failure. The next segment starts a new worker.
     worker: Mutex<Option<Worker>>,
+}
+impl NemotronProvider {
+    /// Counts as active until dropped, which blocks download and delete.
+    fn new(path: PathBuf, worker: Option<Worker>) -> Self {
+        ACTIVE.fetch_add(1, Ordering::SeqCst);
+        Self {
+            path,
+            worker: Mutex::new(worker),
+        }
+    }
 }
 impl Drop for NemotronProvider {
     fn drop(&mut self) {
@@ -435,11 +478,9 @@ pub async fn configured_provider<R: Runtime>(
     if ACTIVE.load(Ordering::SeqCst) > 0 {
         return Err("Nemotron is in use. Stop the current transcription first.".into());
     }
-    let worker = Worker::spawn(&root(app)?).await?;
-    ACTIVE.fetch_add(1, Ordering::SeqCst);
-    Ok(NemotronProvider {
-        worker: Mutex::new(Some(worker)),
-    })
+    let path = root(app)?;
+    let worker = Worker::spawn(&path).await?;
+    Ok(NemotronProvider::new(path, Some(worker)))
 }
 #[async_trait]
 impl TranscriptionProvider for NemotronProvider {
@@ -471,28 +512,26 @@ impl TranscriptionProvider for NemotronProvider {
                     "Audio split is too short.".into(),
                 ));
             }
-            let result = async {
-                let worker = guard.as_mut().ok_or("Nemotron worker is not running.")?;
-                let bytes: Vec<u8> = piece.iter().flat_map(|v| v.to_le_bytes()).collect();
-                let request = json!({"audio":STANDARD.encode(bytes)}).to_string() + "\n";
-                worker
-                    .input
-                    .write_all(request.as_bytes())
-                    .await
-                    .map_err(|e| e.to_string())?;
-                worker.input.flush().await.map_err(|e| e.to_string())?;
-                let reply = worker.reply().await?;
-                reply
-                    .get("text")
-                    .and_then(Value::as_str)
-                    .map(str::to_string)
-                    .ok_or("Nemotron reply has no transcript.".to_string())
-            }
-            .await;
-            match result {
-                Ok(part) => text.push(part),
-                Err(error) => {
-                    *guard = None;
+            // Taken out so a failed or cancelled request drops, and stops, its worker.
+            let mut worker = match guard.take() {
+                Some(worker) => worker,
+                None => {
+                    log::warn!("Restarting the Nemotron worker after a failure");
+                    Worker::spawn(&self.path)
+                        .await
+                        .map_err(TranscriptionError::EngineFailed)?
+                }
+            };
+            match worker.transcribe(piece).await {
+                Ok(part) => {
+                    *guard = Some(worker);
+                    text.push(part);
+                }
+                Err(RequestError::Segment(error)) => {
+                    *guard = Some(worker);
+                    return Err(TranscriptionError::EngineFailed(error));
+                }
+                Err(RequestError::Worker(error)) => {
                     return Err(TranscriptionError::EngineFailed(error));
                 }
             }
@@ -504,10 +543,11 @@ impl TranscriptionProvider for NemotronProvider {
         })
     }
     async fn is_model_loaded(&self) -> bool {
-        self.worker.lock().await.is_some()
+        // The install cannot change while a provider is active, and a stopped worker restarts on use.
+        true
     }
     async fn get_current_model(&self) -> Option<String> {
-        self.is_model_loaded().await.then(|| MODEL.to_string())
+        Some(MODEL.to_string())
     }
     fn provider_name(&self) -> &'static str {
         "Nemotron"
@@ -540,6 +580,55 @@ mod tests {
         assert!(ready(dir.path()));
         std::fs::write(dir.path().join("model/config.json"), "incomplete").unwrap();
         assert!(!ready(dir.path()));
+    }
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn segment_errors_keep_the_worker_and_stopped_workers_restart() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let python = dir.path().join("venv/bin/python");
+        std::fs::create_dir_all(python.parent().unwrap()).unwrap();
+        // Stands in for the helper: rejects request 1, exits on request 2, then transcribes.
+        std::fs::write(
+            &python,
+            r#"#!/bin/sh
+state=$(dirname "$0")
+echo start >> "$state/spawns"
+echo '{"ready":true}'
+while IFS= read -r line; do
+  echo request >> "$state/requests"
+  case $(wc -l < "$state/requests" | tr -d ' ') in
+    1) echo '{"error":"The transcript reached the output limit"}' ;;
+    2) exit 1 ;;
+    *) echo '{"text":"hello"}' ;;
+  esac
+done
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&python, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let spawns = || {
+            std::fs::read_to_string(dir.path().join("venv/bin/spawns"))
+                .unwrap()
+                .lines()
+                .count()
+        };
+        let worker = Worker::spawn(dir.path()).await.unwrap();
+        let provider = NemotronProvider::new(dir.path().to_path_buf(), Some(worker));
+        let audio = vec![0.0; 1600];
+
+        let rejected = provider.transcribe(audio.clone(), None).await.unwrap_err();
+        assert!(rejected.to_string().contains("output limit"));
+        assert!(provider.worker.lock().await.is_some());
+
+        assert!(provider.transcribe(audio.clone(), None).await.is_err());
+        assert!(provider.worker.lock().await.is_none());
+        assert!(provider.is_model_loaded().await);
+        assert_eq!(spawns(), 1);
+
+        let result = provider.transcribe(audio, None).await.unwrap();
+        assert_eq!(result.text, "hello");
+        assert_eq!(spawns(), 2);
     }
     #[test]
     fn catalog_has_pinned_hashes_and_complete_shards() {
