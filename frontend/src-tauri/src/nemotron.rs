@@ -309,17 +309,19 @@ async fn install<R: Runtime>(app: &AppHandle<R>, path: &Path) -> Result<(), Stri
         )
         .await
         .map_err(|e| e.to_string())?;
+        // uv 0.11 cannot open a --constraint path that contains a space, and the
+        // macOS app data path does ("Application Support"). Pass both files
+        // relative to the install folder.
         run(Command::new(&uv)
+            .current_dir(path)
             .arg("--no-config")
             .env("UV_CACHE_DIR", path.join("cache"))
             .env_remove("PYTHONHOME")
             .env_remove("PYTHONPATH")
-            .args(["pip", "install", "--constraint"])
-            .arg(path.join("constraints.txt"))
+            .args(["pip", "install", "--constraint", "constraints.txt"])
             .arg("--python")
             .arg(path.join("venv/bin/python"))
-            .arg("--requirement")
-            .arg(path.join("requirements.txt"))
+            .args(["--requirement", "requirements.txt"])
             .arg("mlx==0.32.4")
             .stdout(Stdio::null())
             .stderr(log))

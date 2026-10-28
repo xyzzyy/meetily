@@ -60,7 +60,7 @@ export function NemotronModelManager({ selectedModel, onModelSelect, autoSave = 
   };
   return <div className="space-y-3">
     <p className="text-sm text-muted-foreground">Full 30B-A4B model with a 4-bit language model. Audio stays on this device. The model detects the spoken language. Speed depends on your Mac; real-time transcription is not guaranteed.</p>
-    <a className="text-sm underline" href="https://huggingface.co/nativ-community/Nemotron-3.5-Transcribe-30B-A4B-EA-4bit" target="_blank" rel="noreferrer">Model and runtime details</a>
+    <button type="button" className="text-sm underline" onClick={() => void invoke('open_external_url', { url: 'https://huggingface.co/nativ-community/Nemotron-3.5-Transcribe-30B-A4B-EA-4bit' })}>Model and runtime details</button>
     {error && <p role="alert">{error}</p>}
     {!model && <Button onClick={() => { setError(undefined); void refresh(); }}>Load model list</Button>}
     {model && !model.supported && <p role="status">This runtime requires macOS on Apple silicon.</p>}
