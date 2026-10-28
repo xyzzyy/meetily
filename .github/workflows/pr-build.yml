@@ -210,8 +210,8 @@ jobs:
       - uses: ./.github/actions/setup-native
       - run: cargo test --locked --release -p llama-helper --features metal
 
-  macos:
-    name: macOS release build
+  macos-app:
+    name: macOS app bundle (arm64)
     needs: [frontend-build, native-helpers]
     runs-on: macos-latest
     timeout-minutes: 60
@@ -219,6 +219,24 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+      - uses: ./.github/actions/setup-frontend
       - uses: ./.github/actions/setup-native
       - uses: ./.github/actions/native-inputs
-      - run: cargo build --locked --release -p meetily
+      - name: Bundle the release app
+        working-directory: frontend
+        # Use the frontend and helpers from their own checks. Do not build a DMG.
+        run: pnpm exec tauri build --ci --bundles app --config '{"build":{"beforeBuildCommand":""}}' -- --locked
+      - name: Verify and archive the app
+        run: |
+          app="target/release/bundle/macos/Meetily Branch.app"
+          test -d "$app"
+          lipo -verify_arch arm64 "$app/Contents/MacOS/meetily"
+          codesign --verify --deep --strict "$app"
+          # A single archive keeps executable permissions and framework symlinks.
+          ditto -c -k --keepParent "$app" "$RUNNER_TEMP/meetily-macos-arm64.app.zip"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: meetily-macos-arm64-app
+          path: ${{ runner.temp }}/meetily-macos-arm64.app.zip
+          if-no-files-found: error
+          retention-days: 3
