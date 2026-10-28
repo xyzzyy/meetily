@@ -38,7 +38,7 @@ test('normal session: record, pause, save, summarize, edit, reopen, search, and 
     const editor = page.locator('.bn-editor');
     await expect(editor).toContainText(summaryText, { timeout: 15_000 });
     await editor.locator('.transcript-ref').click();
-    await expect(page.getByRole('region', { name: 'Transcript', exact: true })).toContainText(transcriptText);
+    await expect(page.locator('[data-highlighted="true"]')).toContainText(transcriptText);
     await editor.click();
     await page.keyboard.press('End');
     await page.keyboard.type(' Bring the agenda.');
@@ -58,9 +58,10 @@ test('normal session: record, pause, save, summarize, edit, reopen, search, and 
   });
 
   await test.step('find the meeting by its transcript and delete it', async () => {
-    await page.getByPlaceholder('Search meeting content...').fill('Friday');
+    await page.getByPlaceholder('Search meeting content...').fill('agreed');
     await expect.poll(async () => (await readDesktopState(page)).calls
-      .some((call: any) => call.command === 'api_search_transcripts' && call.args.query === 'Friday')).toBe(true);
+      .some((call: any) => call.command === 'api_search_transcripts' && call.args.query === 'agreed')).toBe(true);
+    await expect(page.getByText('Match:', { exact: true })).toBeVisible();
     await page.getByText('Friday planning', { exact: true }).first().click();
     await page.getByRole('button', { name: 'Delete meeting', exact: true }).click();
     await expect(page.getByRole('heading', { name: 'Confirm Delete' })).toBeVisible();
