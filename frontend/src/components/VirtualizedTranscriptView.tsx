@@ -398,7 +398,7 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
     }, [scrollToTime, scrollToKey, segments, hasMore, isLoadingMore, onLoadMore, useVirtualization, virtualizer, loadRecheck]);
 
     return (
-        <div ref={scrollRef} data-transcript-scroll-container className="flex flex-col h-full overflow-y-auto px-4 py-2">
+        <div ref={scrollRef} data-transcript-scroll-container role="region" aria-label="Transcript text" tabIndex={0} className="flex flex-col h-full overflow-y-auto px-4 py-2 focus-visible:outline focus-visible:outline-2 focus-visible:outline-blue-500">
             {/* Recording Status Bar - Sticky at top, always visible when recording */}
             <AnimatePresence>
                 {isRecording && (

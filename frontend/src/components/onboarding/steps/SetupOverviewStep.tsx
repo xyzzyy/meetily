@@ -68,7 +68,7 @@ export function SetupOverviewStep() {
                             <TooltipProvider>
                             <Tooltip>
                                 <TooltipTrigger asChild>
-                                <button className="text-gray-400 hover:text-gray-600 dark:hover:text-ink-300">
+                                <button type="button" aria-label="About summary models" className="text-gray-400 hover:text-gray-600 dark:hover:text-ink-300">
                                     <Info className="w-4 h-4" />
                                 </button>
                                 </TooltipTrigger>

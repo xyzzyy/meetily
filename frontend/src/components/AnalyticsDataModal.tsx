@@ -1,7 +1,8 @@
 'use client';
 
-import React from 'react';
-import { X, Info, Shield } from 'lucide-react';
+import React, { useRef } from 'react';
+import { Dialog, DialogContent, DialogTitle } from '@/components/ui/dialog';
+import { Info, Shield } from 'lucide-react';
 
 interface AnalyticsDataModalProps {
   isOpen: boolean;
@@ -10,23 +11,19 @@ interface AnalyticsDataModalProps {
 }
 
 export default function AnalyticsDataModal({ isOpen, onClose, onConfirmDisable }: AnalyticsDataModalProps) {
-  if (!isOpen) return null;
+  const opener = useRef<HTMLElement | null>(null);
 
   return (
-    <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-      <div className="bg-white dark:bg-ink-900 rounded-lg shadow-xl max-w-2xl w-full mx-4 max-h-[90vh] overflow-y-auto">
+    <Dialog open={isOpen} onOpenChange={open => { if (!open) onClose(); }}>
+      <DialogContent aria-describedby={undefined} className="max-w-2xl max-h-[90vh] overflow-y-auto p-0"
+        onOpenAutoFocus={() => { opener.current = document.activeElement as HTMLElement; }}
+        onCloseAutoFocus={event => { if (opener.current?.isConnected) { event.preventDefault(); opener.current.focus(); } }}>
         {/* Header */}
         <div className="flex items-center justify-between p-6 border-b border-gray-200 dark:border-ink-800">
           <div className="flex items-center gap-3">
             <Shield className="w-6 h-6 text-blue-600 dark:text-blue-400" />
-            <h2 className="text-xl font-semibold text-gray-900 dark:text-ink-100">What Analytics Collects</h2>
+            <DialogTitle className="text-xl font-semibold text-gray-900 dark:text-ink-100">What Analytics Collects</DialogTitle>
           </div>
-          <button
-            onClick={onClose}
-            className="text-gray-400 hover:text-gray-600 dark:hover:text-ink-300 transition-colors"
-          >
-            <X className="w-5 h-5" />
-          </button>
         </div>
 
         {/* Content */}
@@ -153,7 +150,7 @@ export default function AnalyticsDataModal({ isOpen, onClose, onConfirmDisable }
             Confirm: Disable Analytics
           </button>
         </div>
-      </div>
-    </div>
+      </DialogContent>
+    </Dialog>
   );
 }

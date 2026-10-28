@@ -51,7 +51,7 @@ export function OnboardingContainer({
             {/* Navigation Buttons */}
             {showNavigation && (
               <div className="absolute top-1/2 -translate-y-1/2 left-0 right-0 flex justify-between pointer-events-none">
-                <button
+                <button type="button" aria-label="Previous setup step"
                   onClick={handlePrevious}
                   disabled={!canGoPrevious || step === 1}
                   className={cn(
@@ -64,7 +64,7 @@ export function OnboardingContainer({
                   <ChevronLeft className="w-4 h-4" />
                 </button>
 
-                <button
+                <button type="button" aria-label="Next setup step"
                   onClick={handleNext}
                   disabled={!canGoNext || step === totalSteps}
                   className={cn(

@@ -57,16 +57,14 @@ export const EditableTitle: React.FC<EditableTitleProps> = ({
     </div>
   ) : (
     <div className="group flex items-center space-x-2 flex-1">
-      <h1
-        className="text-2xl font-bold cursor-pointer hover:bg-gray-50 dark:hover:bg-ink-800/50 rounded px-1 flex-1 whitespace-pre-wrap"
-        onClick={onStartEditing}
-      >
-        {title}
+      <h1 className="text-2xl font-bold flex-1 whitespace-pre-wrap">
+        <button type="button" className="text-left w-full rounded px-1 hover:bg-gray-50 dark:hover:bg-ink-800/50"
+          aria-label={`Edit title: ${title}`} onClick={onStartEditing}>{title}</button>
       </h1>
       <div className="flex space-x-1">
         <button 
           onClick={onStartEditing}
-          className="opacity-0 group-hover:opacity-100 transition-opacity duration-200 p-1 hover:bg-gray-100 dark:hover:bg-ink-800 rounded"
+          className="opacity-0 group-hover:opacity-100 focus:opacity-100 transition-opacity duration-200 p-1 hover:bg-gray-100 dark:hover:bg-ink-800 rounded"
           title="Edit section title"
         >
           <svg 
@@ -86,7 +84,7 @@ export const EditableTitle: React.FC<EditableTitleProps> = ({
         {onDelete && (
           <button 
             onClick={onDelete}
-            className="opacity-0 group-hover:opacity-100 transition-opacity duration-200 p-1 hover:bg-gray-100 dark:hover:bg-ink-800 rounded text-red-600 dark:text-red-400"
+            className="opacity-0 group-hover:opacity-100 focus:opacity-100 transition-opacity duration-200 p-1 hover:bg-gray-100 dark:hover:bg-ink-800 rounded text-red-600 dark:text-red-400"
             title="Delete section"
           >
             <svg 

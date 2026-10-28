@@ -1,35 +1,36 @@
-import React from 'react';
+import React, { useRef } from 'react';
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogTitle } from '@/components/ui/dialog';
 
 interface ConfirmationModalProps {
   onConfirm: () => void;
   onCancel: () => void;
   text: string;
   isOpen: boolean;
+  returnFocusRef?: React.RefObject<HTMLElement>;
 }
 
-export function ConfirmationModal({ onConfirm, onCancel, text, isOpen }: ConfirmationModalProps) {
-  if (!isOpen) return null;
-
+export function ConfirmationModal({ onConfirm, onCancel, text, isOpen, returnFocusRef }: ConfirmationModalProps) {
+  const cancelRef = useRef<HTMLButtonElement>(null);
+  const opener = useRef<HTMLElement | null>(null);
   return (
-    <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-      <div className="bg-white dark:bg-ink-900 rounded-lg p-6 max-w-md w-full mx-4">
-        <h2 className="text-xl font-semibold mb-4">Confirm Delete</h2>
-        <p className="text-gray-600 dark:text-ink-300 mb-6">{text}</p>
-        <div className="flex justify-end space-x-4">
-          <button
-            onClick={onCancel}
-            className="px-4 py-2 text-gray-600 dark:text-ink-300 hover:bg-gray-100 dark:hover:bg-ink-800 rounded-md transition-colors"
-          >
-            Cancel
-          </button>
-          <button
-            onClick={onConfirm}
-            className="px-4 py-2 bg-red-600 text-white hover:bg-red-700 rounded-md transition-colors"
-          >
-            Delete
-          </button>
-        </div>
-      </div>
-    </div>
+    <Dialog open={isOpen} onOpenChange={open => { if (!open) onCancel(); }}>
+      <DialogContent onOpenAutoFocus={event => {
+        event.preventDefault();
+        opener.current = document.activeElement as HTMLElement;
+        cancelRef.current?.focus();
+      }} onCloseAutoFocus={event => {
+        event.preventDefault();
+        (opener.current?.isConnected ? opener.current : returnFocusRef?.current)?.focus();
+      }}>
+        <DialogTitle>Confirm Delete</DialogTitle>
+        <DialogDescription>{text}</DialogDescription>
+        <DialogFooter>
+          <button ref={cancelRef} type="button" onClick={onCancel}
+            className="px-4 py-2 text-gray-600 dark:text-ink-300 hover:bg-gray-100 dark:hover:bg-ink-800 rounded-md">Cancel</button>
+          <button type="button" onClick={onConfirm}
+            className="px-4 py-2 bg-red-600 text-white hover:bg-red-700 rounded-md">Delete</button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }

@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useMemo, useEffect, useCallback } from 'react';
+import React, { useState, useMemo, useEffect, useCallback, useRef } from 'react';
 import { ChevronDown, ChevronRight, File, Settings, ChevronLeftCircle, ChevronRightCircle, Calendar, StickyNote, Home, Trash2, Mic, Square, Plus, Search, Pencil, NotebookPen, SearchIcon, X, Upload } from 'lucide-react';
 import { useRouter, usePathname } from 'next/navigation';
 import { useSidebar } from './SidebarProvider';
@@ -41,6 +41,8 @@ interface SidebarItem {
 
 const Sidebar: React.FC = () => {
   const router = useRouter();
+  const sidebarToggleRef = useRef<HTMLButtonElement>(null);
+  const editTriggerRef = useRef<HTMLElement | null>(null);
   const pathname = usePathname();
   const {
     currentMeeting,
@@ -458,7 +460,7 @@ const Sidebar: React.FC = () => {
 
           <Tooltip>
             <TooltipTrigger asChild>
-              <button
+              <button type="button" aria-label="Home"
                 onClick={() => router.push('/')}
                 className={`p-2 rounded-lg transition-colors duration-150 ${isHomePage ? 'bg-gray-100 dark:bg-ink-800' : 'hover:bg-gray-100 dark:hover:bg-ink-800'
                   }`}
@@ -473,7 +475,7 @@ const Sidebar: React.FC = () => {
 
           <Tooltip>
             <TooltipTrigger asChild>
-              <button
+              <button type="button" aria-label="Start recording"
                 onClick={handleRecordingToggle}
                 disabled={isRecording}
                 className={`p-2 ${isRecording ? 'bg-red-500 cursor-not-allowed' : 'bg-red-500 hover:bg-red-600'} rounded-full transition-colors duration-150 shadow-sm`}
@@ -493,7 +495,7 @@ const Sidebar: React.FC = () => {
           {betaFeatures.importAndRetranscribe && (
             <Tooltip>
               <TooltipTrigger asChild>
-                <button
+                <button type="button" aria-label="Import audio"
                   onClick={() => openImportDialog()}
                   className="p-2 rounded-lg transition-colors duration-150 hover:bg-blue-100 dark:hover:bg-blue-500/15 bg-blue-50 dark:bg-blue-500/10"
                 >
@@ -508,7 +510,7 @@ const Sidebar: React.FC = () => {
 
           <Tooltip>
             <TooltipTrigger asChild>
-              <button
+              <button type="button" aria-label="Show meetings"
                 onClick={() => {
                   if (isCollapsed) toggleCollapse();
                   toggleFolder('meetings');
@@ -526,7 +528,7 @@ const Sidebar: React.FC = () => {
 
           <Tooltip>
             <TooltipTrigger asChild>
-              <button
+              <button type="button" aria-label="Settings"
                 onClick={() => router.push('/settings')}
                 className={`p-2 rounded-lg transition-colors duration-150 ${isSettingsPage ? 'bg-gray-100 dark:bg-ink-800' : 'hover:bg-gray-100 dark:hover:bg-ink-800'
                   }`}
@@ -573,19 +575,9 @@ const Sidebar: React.FC = () => {
             } cursor-pointer`
             }`}
           style={item.type === 'folder' && depth === 0 ? {} : { paddingLeft }}
-          onClick={() => {
-            if (item.type === 'folder') {
-              toggleFolder(item.id);
-            } else {
-              setCurrentMeeting({ id: item.id, title: item.title });
-              const basePath = item.id.startsWith('intro-call') ? '/' :
-                item.id.includes('-') ? `/meeting-details?id=${item.id}` : `/notes/${item.id}`;
-              router.push(basePath);
-            }
-          }}
         >
           {item.type === 'folder' ? (
-            <>
+            <button type="button" className="flex items-center w-full text-left rounded focus-visible:outline focus-visible:outline-2 focus-visible:outline-blue-500" aria-expanded={isExpanded} onClick={() => toggleFolder(item.id)}>
               {item.id === 'meetings' ? (
                 <Calendar className="w-4 h-4 mr-2" />
               ) : item.id === 'notes' ? (
@@ -602,10 +594,18 @@ const Sidebar: React.FC = () => {
               {searchQuery && item.id === 'meetings' && isSearching && (
                 <span className="ml-2 text-xs text-blue-500 dark:text-blue-400 animate-pulse">Searching...</span>
               )}
-            </>
+            </button>
           ) : (
             <div className="flex flex-col w-full">
               <div className="flex items-center w-full">
+                <button type="button" className="flex flex-1 min-w-0 items-center text-left rounded focus-visible:outline focus-visible:outline-2 focus-visible:outline-blue-500"
+                  aria-current={isActive ? 'page' : undefined}
+                  onClick={() => {
+                    setCurrentMeeting({ id: item.id, title: item.title });
+                    const target = item.id.startsWith('intro-call') ? '/' : item.id.includes('-')
+                      ? `/meeting-details?id=${encodeURIComponent(item.id)}` : `/notes/${encodeURIComponent(item.id)}`;
+                    router.push(target);
+                  }}>
                 {isMeetingItem ? (
                   <div className="flex-shrink-0 flex items-center justify-center w-6 h-6 rounded-full mr-2 bg-gray-100 dark:bg-ink-800">
                     <File className="w-3.5 h-3.5 text-gray-600 dark:text-ink-300" />
@@ -616,11 +616,13 @@ const Sidebar: React.FC = () => {
                   </div>
                 )}
                 <span className="flex-1 break-words">{item.title}</span>
+                </button>
                 {isMeetingItem && (
-                  <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity duration-150">
+                  <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 transition-opacity duration-150">
                     <button
                       onClick={(e) => {
                         e.stopPropagation();
+                        editTriggerRef.current = e.currentTarget;
                         handleEditStart(item.id, item.title);
                       }}
                       className="hover:text-blue-600 dark:hover:text-blue-400 p-1 rounded-md hover:bg-blue-50 dark:hover:bg-blue-500/10 flex-shrink-0"
@@ -664,6 +666,10 @@ const Sidebar: React.FC = () => {
     <div className="fixed top-0 left-0 h-screen z-40">
       {/* Floating collapse button */}
       <button
+        ref={sidebarToggleRef}
+        type="button"
+        aria-label={isCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+        aria-expanded={!isCollapsed}
         onClick={toggleCollapse}
         className="absolute -right-4 top-20 z-50 p-1 bg-white dark:bg-ink-900 hover:bg-gray-100 dark:hover:bg-ink-800 rounded-full shadow-lg border"
       >
@@ -722,13 +728,13 @@ const Sidebar: React.FC = () => {
           {/* Fixed navigation items */}
           <div className="flex-shrink-0">
             {!isCollapsed && (
-              <div
+              <button type="button"
                 onClick={() => router.push('/')}
                 className="p-3  text-lg font-semibold items-center hover:bg-gray-100 dark:hover:bg-ink-800 h-10   flex mx-3 mt-3 rounded-lg cursor-pointer"
               >
                 <Home className="w-4 h-4 mr-2" />
                 <span>Home</span>
-              </div>
+              </button>
             )}
           </div>
 
@@ -792,7 +798,7 @@ const Sidebar: React.FC = () => {
             </button>
 
             {betaFeatures.importAndRetranscribe && (
-              <button
+              <button type="button" aria-label="Import audio"
                 onClick={() => openImportDialog()}
                 className="w-full flex items-center justify-center px-3 py-2 mt-1 text-sm font-medium text-gray-700 dark:text-ink-200 bg-blue-100 dark:bg-blue-500/15 hover:bg-blue-200 dark:hover:bg-blue-500/20 rounded-lg transition-colors shadow-sm"
               >
@@ -818,6 +824,7 @@ const Sidebar: React.FC = () => {
 
       {/* Confirmation Modal for Delete */}
       <ConfirmationModal
+        returnFocusRef={sidebarToggleRef}
         isOpen={deleteModalState.isOpen}
         text="Are you sure you want to delete this meeting? This action cannot be undone."
         onConfirm={handleDeleteConfirm}
@@ -828,7 +835,10 @@ const Sidebar: React.FC = () => {
       <Dialog open={editModalState.isOpen} onOpenChange={(open) => {
         if (!open) handleEditCancel();
       }}>
-        <DialogContent className="sm:max-w-[425px]">
+        <DialogContent className="sm:max-w-[425px]" onCloseAutoFocus={event => {
+            event.preventDefault();
+            (editTriggerRef.current?.isConnected ? editTriggerRef.current : sidebarToggleRef.current)?.focus();
+          }}>
           <VisuallyHidden>
             <DialogTitle>Edit Meeting Title</DialogTitle>
           </VisuallyHidden>

@@ -138,9 +138,10 @@ export function SettingsModals({
                           key={model.id}
                           className={`bg-white dark:bg-ink-900 p-4 rounded-lg shadow cursor-pointer transition-colors ${modelConfig.model === model.name ? 'ring-2 ring-blue-500 bg-blue-50 dark:bg-blue-500/10' : 'hover:bg-gray-50 dark:hover:bg-ink-800/50'
                             }`}
-                          onClick={() => setModelConfig((prev: ModelConfig) => ({ ...prev, model: model.name }))}
                         >
-                          <h3 className="font-bold">{model.name}</h3>
+                          <h3 className="font-bold"><button type="button" className="w-full text-left"
+                            aria-pressed={modelConfig.model === model.name}
+                            onClick={() => setModelConfig((prev: ModelConfig) => ({ ...prev, model: model.name }))}>{model.name}</button></h3>
                           <p className="text-gray-600 dark:text-ink-300">Size: {model.size}</p>
                           <p className="text-gray-600 dark:text-ink-300">Modified: {model.modified}</p>
                         </div>

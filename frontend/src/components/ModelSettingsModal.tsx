@@ -989,17 +989,17 @@ export function ModelSettingsModal({
 
             {/* Advanced Options (Collapsible) */}
             <div>
-              <div
-                className="flex items-center justify-between cursor-pointer py-2"
+              <button type="button" aria-expanded={isCustomOpenAIAdvancedOpen}
+                className="flex items-center justify-between w-full cursor-pointer py-2"
                 onClick={() => setIsCustomOpenAIAdvancedOpen(!isCustomOpenAIAdvancedOpen)}
               >
-                <Label className="cursor-pointer">Advanced Options</Label>
+                <span>Advanced Options</span>
                 {isCustomOpenAIAdvancedOpen ? (
                   <ChevronUp className="h-4 w-4 text-muted-foreground" />
                 ) : (
                   <ChevronDown className="h-4 w-4 text-muted-foreground" />
                 )}
-              </div>
+              </button>
 
               {isCustomOpenAIAdvancedOpen && (
                 <div className="space-y-3 pl-2 border-l-2 border-muted mt-2">
@@ -1094,6 +1094,7 @@ export function ModelSettingsModal({
                     type="button"
                     variant="ghost"
                     size="icon"
+                    aria-label={isApiKeyLocked ? 'Unlock API key' : 'Lock API key'} aria-pressed={isApiKeyLocked}
                     onClick={() => setIsApiKeyLocked(!isApiKeyLocked)}
                     className={isLockButtonVibrating ? 'animate-vibrate text-red-500 dark:text-red-400' : ''}
                     title={isApiKeyLocked ? 'Unlock to edit' : 'Lock to prevent editing'}
@@ -1105,6 +1106,7 @@ export function ModelSettingsModal({
                   type="button"
                   variant="ghost"
                   size="icon"
+                  aria-label={showApiKey ? 'Hide API key' : 'Show API key'} aria-pressed={showApiKey}
                   onClick={() => setShowApiKey(!showApiKey)}
                 >
                   {showApiKey ? <EyeOff /> : <Eye />}
@@ -1116,17 +1118,17 @@ export function ModelSettingsModal({
 
         {modelConfig.provider === 'ollama' && (
           <div>
-            <div
-              className="flex items-center justify-between cursor-pointer py-2"
+            <button type="button" aria-expanded={!isEndpointSectionCollapsed}
+              className="flex items-center justify-between w-full cursor-pointer py-2"
               onClick={() => setIsEndpointSectionCollapsed(!isEndpointSectionCollapsed)}
             >
-              <Label className="cursor-pointer">Custom Endpoint (optional)</Label>
+              <span>Custom Endpoint (optional)</span>
               {isEndpointSectionCollapsed ? (
                 <ChevronDown className="h-4 w-4 text-muted-foreground" />
               ) : (
                 <ChevronUp className="h-4 w-4 text-muted-foreground" />
               )}
-            </div>
+            </button>
 
             {!isEndpointSectionCollapsed && (
               <>
@@ -1321,17 +1323,14 @@ export function ModelSettingsModal({
                               : 'hover:bg-muted/50',
                             !modelIsDownloading && 'cursor-pointer'
                           )}
-                          onClick={() => {
-                            if (!modelIsDownloading) {
-                              setModelConfig((prev: ModelConfig) => ({ ...prev, model: model.name }))
-                            }
-                          }}
                         >
-                          <div>
+                          <button type="button" className="w-full text-left rounded focus-visible:outline focus-visible:outline-2 focus-visible:outline-blue-500"
+                            disabled={modelIsDownloading} aria-pressed={modelConfig.model === model.name}
+                            onClick={() => setModelConfig((prev: ModelConfig) => ({ ...prev, model: model.name }))}>
                             <b className="font-bold">{model.name}&nbsp;</b>
                             <span className="text-muted-foreground">with a size of </span>
                             <span className="font-mono font-bold text-sm">{model.size}</span>
-                          </div>
+                          </button>
 
                           {/* Progress bar for downloading models */}
                           {modelIsDownloading && progress !== undefined && (
