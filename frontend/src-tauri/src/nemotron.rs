@@ -2,7 +2,6 @@
 use crate::audio::transcription::{TranscriptResult, TranscriptionError, TranscriptionProvider};
 use async_trait::async_trait;
 use base64::{engine::general_purpose::STANDARD, Engine};
-use futures_util::StreamExt;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::{
@@ -33,6 +32,7 @@ const MLX_SHA: &str = "e8d717772d94b2bfdc946606511361804da52eb824e42269dfdc9f76d
 const RUNTIME_VERSION: &str = "mlx-audio-92decb7;mlx-0.32.4;python-3.12.12";
 const CONSTRAINTS: &str = include_str!("../../../nemotron-helper/constraints.txt");
 const WORKER: &str = include_str!("../../../nemotron-helper/main.py");
+const DOWNLOADER: &str = include_str!("../../../nemotron-helper/download.py");
 static BUSY: AtomicBool = AtomicBool::new(false);
 static ACTIVE: AtomicUsize = AtomicUsize::new(0);
 static CANCEL: AtomicBool = AtomicBool::new(false);
@@ -126,70 +126,130 @@ async fn digest(path: &Path) -> Result<String, String> {
     }
     Ok(format!("{:x}", hash.finalize()))
 }
-async fn download<R: Runtime>(
-    app: &AppHandle<R>,
-    url: &str,
-    dest: &Path,
-    sha: &str,
-    size: Option<u64>,
-    completed: u64,
-    total: u64,
-) -> Result<(), String> {
+/// Fetches the small uv installer. uv and huggingface_hub fetch everything else.
+async fn download(url: &str, dest: &Path, sha: &str) -> Result<(), String> {
     cancelled()?;
     if dest.is_file() && digest(dest).await? == sha {
         return Ok(());
     }
-    let part = dest.with_extension("part");
     let client = reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(30))
-        .timeout(Duration::from_secs(7200))
+        .timeout(Duration::from_secs(600))
         .build()
         .map_err(|e| e.to_string())?;
-    let response = client
+    let bytes = client
         .get(url)
         .send()
         .await
+        .and_then(|response| response.error_for_status())
         .map_err(|e| e.to_string())?
-        .error_for_status()
-        .map_err(|e| e.to_string())?;
-    let mut stream = response.bytes_stream();
-    let mut file = tokio::fs::File::create(&part)
+        .bytes()
         .await
         .map_err(|e| e.to_string())?;
-    let mut hash = Sha256::new();
-    let mut bytes = 0;
-    let mut last_percent = u64::MAX;
-    loop {
-        cancelled()?;
-        let chunk = tokio::select! {
-            chunk = stream.next() => chunk,
-            _ = tokio::time::sleep(Duration::from_millis(250)) => continue,
-        };
-        let Some(chunk) = chunk else {
-            break;
-        };
-        cancelled()?;
-        let chunk = chunk.map_err(|e| e.to_string())?;
-        bytes += chunk.len() as u64;
-        if size.is_some_and(|s| bytes > s) {
-            return Err("Download exceeds the expected file size.".into());
-        }
-        file.write_all(&chunk).await.map_err(|e| e.to_string())?;
-        hash.update(&chunk);
-        let percent = ((completed + bytes) * 100 / total.max(1)).min(99);
-        if percent != last_percent {
-            progress(app, "Downloading model and runtime", percent);
-            last_percent = percent;
-        }
-    }
-    file.flush().await.map_err(|e| e.to_string())?;
-    drop(file);
-    if size.is_some_and(|s| bytes != s) || format!("{:x}", hash.finalize()) != sha {
+    if format!("{:x}", Sha256::digest(&bytes)) != sha {
         return Err("Download verification failed. Try the download again.".into());
     }
-    tokio::fs::rename(part, dest)
+    tokio::fs::write(dest, bytes)
         .await
         .map_err(|e| e.to_string())
+}
+/// Partial files that huggingface_hub leaves when its process is stopped.
+fn partial_downloads(model: &Path) -> Vec<PathBuf> {
+    std::fs::read_dir(model.join(".cache/huggingface/download"))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "incomplete"))
+        .collect()
+}
+fn remove_partial_downloads(model: &Path) {
+    for path in partial_downloads(model) {
+        let _ = std::fs::remove_file(path);
+    }
+}
+fn downloaded_bytes(model: &Path) -> u64 {
+    let file_len = |path: &Path| path.metadata().map(|m| m.len()).unwrap_or(0);
+    let complete: u64 = ARTIFACTS
+        .iter()
+        .map(|(name, _, _)| file_len(&model.join(name)))
+        .sum();
+    complete
+        + partial_downloads(model)
+            .iter()
+            .map(|path| file_len(path))
+            .sum::<u64>()
+}
+fn last_log_line(path: &Path) -> String {
+    let log = std::fs::read_to_string(path).unwrap_or_default();
+    let line = log.lines().rev().find(|line| !line.trim().is_empty());
+    line.unwrap_or("no details")
+        .trim()
+        .chars()
+        .take(300)
+        .collect()
+}
+/// Downloads the model files with huggingface_hub, which retries and resumes
+/// within one run. A new run starts unfinished files again.
+async fn download_model(path: &Path, on_progress: impl Fn(u64)) -> Result<(), String> {
+    let model = path.join("model");
+    // A stopped run's partial files cannot be reused, so they only take space.
+    remove_partial_downloads(&model);
+    let log_path = path.join("download.log");
+    let log = std::fs::File::create(&log_path).map_err(|e| e.to_string())?;
+    let mut child = Command::new(path.join("venv/bin/python"))
+        .args(["-I", "-c", DOWNLOADER, REPO, REVISION])
+        .arg(&model)
+        .args(ARTIFACTS.iter().map(|(name, _, _)| name))
+        .env("HF_HOME", path.join("huggingface"))
+        .env("HF_HUB_DISABLE_TELEMETRY", "1")
+        .env("HF_HUB_DISABLE_PROGRESS_BARS", "1")
+        .env_remove("HF_HUB_OFFLINE")
+        .env_remove("HF_ENDPOINT")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(log)
+        .kill_on_drop(true)
+        .spawn()
+        .map_err(|e| e.to_string())?;
+    let status = loop {
+        tokio::select! {
+            status = child.wait() => break status.map_err(|e| e.to_string())?,
+            _ = tokio::time::sleep(Duration::from_millis(500)) => {
+                if CANCEL.load(Ordering::SeqCst) {
+                    let _ = child.kill().await;
+                    remove_partial_downloads(&model);
+                    return Err("Download cancelled.".into());
+                }
+                on_progress(downloaded_bytes(&model));
+            }
+        }
+    };
+    if !status.success() {
+        remove_partial_downloads(&model);
+        return Err(format!(
+            "Model download failed: {}. See nemotron/download.log.",
+            last_log_line(&log_path)
+        ));
+    }
+    Ok(())
+}
+/// Checks each model file against its pinned SHA-256 and removes a bad file
+/// so the next download fetches it again.
+async fn verify_model(model: &Path, on_progress: impl Fn(u64)) -> Result<(), String> {
+    let mut checked = 0;
+    for (name, size, sha) in ARTIFACTS {
+        let file = model.join(name);
+        if digest(&file).await.map_err(|e| format!("{name}: {e}"))? != *sha {
+            let _ = tokio::fs::remove_file(&file).await;
+            return Err(format!(
+                "{name} failed verification. Try the download again."
+            ));
+        }
+        checked += size;
+        on_progress(checked);
+    }
+    Ok(())
 }
 async fn run(command: &mut Command) -> Result<(), String> {
     cancelled()?;
@@ -213,22 +273,12 @@ async fn install<R: Runtime>(app: &AppHandle<R>, path: &Path) -> Result<(), Stri
     let total = ARTIFACTS.iter().map(|(_, s, _)| s).sum::<u64>();
     if !runtime_ready(path) {
         progress(app, "Downloading runtime installer", 0);
-        download(app, UV_URL, &path.join("uv.tar.gz"), UV_SHA, None, 0, total).await?;
+        download(UV_URL, &path.join("uv.tar.gz"), UV_SHA).await?;
         run(Command::new("/usr/bin/tar")
             .args(["-xzf"])
             .arg(path.join("uv.tar.gz"))
             .arg("-C")
             .arg(path))
-        .await?;
-        download(
-            app,
-            MLX_URL,
-            &path.join("mlx-audio.tar.gz"),
-            MLX_SHA,
-            None,
-            0,
-            total,
-        )
         .await?;
         // uv manages its own Python. No system Python or package state is changed.
         let uv = path.join("uv-aarch64-apple-darwin/uv");
@@ -252,6 +302,13 @@ async fn install<R: Runtime>(app: &AppHandle<R>, path: &Path) -> Result<(), Stri
         tokio::fs::write(path.join("constraints.txt"), CONSTRAINTS)
             .await
             .map_err(|e| e.to_string())?;
+        // uv fetches the MLX source archive and checks its pinned hash.
+        tokio::fs::write(
+            path.join("requirements.txt"),
+            format!("mlx-audio[stt] @ {MLX_URL} --hash=sha256:{MLX_SHA}\n"),
+        )
+        .await
+        .map_err(|e| e.to_string())?;
         run(Command::new(&uv)
             .arg("--no-config")
             .env("UV_CACHE_DIR", path.join("cache"))
@@ -261,11 +318,8 @@ async fn install<R: Runtime>(app: &AppHandle<R>, path: &Path) -> Result<(), Stri
             .arg(path.join("constraints.txt"))
             .arg("--python")
             .arg(path.join("venv/bin/python"))
-            .arg(format!(
-                "mlx-audio[stt] @ {}",
-                reqwest::Url::from_file_path(path.join("mlx-audio.tar.gz"))
-                    .map_err(|_| "Invalid runtime archive path.")?
-            ))
+            .arg("--requirement")
+            .arg(path.join("requirements.txt"))
             .arg("mlx==0.32.4")
             .stdout(Stdio::null())
             .stderr(log))
@@ -278,20 +332,16 @@ async fn install<R: Runtime>(app: &AppHandle<R>, path: &Path) -> Result<(), Stri
             .await
             .map_err(|e| e.to_string())?;
     }
-    let mut completed = 0;
-    for (name, size, sha) in ARTIFACTS {
-        download(
-            app,
-            &format!("https://huggingface.co/{REPO}/resolve/{REVISION}/{name}"),
-            &path.join("model").join(name),
-            sha,
-            Some(*size),
-            completed,
-            total,
-        )
-        .await?;
-        completed += size;
-    }
+    let percent = |bytes: u64| (bytes * 100 / total.max(1)).min(99);
+    progress(app, "Downloading model", 0);
+    download_model(path, |bytes| {
+        progress(app, "Downloading model", percent(bytes))
+    })
+    .await?;
+    verify_model(&path.join("model"), |bytes| {
+        progress(app, "Checking model files", percent(bytes))
+    })
+    .await?;
     progress(app, "Download complete", 100);
     Ok(())
 }
@@ -580,6 +630,54 @@ mod tests {
         assert!(ready(dir.path()));
         std::fs::write(dir.path().join("model/config.json"), "incomplete").unwrap();
         assert!(!ready(dir.path()));
+    }
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn failed_model_download_reports_the_error_and_removes_partial_files() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let python = dir.path().join("venv/bin/python");
+        std::fs::create_dir_all(python.parent().unwrap()).unwrap();
+        // Stands in for huggingface_hub: leaves a partial file, then fails.
+        std::fs::write(
+            &python,
+            r#"#!/bin/sh
+echo "$4 $5" > "$(dirname "$0")/args"
+mkdir -p "$6/.cache/huggingface/download"
+echo partial > "$6/.cache/huggingface/download/shard.1234.incomplete"
+echo "Traceback (most recent call last):" >&2
+echo "httpx2.ConnectError: network is unreachable" >&2
+exit 1
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&python, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let error = download_model(dir.path(), |_| {}).await.unwrap_err();
+        assert!(error.contains("network is unreachable"), "{error}");
+        assert!(partial_downloads(&dir.path().join("model")).is_empty());
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("venv/bin/args")).unwrap(),
+            format!("{REPO} {REVISION}\n")
+        );
+    }
+    #[tokio::test]
+    async fn verification_removes_a_changed_model_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let (name, _, _) = ARTIFACTS[0];
+        std::fs::write(dir.path().join(name), "changed").unwrap();
+        let error = verify_model(dir.path(), |_| {}).await.unwrap_err();
+        assert!(error.contains("failed verification"), "{error}");
+        assert!(!dir.path().join(name).exists());
+    }
+    #[test]
+    fn progress_counts_complete_and_partial_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let partial = dir.path().join(".cache/huggingface/download");
+        std::fs::create_dir_all(&partial).unwrap();
+        std::fs::write(dir.path().join(ARTIFACTS[0].0), [0; 10]).unwrap();
+        std::fs::write(partial.join("shard.ab12.incomplete"), [0; 5]).unwrap();
+        std::fs::write(partial.join("shard.metadata"), [0; 100]).unwrap();
+        assert_eq!(downloaded_bytes(dir.path()), 15);
     }
     #[cfg(unix)]
     #[tokio::test]
