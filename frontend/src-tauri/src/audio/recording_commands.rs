@@ -678,10 +678,14 @@ fn start_managed_transcription<R: Runtime>(
     receiver: tokio::sync::mpsc::UnboundedReceiver<super::AudioChunk>,
     session: Arc<super::RecordingState>,
 ) {
-    let (worker, init_result) = transcription::start_transcription_task(app.clone(), receiver);
+    let worker = transcription::start_transcription_task(app.clone(), receiver);
+    let (worker, completion) = supervise_transcription_task(worker);
     *TRANSCRIPTION_TASK.lock().unwrap() = Some(worker);
     tokio::spawn(async move {
-        if let Err(error) = wait_for_transcription_init(init_result).await {
+        let result = completion.await.unwrap_or_else(|_| {
+            Err("The speech recognition supervisor stopped unexpectedly".to_string())
+        });
+        if let Err(error) = result {
             if let Err(error) = stop_recording_session(app, Some(session), Some(error)).await {
                 error!("Recording shutdown after a transcription failure failed: {error}");
             }
@@ -729,13 +733,23 @@ fn claim_recording_stop<'a>(
     Some((guard, manager.take()))
 }
 
-/// Require a success signal. An unexpected worker exit must stop capture too.
-async fn wait_for_transcription_init(
-    result: tokio::sync::oneshot::Receiver<Result<(), String>>,
-) -> Result<(), String> {
-    result.await.unwrap_or_else(|_| {
-        Err("The speech recognition worker exited before initialization finished. Restart Meetily.".to_string())
-    })
+/// Share the worker result with the failure monitor and the stop command.
+/// The monitor must not own the handle that shutdown waits for.
+fn supervise_transcription_task(
+    worker: JoinHandle<Result<(), String>>,
+) -> (
+    JoinHandle<Result<(), String>>,
+    tokio::sync::oneshot::Receiver<Result<(), String>>,
+) {
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    let supervised = tokio::spawn(async move {
+        let result = worker
+            .await
+            .unwrap_or_else(|error| Err(format!("The speech recognition worker failed: {error}")));
+        let _ = sender.send(result.clone());
+        result
+    });
+    (supervised, receiver)
 }
 
 /// A delayed worker failure can stop only the recording that owns the worker.
@@ -842,7 +856,7 @@ async fn stop_recording_session<R: Runtime>(
     if let Some(error) = fatal_error {
         let _ = app.emit("transcription-error", serde_json::json!({
             "error": error,
-            "userMessage": "Speech recognition failed. Recording is stopping. Check your model settings.",
+            "userMessage": format!("Speech recognition failed: {error}. Recording is stopping. Check your model settings."),
             "actionable": true,
             "phase": "active"
         }));
@@ -1913,7 +1927,7 @@ mod unload_tests {
 mod stopping_tests {
     use super::{
         claim_recording_stop, complete_recording_start, matches_stop_session,
-        wait_for_transcription_init, RecordingManager, StoppingGuard,
+        supervise_transcription_task, RecordingManager, StoppingGuard,
     };
     use std::sync::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -1988,32 +2002,57 @@ mod stopping_tests {
     }
 
     #[tokio::test]
-    async fn successful_worker_init_does_not_request_shutdown() {
-        let (sender, receiver) = tokio::sync::oneshot::channel();
-        sender.send(Ok(())).unwrap();
-        assert_eq!(wait_for_transcription_init(receiver).await, Ok(()));
+    async fn completed_worker_reports_success_to_monitor_and_stop() {
+        let (task, completion) = supervise_transcription_task(tokio::spawn(async { Ok(()) }));
+        assert_eq!(completion.await.unwrap(), Ok(()));
+        assert_eq!(task.await.unwrap(), Ok(()));
     }
 
     #[tokio::test]
     async fn failed_worker_init_preserves_the_error_for_shutdown() {
-        let (sender, receiver) = tokio::sync::oneshot::channel();
-        sender.send(Err("Model load failed".to_string())).unwrap();
+        let (task, completion) =
+            supervise_transcription_task(tokio::spawn(async { Err("Model load failed".to_string()) }));
         assert_eq!(
-            wait_for_transcription_init(receiver).await,
+            completion.await.unwrap(),
             Err("Model load failed".to_string())
         );
+        assert_eq!(task.await.unwrap(), Err("Model load failed".to_string()));
     }
 
     #[tokio::test]
     async fn panicked_worker_init_requests_shutdown() {
-        let (sender, receiver) = tokio::sync::oneshot::channel();
-        let worker = tokio::spawn(async move {
-            let _sender = sender;
+        let (task, completion) = supervise_transcription_task(tokio::spawn(async {
             panic!("Model initialization panicked");
+        }));
+        let error = completion.await.unwrap().unwrap_err();
+        assert!(error.contains("Model initialization panicked"));
+        assert_eq!(task.await.unwrap(), Err(error));
+    }
+
+    #[tokio::test]
+    async fn worker_failure_after_init_reaches_monitor_before_stop() {
+        let (ready_sender, ready) = tokio::sync::oneshot::channel();
+        let (fail, failure) = tokio::sync::oneshot::channel();
+        let worker = tokio::spawn(async move {
+            ready_sender.send(()).unwrap();
+            failure.await.unwrap();
+            panic!("Injected active worker panic");
         });
-        let error = wait_for_transcription_init(receiver).await.unwrap_err();
-        assert!(error.contains("exited before initialization finished"));
-        assert!(worker.await.unwrap_err().is_panic());
+        let (task, mut completion) = supervise_transcription_task(worker);
+        ready.await.unwrap();
+        assert!(matches!(
+            completion.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+        ));
+        fail.send(()).unwrap();
+        let error = tokio::time::timeout(std::time::Duration::from_secs(2), completion)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap_err();
+        assert!(error.contains("Injected active worker panic"));
+        // Shutdown can join the stored handle after the monitor reports failure.
+        assert_eq!(task.await.unwrap(), Err(error));
     }
 
     #[test]
