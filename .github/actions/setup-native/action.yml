@@ -1,0 +1,33 @@
+name: Set up native builds
+description: Set up the arm64 macOS SDK, OpenSSL, and shared release cache.
+runs:
+  using: composite
+  steps:
+    - uses: dtolnay/rust-toolchain@stable
+    - name: Configure the active Xcode SDK
+      id: xcode
+      shell: bash
+      run: |
+        test "$(uname -m)" = arm64
+        xcodebuild -version
+        echo "version=$(xcodebuild -version | head -n 1 | tr ' ' '-')" >> "$GITHUB_OUTPUT"
+        sdk_path=$(xcrun --sdk macosx --show-sdk-path)
+        test -d "$sdk_path"
+        echo "SDKROOT=$sdk_path" >> "$GITHUB_ENV"
+        echo "MACOSX_DEPLOYMENT_TARGET=14.4" >> "$GITHUB_ENV"
+    - name: Configure OpenSSL
+      shell: bash
+      run: |
+        brew list --versions openssl@3 >/dev/null || brew install openssl@3
+        openssl_prefix=$(brew --prefix openssl@3)
+        echo "OPENSSL_DIR=$openssl_prefix" >> "$GITHUB_ENV"
+        echo "CMAKE_PREFIX_PATH=$openssl_prefix" >> "$GITHUB_ENV"
+    - uses: swatinem/rust-cache@v2
+      with:
+        workspaces: '. -> target'
+        shared-key: pr-macos-release-${{ steps.xcode.outputs.version }}
+        cache-workspace-crates: true
+    - uses: actions/cache@v4
+      with:
+        path: frontend/src-tauri/binaries/ffmpeg-*
+        key: macos-arm64-ffmpeg-${{ hashFiles('frontend/src-tauri/build.rs', 'frontend/src-tauri/build/ffmpeg.rs') }}
