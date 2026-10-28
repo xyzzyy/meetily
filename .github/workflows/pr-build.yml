@@ -19,65 +19,116 @@ env:
   NEXT_TELEMETRY_DISABLED: '1'
 
 jobs:
-  frontend:
-    name: Frontend build and tests
+  node-quick:
+    name: ${{ matrix.name }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 5
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Build guard tests
+            test: .github/verify-portable-ggml.test.cjs
+          - name: Issue workflow tests
+            test: .github/scripts/issue-workflows.test.cjs
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-      - uses: pnpm/action-setup@v4
-        with:
-          version: 9.15.9
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
-          cache: pnpm
-          cache-dependency-path: frontend/pnpm-lock.yaml
+      - run: node --test '${{ matrix.test }}'
+
+  benchmark-tests:
+    name: Diarization benchmark tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - run: python3 -m unittest discover -s diarization-sidecar/Benchmarks -p 'test_*.py' -v
+
+  funasr-tests:
+    name: FUN-ASR embedding tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - run: |
+          c++ -std=c++17 funasr-helper/tests/audio_embeddings.cpp -o "$RUNNER_TEMP/funasr-embedding-tests"
+          "$RUNNER_TEMP/funasr-embedding-tests"
+
+  swift-tests:
+    name: Swift interval tests
+    runs-on: macos-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - run: |
+          swiftc \
+            diarization-sidecar/Sources/meetily-diarization/IntervalProcessing.swift \
+            diarization-sidecar/Tests/IntervalProcessing/main.swift \
+            -o "$RUNNER_TEMP/meetily-interval-tests"
+          "$RUNNER_TEMP/meetily-interval-tests"
+
+  frontend-tests:
+    name: Frontend unit tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-frontend
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: '1.3.14'
-      - name: Install frontend dependencies
-        working-directory: frontend
-        run: pnpm install --frozen-lockfile
-      - name: Run build guard tests
-        run: node --test .github/verify-portable-ggml.test.cjs
-      - name: Run issue workflow tests
-        run: node --test .github/scripts/issue-workflows.test.cjs
-      - name: Run frontend tests
-        working-directory: frontend
-        run: |
-          set -euo pipefail
-          test_list=$(mktemp)
-          trap 'rm -f "$test_list"' EXIT
-          if ! find tests -type f \( -name '*.test.mjs' -o -name '*.test.js' -o -name '*.test.ts' -o -name '*.test.tsx' \) -print0 > "$test_list"; then
-            echo "Failed to discover frontend tests." >&2
-            exit 1
-          fi
-          if [[ ! -s "$test_list" ]]; then
-            echo "No frontend test files found." >&2
-            exit 1
-          fi
-          while IFS= read -r -d '' test_file; do
-            if grep -q 'bun:test' "$test_file"; then
-              bun test "./$test_file"
-            else
-              node --test "$test_file"
-            fi
-          done < "$test_list"
-      - name: Run diarization benchmark tests
-        run: python3 -m unittest discover -s diarization-sidecar/Benchmarks -p 'test_*.py' -v
-      - name: Build frontend for production
-        working-directory: frontend
+      - working-directory: frontend
+        run: bash ../.github/scripts/test-frontend.sh
+
+  frontend-build:
+    name: Frontend production build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-frontend
+      - working-directory: frontend
         run: pnpm build
-      - name: Install release test browsers
-        working-directory: frontend
+      - uses: actions/upload-artifact@v4
+        with:
+          name: frontend-build
+          path: frontend/out
+          if-no-files-found: error
+          retention-days: 3
+
+  browser-tests:
+    name: Browser release tests
+    needs: frontend-build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-frontend
+      - uses: actions/download-artifact@v4
+        with:
+          name: frontend-build
+          path: frontend/out
+      - working-directory: frontend
         run: pnpm exec playwright install --with-deps chromium webkit
-      - name: Open saved meetings in the production build
-        working-directory: frontend
+      - working-directory: frontend
         run: pnpm test:release
-      - name: Save release test failure details
+      - name: Save browser failure details
         if: failure()
         uses: actions/upload-artifact@v4
         with:
@@ -85,21 +136,15 @@ jobs:
           path: frontend/test-results
           if-no-files-found: ignore
           retention-days: 3
-      - name: Save frontend output for the native build
-        uses: actions/upload-artifact@v4
-        with:
-          name: frontend-build
-          path: frontend/out
-          if-no-files-found: error
-          retention-days: 3
 
-  macos:
-    name: macOS release build and tests
-    needs: frontend
+  native-helpers:
+    name: Build ${{ matrix.helper }} helper
     runs-on: macos-latest
-    timeout-minutes: 60
-    env:
-      MACOSX_DEPLOYMENT_TARGET: '14.4'
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        helper: [llama, diarization, funasr]
     steps:
       - uses: actions/checkout@v4
         with:
@@ -107,57 +152,73 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
-      - uses: dtolnay/rust-toolchain@stable
-      - name: Read the active Xcode version
-        id: xcode
-        run: echo "version=$(xcodebuild -version | head -n 1 | tr ' ' '-')" >> "$GITHUB_OUTPUT"
-      - uses: swatinem/rust-cache@v2
-        with:
-          workspaces: '. -> target'
-          key: pr-macos-release-${{ steps.xcode.outputs.version }}
-      - uses: actions/download-artifact@v4
-        with:
-          name: frontend-build
-          path: frontend/out
-      - name: Configure the active Xcode SDK
-        run: |
-          xcodebuild -version
-          sdk_path=$(xcrun --sdk macosx --show-sdk-path)
-          test -d "$sdk_path"
-          echo "SDKROOT=$sdk_path" >> "$GITHUB_ENV"
-      - name: Configure OpenSSL
-        run: |
-          brew list --versions openssl@3 >/dev/null || brew install openssl@3
-          openssl_prefix=$(brew --prefix openssl@3)
-          echo "OPENSSL_DIR=$openssl_prefix" >> "$GITHUB_ENV"
-          echo "CMAKE_PREFIX_PATH=$openssl_prefix" >> "$GITHUB_ENV"
-      - name: Build the local summary helper
+      - uses: ./.github/actions/setup-native
+      - name: Build llama helper
+        if: matrix.helper == 'llama'
         run: |
           cargo build --locked --release -p llama-helper --features metal
           mkdir -p frontend/src-tauri/binaries
           cp target/release/llama-helper frontend/src-tauri/binaries/llama-helper-aarch64-apple-darwin
-      # PR #23 adds this helper. Build it when that feature is present.
-      - name: Build the local speaker helper
-        if: ${{ hashFiles('frontend/scripts/build-diarization-sidecar.js') != '' }}
+      - name: Build diarization helper
+        if: matrix.helper == 'diarization'
         run: node frontend/scripts/build-diarization-sidecar.js
-      - name: Test FUN-ASR embedding lengths
-        run: |
-          c++ -std=c++17 funasr-helper/tests/audio_embeddings.cpp -o "$RUNNER_TEMP/funasr-embedding-tests"
-          "$RUNNER_TEMP/funasr-embedding-tests"
-      - name: Build the FUN-ASR helper
+      - name: Build FUN-ASR helper
+        if: matrix.helper == 'funasr'
         run: node frontend/scripts/build-funasr-sidecar.js
-      - name: Run diarization interval tests
+      - name: Archive executable helper
+        env:
+          HELPER: ${{ matrix.helper }}
         run: |
-          swiftc \
-            diarization-sidecar/Sources/meetily-diarization/IntervalProcessing.swift \
-            diarization-sidecar/Tests/IntervalProcessing/main.swift \
-            -o "$RUNNER_TEMP/meetily-interval-tests"
-          "$RUNNER_TEMP/meetily-interval-tests"
-      - name: Build the app in release mode
-        run: cargo build --locked --release -p meetily
-      - name: Run Rust unit tests
-        run: cargo test --locked --release -p meetily --lib
-      - name: Run Rust documentation tests
-        run: cargo test --locked --release -p meetily --doc
-      - name: Run llama helper tests
-        run: cargo test --locked --release -p llama-helper --features metal
+          if [[ "$HELPER" == diarization ]]; then
+            binary=meetily-diarization-aarch64-apple-darwin
+          else
+            binary="$HELPER-helper-aarch64-apple-darwin"
+          fi
+          tar -czf "$RUNNER_TEMP/$HELPER.tar.gz" -C frontend/src-tauri/binaries "$binary"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: native-helper-${{ matrix.helper }}
+          path: ${{ runner.temp }}/${{ matrix.helper }}.tar.gz
+          if-no-files-found: error
+          retention-days: 3
+
+  rust-tests:
+    name: Rust ${{ matrix.kind }} tests
+    needs: [frontend-build, native-helpers]
+    runs-on: macos-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        kind: [lib, doc]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-native
+      - uses: ./.github/actions/native-inputs
+      - run: cargo test --locked --release -p meetily --${{ matrix.kind }}
+
+  llama-tests:
+    name: Llama helper unit tests
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-native
+      - run: cargo test --locked --release -p llama-helper --features metal
+
+  macos:
+    name: macOS release build
+    needs: [frontend-build, native-helpers]
+    runs-on: macos-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-native
+      - uses: ./.github/actions/native-inputs
+      - run: cargo build --locked --release -p meetily
