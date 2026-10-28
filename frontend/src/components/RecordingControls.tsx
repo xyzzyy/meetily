@@ -421,6 +421,7 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
                                 handlePauseRecording();
                               }
                             }}
+                            aria-label={isPaused ? 'Resume recording' : 'Pause recording'}
                             disabled={isPausing || isResuming || isStopping}
                             className={`w-10 h-10 flex items-center justify-center ${isPausing || isResuming || isStopping
                               ? 'bg-gray-200 dark:bg-ink-800 border-2 border-gray-300 dark:border-ink-700 text-gray-400'
@@ -447,6 +448,7 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
                               Analytics.trackButtonClick('stop_recording', 'recording_controls');
                               handleStopRecording();
                             }}
+                            aria-label="Stop recording"
                             disabled={isStopping || isPausing || isResuming || isStartingRecording}
                             className={`w-10 h-10 flex items-center justify-center ${isStopping || isPausing || isResuming || isStartingRecording ? 'bg-gray-400 dark:bg-ink-600' : 'bg-red-500 hover:bg-red-600'
                               } rounded-full text-white transition-colors relative`}
