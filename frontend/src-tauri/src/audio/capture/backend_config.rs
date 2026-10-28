@@ -8,11 +8,11 @@ use log::info;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum AudioCaptureBackend {
-    /// ScreenCaptureKit backend (macOS default)
-    /// Uses CPAL with ScreenCaptureKit host for system audio
+    /// Legacy identifier for the CPAL capture path.
+    /// Normalized to Core Audio on macOS; ScreenCaptureKit is not implemented.
     ScreenCaptureKit,
 
-    /// Core Audio backend (macOS only)
+    /// Core Audio backend (macOS default)
     /// Uses direct Core Audio API with aggregate device + tap
     #[cfg(target_os = "macos")]
     CoreAudio,
@@ -64,7 +64,7 @@ impl AudioCaptureBackend {
     pub fn available_backends() -> Vec<Self> {
         #[cfg(target_os = "macos")]
         {
-            vec![AudioCaptureBackend::ScreenCaptureKit, AudioCaptureBackend::CoreAudio]
+            vec![AudioCaptureBackend::CoreAudio]
         }
 
         #[cfg(not(target_os = "macos"))]
@@ -114,6 +114,12 @@ impl BackendConfig {
 
     /// Set current backend
     pub fn set(&self, backend: AudioCaptureBackend) {
+        // Old preferences can still contain the unsupported macOS identifier.
+        #[cfg(target_os = "macos")]
+        let backend = match backend {
+            AudioCaptureBackend::ScreenCaptureKit => AudioCaptureBackend::CoreAudio,
+            backend => backend,
+        };
         info!("Switching audio capture backend to: {:?}", backend);
         *self.current_backend.write().unwrap() = backend;
     }
@@ -182,10 +188,10 @@ mod tests {
     #[test]
     fn test_available_backends() {
         let backends = AudioCaptureBackend::available_backends();
-        assert!(backends.contains(&AudioCaptureBackend::ScreenCaptureKit));
-
         #[cfg(target_os = "macos")]
-        assert!(backends.contains(&AudioCaptureBackend::CoreAudio));
+        assert_eq!(backends, vec![AudioCaptureBackend::CoreAudio]);
+        #[cfg(not(target_os = "macos"))]
+        assert_eq!(backends, vec![AudioCaptureBackend::ScreenCaptureKit]);
     }
 
     #[test]
@@ -212,6 +218,8 @@ mod tests {
         {
             // Test setting CoreAudio
             config.set(AudioCaptureBackend::CoreAudio);
+            assert_eq!(config.get(), AudioCaptureBackend::CoreAudio);
+            config.set(AudioCaptureBackend::ScreenCaptureKit);
             assert_eq!(config.get(), AudioCaptureBackend::CoreAudio);
         }
 
