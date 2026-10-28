@@ -5,6 +5,7 @@ import { VirtualizedTranscriptView } from '@/components/VirtualizedTranscriptVie
 import { SpeakerAttributionIndicator } from '@/components/SpeakerAttributionIndicator';
 import { SpeakerColorPicker } from './SpeakerColorPicker';
 import { SpeakerAttributeButton, type SpeakerAttribution } from './SpeakerAttributeButton';
+import { useEnhancementCompletion } from '@/contexts/TranscriptEnhancementContext';
 import { RetranscribeDialog } from './RetranscribeDialog';
 import { TranscriptButtonGroup } from './TranscriptButtonGroup';
 import { Button } from '@/components/ui/button';
@@ -218,6 +219,8 @@ export function TranscriptPanel({
     ).then(cleanup => { if (disposed) cleanup(); else unlisten = cleanup; });
     return () => { disposed = true; unlisten?.(); };
   }, [isRecording, loadSpeakers, meetingId, onRefetchTranscripts]);
+
+  useEnhancementCompletion(meetingId, loadSpeakers);
 
   const runDiarization = async (retry: boolean) => {
     if (!meetingId || !diarizationEnabled || !refinementSupported || !beginEdit()) return;
@@ -666,10 +669,6 @@ export function TranscriptPanel({
           onOpenChange={setEnhanceDialogOpen}
           meetingId={meetingId}
           meetingFolderPath={meetingFolderPath ?? null}
-          onComplete={async () => {
-            await onRefetchTranscripts?.();
-            await loadSpeakers();
-          }}
         />
       )}
 

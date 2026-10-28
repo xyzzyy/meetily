@@ -21,6 +21,7 @@ import { OnboardingFlow } from '@/components/onboarding'
 import { loadBetaFeatures } from '@/types/betaFeatures'
 import { DownloadProgressToastProvider } from '@/components/shared/DownloadProgressToast'
 import { UpdateCheckProvider } from '@/components/UpdateCheckProvider'
+import { TranscriptEnhancementProvider } from '@/contexts/TranscriptEnhancementContext'
 import { RecordingPostProcessingProvider } from '@/contexts/RecordingPostProcessingProvider'
 import { ImportAudioDialog, ImportDropOverlay } from '@/components/ImportAudio'
 import { ImportDialogProvider } from '@/contexts/ImportDialogContext'
@@ -254,6 +255,7 @@ export default function RootLayout({
                         <SidebarProvider>
                           <TooltipProvider>
                             <RecordingPostProcessingProvider>
+                              <TranscriptEnhancementProvider>
                               <ImportDialogProvider onOpen={handleOpenImportDialog}>
                                 {/* Download progress toast provider - listens for background downloads */}
                                 <DownloadProgressToastProvider />
@@ -275,6 +277,7 @@ export default function RootLayout({
                                   importFilePath={importFilePath}
                                 />
                               </ImportDialogProvider>
+                              </TranscriptEnhancementProvider>
                             </RecordingPostProcessingProvider>
                           </TooltipProvider>
                         </SidebarProvider>
