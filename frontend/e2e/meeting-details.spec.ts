@@ -1,14 +1,8 @@
 import { expect, test, type Page } from '@playwright/test';
-import { readFile } from 'node:fs/promises';
-import path from 'node:path';
+import { collectAppErrors, serveProductionApp } from './support/production-app';
 
-const outputDirectory = path.resolve(__dirname, '../out');
 const transcriptText = 'We agreed to review the meeting notes on Friday.';
 const summaryText = 'Review the meeting notes. [00:00-00:04]';
-const contentTypes: Record<string, string> = {
-  '.html': 'text/html', '.txt': 'text/plain', '.js': 'application/javascript',
-  '.css': 'text/css', '.woff2': 'font/woff2', '.json': 'application/json',
-};
 
 async function openMeeting(page: Page, {
   format = 'markdown', segmentCount = 1, summary = summaryText, longRowIndex,
@@ -18,12 +12,7 @@ async function openMeeting(page: Page, {
   summary?: string;
   longRowIndex?: number;
 } = {}) {
-    const errors: string[] = [];
-    page.on('pageerror', error => errors.push(error.message));
-    // React reports caught render failures to console.error instead of pageerror.
-    page.on('console', message => {
-      if (message.type() === 'error') errors.push(message.text());
-    });
+    const errors = collectAppErrors(page);
 
     // Exercise the real production chunks. Only the desktop IPC boundary is
     // replaced; no React components, editors, or extensions are mocked.
@@ -124,14 +113,7 @@ async function openMeeting(page: Page, {
       });
     }, { format, transcriptText, summaryText: summary, segmentCount, longRowIndex });
 
-    // Serve the static export through request interception, with no dev server.
-    await page.route('https://meetily.test/**', async route => {
-      const url = new URL(route.request().url());
-      let filename = path.join(outputDirectory, decodeURIComponent(url.pathname));
-      if (!path.extname(filename)) filename += url.pathname.endsWith('/') ? 'index.html' : '.html';
-      const contentType = contentTypes[path.extname(filename)] ?? 'application/octet-stream';
-      await route.fulfill({ body: await readFile(filename), contentType });
-    });
+    await serveProductionApp(page);
 
     await page.goto('https://meetily.test/meeting-details?id=saved-meeting');
     await expect(page.getByRole('region', { name: 'Transcript', exact: true }).getByText(transcriptText, { exact: true })).toBeVisible();

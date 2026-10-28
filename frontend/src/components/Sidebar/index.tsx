@@ -665,6 +665,7 @@ const Sidebar: React.FC = () => {
       {/* Floating collapse button */}
       <button
         onClick={toggleCollapse}
+        aria-label={isCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
         className="absolute -right-4 top-20 z-50 p-1 bg-white dark:bg-ink-900 hover:bg-gray-100 dark:hover:bg-ink-800 rounded-full shadow-lg border"
       >
         {isCollapsed ? (

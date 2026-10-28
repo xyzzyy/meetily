@@ -127,7 +127,7 @@ jobs:
       - working-directory: frontend
         run: pnpm exec playwright install --with-deps chromium webkit
       - working-directory: frontend
-        run: pnpm test:release
+        run: pnpm test:release --grep-invert "normal session:"
       - name: Save browser failure details
         if: failure()
         uses: actions/upload-artifact@v4
@@ -239,4 +239,59 @@ jobs:
           name: meetily-macos-arm64-app
           path: ${{ runner.temp }}/meetily-macos-arm64.app.zip
           if-no-files-found: error
+          retention-days: 3
+
+  app-walkthrough:
+    name: macOS app launch and setup
+    needs: macos-app
+    runs-on: macos-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: meetily-macos-arm64-app
+          path: ${{ runner.temp }}/app-artifact
+      - name: Unpack the release app
+        run: ditto -x -k "$RUNNER_TEMP/app-artifact/meetily-macos-arm64.app.zip" "$RUNNER_TEMP/meetily-app"
+      - name: Install the UI test project generator
+        run: brew list --versions xcodegen >/dev/null || brew install xcodegen
+      - name: Launch the app and use its setup page
+        run: bash .github/scripts/test-macos-app.sh
+      - name: Save native test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-app-launch-results
+          path: ${{ runner.temp }}/meetily-launch/Launch.xcresult
+          if-no-files-found: ignore
+          retention-days: 3
+
+  browser-walkthrough:
+    name: Normal usage walkthrough (browser)
+    needs: frontend-build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-frontend
+      - uses: actions/download-artifact@v4
+        with:
+          name: frontend-build
+          path: frontend/out
+      - working-directory: frontend
+        run: pnpm exec playwright install --with-deps chromium webkit
+      - working-directory: frontend
+        run: pnpm test:release normal-usage.spec.ts
+      - name: Save walkthrough failure details
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: normal-usage-test-failures
+          path: frontend/test-results
+          if-no-files-found: ignore
           retention-days: 3

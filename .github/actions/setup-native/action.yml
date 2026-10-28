@@ -27,6 +27,8 @@ runs:
         workspaces: '. -> target'
         shared-key: pr-macos-release-${{ steps.xcode.outputs.version }}
         cache-workspace-crates: true
+        # Do not let an early helper check save a partial app cache.
+        save-if: ${{ github.job == 'macos-app' || github.job == 'rust-tests' }}
     - uses: actions/cache@v4
       with:
         path: frontend/src-tauri/binaries/ffmpeg-*
