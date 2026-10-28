@@ -9,7 +9,7 @@
 //! prevented: whenever the main file is created or replaced, any WAL already
 //! next to it belongs to a different file.
 //!
-//! When the database cannot be read at all, the main file is damaged. A failed
+//! When the check confirms damage, report it and keep the files. A failed
 //! connection already folds a valid WAL into the main file as it closes, so
 //! moving the WAL afterwards cannot help. The damage is reported and the files
 //! are left as they are.
@@ -68,7 +68,11 @@ fn unused_orphan_path(database: &Path) -> PathBuf {
     let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
     let mut attempt = 1;
     loop {
-        let suffix = if attempt == 1 { String::new() } else { format!("-{attempt}") };
+        let suffix = if attempt == 1 {
+            String::new()
+        } else {
+            format!("-{attempt}")
+        };
         let candidate =
             database.with_file_name(format!("{stem}.orphaned-{stamp}{suffix}{extension}"));
         if !candidate.exists() && !wal_path(&candidate).exists() {
@@ -81,8 +85,8 @@ fn unused_orphan_path(database: &Path) -> PathBuf {
 /// Whether the database and its WAL can be read without damage. The check runs
 /// on a throwaway copy so the real files are not touched. Every connection to
 /// the database must be closed first, so the files are not changing while they
-/// are copied.
-pub(crate) async fn is_readable(database: &Path) -> std::io::Result<bool> {
+/// are copied. Errors that do not confirm damage are returned to the caller.
+pub(crate) async fn is_readable(database: &Path) -> sqlx::Result<bool> {
     let scratch = tempfile::tempdir()?;
     let copy = scratch.path().join("check.sqlite");
     std::fs::copy(database, &copy)?;
@@ -90,17 +94,39 @@ pub(crate) async fn is_readable(database: &Path) -> std::io::Result<bool> {
     if wal.exists() {
         std::fs::copy(&wal, wal_path(&copy))?;
     }
-    let options = SqliteConnectOptions::new()
-        .filename(&copy)
-        .create_if_missing(false);
-    let Ok(mut connection) = options.connect().await else {
-        return Ok(false);
-    };
-    let rows: Result<Vec<String>, _> = sqlx::query_scalar("PRAGMA quick_check")
-        .fetch_all(&mut connection)
-        .await;
-    let _ = connection.close().await;
-    Ok(matches!(rows.as_deref(), Ok([result]) if result == "ok"))
+    check_database(&copy).await
+}
+
+async fn check_database(database: &Path) -> sqlx::Result<bool> {
+    let result = async {
+        let mut connection = SqliteConnectOptions::new()
+            .filename(database)
+            .create_if_missing(false)
+            .connect()
+            .await?;
+        let rows: sqlx::Result<Vec<String>> = sqlx::query_scalar("PRAGMA quick_check")
+            .fetch_all(&mut connection)
+            .await;
+        let closed = connection.close().await;
+        let rows = rows?;
+        closed?;
+        Ok(matches!(rows.as_slice(), [result] if result == "ok"))
+    }
+    .await;
+    match result {
+        Err(sqlx::Error::Database(error)) => {
+            // The low byte is the primary SQLite result code, including for
+            // extended codes. Only SQLITE_CORRUPT (11) and SQLITE_NOTADB (26)
+            // confirm damage. Keep errors such as BUSY, READONLY and IOERR.
+            let code = error.code().and_then(|code| code.parse::<i32>().ok());
+            if matches!(code.map(|code| code & 0xff), Some(11 | 26)) {
+                Ok(false)
+            } else {
+                Err(sqlx::Error::Database(error))
+            }
+        }
+        result => result,
+    }
 }
 
 /// Startup message when the database file is damaged.
@@ -117,4 +143,64 @@ pub(crate) fn damaged_message(database: &Path, error: &dyn std::fmt::Display) ->
          {files}\n\n\
          Restore the database from a backup before opening the app again."
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn a_failed_open_is_not_reported_as_damage() {
+        let dir = tempfile::tempdir().unwrap();
+        let error = check_database(&dir.path().join("missing.sqlite"))
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error.as_database_error().unwrap().code().as_deref(),
+            Some("14")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_locked_database_is_not_reported_as_damage() {
+        let dir = tempfile::tempdir().unwrap();
+        let database = dir.path().join("locked.sqlite");
+        let mut connection = SqliteConnectOptions::new()
+            .filename(&database)
+            .create_if_missing(true)
+            .connect()
+            .await
+            .unwrap();
+        sqlx::query("CREATE TABLE meetings (id INTEGER)")
+            .execute(&mut connection)
+            .await
+            .unwrap();
+        sqlx::query("BEGIN EXCLUSIVE")
+            .execute(&mut connection)
+            .await
+            .unwrap();
+
+        let result = check_database(&database).await;
+        sqlx::query("ROLLBACK")
+            .execute(&mut connection)
+            .await
+            .unwrap();
+        connection.close().await.unwrap();
+        let error = result.unwrap_err();
+        assert_eq!(
+            error.as_database_error().unwrap().code().as_deref(),
+            Some("5")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_non_database_file_is_reported_as_damage_and_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let database = dir.path().join("invalid.sqlite");
+        let bytes = b"This file is not a SQLite database.";
+        std::fs::write(&database, bytes).unwrap();
+
+        assert!(!is_readable(&database).await.unwrap());
+        assert_eq!(std::fs::read(&database).unwrap(), bytes);
+    }
 }
