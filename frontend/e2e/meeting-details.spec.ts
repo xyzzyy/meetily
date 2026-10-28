@@ -12,11 +12,13 @@ const contentTypes: Record<string, string> = {
 
 async function openMeeting(page: Page, {
   format = 'markdown', segmentCount = 1, summary = summaryText, longRowIndex,
+  summaryProvider = 'ollama',
 }: {
   format?: 'markdown' | 'blocknote' | 'empty';
   segmentCount?: number;
   summary?: string;
   longRowIndex?: number;
+  summaryProvider?: 'ollama' | 'openai';
 } = {}) {
     const errors: string[] = [];
     page.on('pageerror', error => errors.push(error.message));
@@ -27,14 +29,20 @@ async function openMeeting(page: Page, {
 
     // Exercise the real production chunks. Only the desktop IPC boundary is
     // replaced; no React components, editors, or extensions are mocked.
-    await page.addInitScript(({ format, transcriptText, summaryText, segmentCount, longRowIndex }) => {
+    await page.addInitScript(({ format, transcriptText, summaryText, segmentCount, longRowIndex, summaryProvider }) => {
       let callbackId = 0;
       const callbacks = new Map<number, unknown>();
+      const testSettings = {
+        summaryKey: summaryProvider === 'openai' ? 'saved-test-key' : null as string | null,
+        confirmRemoval: false,
+        deletedProviders: [] as string[],
+      };
       const store = new Map<string, unknown>([
         ['analyticsOptedIn', false],
         ['analyticsDefaultOffMigrationV1', true],
       ]);
       Object.assign(window, {
+        __MEETILY_TEST_SETTINGS__: testSettings,
         __TAURI_OS_PLUGIN_INTERNALS__: {
           platform: 'macos', version: '15.0', family: 'unix', os_type: 'macos',
           arch: 'aarch64', eol: '\n', exe_extension: '',
@@ -106,8 +114,17 @@ async function openMeeting(page: Page, {
               };
               case 'api_get_meeting_summary_language': return { language: null, storage: 'metadata' };
               case 'api_get_transcript_config': return { provider: 'localWhisper', model: 'large-v3', apiKey: null };
-              case 'api_get_model_config': return { provider: 'ollama', model: 'test-model', whisperModel: 'large-v3' };
-              case 'api_get_api_key':
+              case 'api_get_model_config': return {
+                provider: summaryProvider, model: 'test-model', whisperModel: 'large-v3', apiKey: testSettings.summaryKey,
+              };
+              case 'api_get_api_key': return args.provider === 'openai' ? testSettings.summaryKey : null;
+              case 'api_get_auto_generate_setting': return false;
+              case 'get_openai_models': return [{ id: 'test-model' }];
+              case 'plugin:dialog|message': return testSettings.confirmRemoval ? 'Remove key' : 'Cancel';
+              case 'api_delete_api_key':
+                testSettings.deletedProviders.push(args.provider);
+                if (args.provider === 'openai') testSettings.summaryKey = null;
+                return null;
               case 'get_meeting_diarization_status': return null;
               case 'get_recording_preferences': return { preferred_mic_device: null, preferred_system_device: null };
               case 'get_diarization_settings': return { enabled: false, mode: 'off', showProvisionalLabels: false };
@@ -122,7 +139,7 @@ async function openMeeting(page: Page, {
           },
         },
       });
-    }, { format, transcriptText, summaryText: summary, segmentCount, longRowIndex });
+    }, { format, transcriptText, summaryText: summary, segmentCount, longRowIndex, summaryProvider });
 
     // Serve the static export through request interception, with no dev server.
     await page.route('https://meetily.test/**', async route => {
@@ -138,6 +155,34 @@ async function openMeeting(page: Page, {
     await expect(page.locator('main .h-screen').last()).toHaveCSS('transform', 'none');
     return errors;
 }
+
+test('a saved summary key can be removed from model settings', async ({ page }) => {
+  const errors = await openMeeting(page, { summaryProvider: 'openai' });
+  const settings = page.getByTitle('Summary Settings');
+  await settings.click();
+  const dialog = page.getByRole('dialog');
+  const key = dialog.getByPlaceholder('Enter your API key');
+  const remove = dialog.getByRole('button', { name: 'Remove saved API key' });
+  await expect(key).toHaveValue('saved-test-key');
+  await remove.click();
+  await expect(key).toHaveValue('saved-test-key');
+
+  await page.evaluate(() => {
+    (window as any).__MEETILY_TEST_SETTINGS__.confirmRemoval = true;
+  });
+  await remove.click();
+  await expect(key).toHaveValue('');
+  await expect(remove).toHaveCount(0);
+  await expect(dialog.getByRole('button', { name: 'Save', exact: true })).toBeDisabled();
+  expect(await page.evaluate(() => (window as any).__MEETILY_TEST_SETTINGS__.deletedProviders)).toEqual(['openai']);
+
+  await page.keyboard.press('Escape');
+  await settings.click();
+  const reopened = page.getByRole('dialog');
+  await expect(reopened.getByPlaceholder('Enter your API key')).toHaveValue('');
+  await expect(reopened.getByRole('button', { name: 'Remove saved API key' })).toHaveCount(0);
+  expect(errors).toEqual([]);
+});
 
 for (const format of ['markdown', 'blocknote', 'empty'] as const) {
   test(`opens a saved meeting with ${format} summary content`, async ({ page }) => {
