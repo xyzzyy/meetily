@@ -6,7 +6,7 @@ import ts from 'typescript';
 import React from 'react';
 import { act, create } from 'react-test-renderer';
 
-async function mount(config) {
+async function mount(config, { runEffects = false } = {}) {
   const source = fs.readFileSync(new URL('../../src/components/ModelSettingsModal.tsx', import.meta.url), 'utf8');
   const compiled = ts.transpileModule(source, {
     compilerOptions: { module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.React, esModuleInterop: true },
@@ -19,17 +19,20 @@ async function mount(config) {
   const passthrough = ({ children }) => children ?? null;
   const module = { exports: {} };
   vm.runInNewContext(compiled, {
-    module, exports: module.exports, React, URL, Map, Set,
+    module, exports: module.exports, React, URL, Map, Set, setTimeout, clearTimeout,
     console: { log() {}, error() {} },
     localStorage: {
       getItem: key => storage.get(key) ?? null,
       setItem: (key, value) => { writes.push({ key, value }); storage.set(key, value); },
     },
     require: name => {
-      // Keep real state and rendering; omit startup effects that fetch remote model lists.
-      if (name === 'react') return { ...React, useEffect() {} };
+      // Save tests omit startup requests. Loading tests run the real effects.
+      if (name === 'react') return runEffects ? React : { ...React, useEffect() {} };
       if (name === '@tauri-apps/api/core') return { invoke: async (command, args) => {
         calls.push({ command, args });
+        if (command === 'get_openrouter_models') return [{ id: 'test/model', name: 'Test model' }];
+        if (command === 'get_groq_models') return [];
+        if (command === 'api_get_auto_generate_setting') return true;
       } };
       if (name === './Sidebar/SidebarProvider') return { useSidebar: () => ({ serverAddress: '' }) };
       if (name === '@/contexts/ConfigContext') return { useConfig: () => null };
@@ -44,19 +47,41 @@ async function mount(config) {
       return new Proxy({}, { get: () => passthrough });
     },
   });
-  const initial = { provider: 'builtin-ai', model: '', whisperModel: 'small', ...config };
+  let initial = { provider: 'builtin-ai', model: '', whisperModel: 'small', ...config };
   let renderer;
+  const render = () => React.createElement(module.exports.ModelSettingsModal, {
+    modelConfig: initial, setModelConfig: value => changes.push(value),
+    onSave: value => saved.push(JSON.parse(JSON.stringify(value))), skipInitialFetch: true,
+  });
   await act(async () => {
-    renderer = create(React.createElement(module.exports.ModelSettingsModal, {
-      modelConfig: initial, setModelConfig: value => changes.push(value),
-      onSave: value => saved.push(JSON.parse(JSON.stringify(value))), skipInitialFetch: true,
-    }));
+    renderer = create(render());
   });
   return {
     renderer, calls, saved, writes, changes,
+    update: config => act(async () => {
+      initial = { ...initial, ...config };
+      renderer.update(render());
+    }),
     save: () => renderer.root.findAllByType('button').find(button => button.props.children === 'Save'),
     unmount: () => act(async () => renderer.unmount()),
   };
+}
+
+for (const provider of ['openrouter', 'groq']) {
+  test(`OpenRouter models load when ${provider === 'openrouter' ? 'settings open' : 'the provider changes'}`, async t => {
+    const app = await mount({ provider, apiKey: 'test-key' }, { runEffects: true });
+    t.after(app.unmount);
+    const requests = () => app.calls.filter(call => call.command === 'get_openrouter_models');
+    assert.equal(requests().length, provider === 'openrouter' ? 1 : 0);
+    await app.update({ provider: 'openrouter' });
+    assert.equal(requests().length, 1);
+    assert.equal(app.renderer.root.findAll(node =>
+      node.props.value === 'test/model' && typeof node.props.onSelect === 'function'
+    ).length, 1, 'the fetched model is available for selection');
+    await app.update({ provider: 'groq' });
+    await app.update({ provider: 'openrouter' });
+    assert.equal(requests().length, 1, 'the loaded list is reused');
+  });
 }
 
 for (const provider of ['builtin-ai', 'ollama', 'openai', 'claude', 'groq', 'openrouter']) {
@@ -75,8 +100,8 @@ for (const provider of ['builtin-ai', 'ollama', 'openai', 'claude', 'groq', 'ope
   });
 }
 
-test('selecting a built-in model enables Save and persists the model', async () => {
-  const app = await mount({ model: 'gemma3:1b' });
+test('a selected built-in model enables Save and persists the trimmed name', async () => {
+  const app = await mount({ model: ' gemma3:1b ' });
   assert.equal(app.save().props.disabled, false);
   await act(async () => app.save().props.onClick());
   assert.equal(app.saved.length, 1);
