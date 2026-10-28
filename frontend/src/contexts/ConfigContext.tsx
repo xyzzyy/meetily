@@ -49,6 +49,8 @@ interface ConfigContextType {
   modelConfig: ModelConfig;
   setModelConfig: (config: ModelConfig | ((prev: ModelConfig) => ModelConfig)) => void;
   isModelConfigLoading: boolean;
+  isModelSettingsBusy: boolean;
+  runModelSettingsOperation: (operation: () => Promise<void>) => Promise<boolean>;
 
   // Transcript model configuration
   transcriptModelConfig: TranscriptModelProps;
@@ -92,6 +94,7 @@ interface ConfigContextType {
     openrouter: string | null;
   };
   updateProviderApiKey: (provider: string, apiKey: string | null) => void;
+  getProviderApiKeyChange: (provider: string) => { version: number; value: string | null };
 
   // Preference settings (lazy loaded)
   notificationSettings: NotificationSettings | null;
@@ -113,6 +116,8 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
     ollamaEndpoint: null
   });
   const [isModelConfigLoading, setIsModelConfigLoading] = useState(true);
+  const [isModelSettingsBusy, setIsModelSettingsBusy] = useState(false);
+  const modelSettingsBusyRef = useRef(false);
 
 
   // Transcript model configuration state
@@ -135,6 +140,8 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
     openai: null,
     openrouter: null,
   });
+  const providerApiKeyVersionsRef = useRef<Record<string, number>>({});
+  const providerApiKeyLastUpdateRef = useRef<Record<string, string | null>>({});
 
   // Ollama models list and error state
   const [models, setModels] = useState<OllamaModel[]>([]);
@@ -315,7 +322,8 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     const loadAllApiKeys = async () => {
       try {
-        const providers = ['claude', 'groq', 'openai', 'openrouter'];
+        const providers = ['claude', 'groq', 'openai', 'openrouter'] as const;
+        const versions = { ...providerApiKeyVersionsRef.current };
         const keys = await Promise.all(
           providers.map(p =>
             invoke<string>('api_get_api_key', { provider: p })
@@ -323,11 +331,15 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
           )
         );
 
-        setProviderApiKeys({
-          claude: keys[0],
-          groq: keys[1],
-          openai: keys[2],
-          openrouter: keys[3],
+        setProviderApiKeys(previous => {
+          const next = { ...previous };
+          providers.forEach((provider, index) => {
+            // Do not restore a key changed while this startup request was pending.
+            if ((versions[provider] ?? 0) === (providerApiKeyVersionsRef.current[provider] ?? 0)) {
+              next[provider] = keys[index] || null;
+            }
+          });
+          return next;
         });
         console.log('[ConfigContext] Loaded provider API keys');
       } catch (error) {
@@ -460,7 +472,29 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
 
   // Update individual provider API key
   const updateProviderApiKey = useCallback((provider: string, apiKey: string | null) => {
+    providerApiKeyVersionsRef.current[provider] = (providerApiKeyVersionsRef.current[provider] ?? 0) + 1;
+    providerApiKeyLastUpdateRef.current[provider] = apiKey;
     setProviderApiKeys(prev => ({ ...prev, [provider]: apiKey }));
+  }, []);
+
+  const getProviderApiKeyChange = useCallback((provider: string) => ({
+    version: providerApiKeyVersionsRef.current[provider] ?? 0,
+    value: providerApiKeyLastUpdateRef.current[provider] ?? null,
+  }), []);
+
+  // Settings can be open in more than one place. Do not let a save started
+  // in one view restore a key removed from another view.
+  const runModelSettingsOperation = useCallback(async (operation: () => Promise<void>) => {
+    if (modelSettingsBusyRef.current) return false;
+    modelSettingsBusyRef.current = true;
+    setIsModelSettingsBusy(true);
+    try {
+      await operation();
+      return true;
+    } finally {
+      modelSettingsBusyRef.current = false;
+      setIsModelSettingsBusy(false);
+    }
   }, []);
 
   // Lazy load preference settings (only loads if not already cached)
@@ -556,10 +590,13 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
     modelConfig,
     setModelConfig,
     isModelConfigLoading,
+    isModelSettingsBusy,
+    runModelSettingsOperation,
     isAutoSummary,
     toggleIsAutoSummary,
     providerApiKeys,
     updateProviderApiKey,
+    getProviderApiKeyChange,
     transcriptModelConfig,
     setTranscriptModelConfig,
     selectedDevices,
@@ -584,10 +621,13 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
   }), [
     modelConfig,
     isModelConfigLoading,
+    isModelSettingsBusy,
+    runModelSettingsOperation,
     isAutoSummary,
     toggleIsAutoSummary,
     providerApiKeys,
     updateProviderApiKey,
+    getProviderApiKeyChange,
     transcriptModelConfig,
     selectedDevices,
     selectedLanguage,
