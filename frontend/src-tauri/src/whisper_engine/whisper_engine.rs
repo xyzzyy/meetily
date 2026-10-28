@@ -433,11 +433,12 @@ impl WhisperEngine {
         // Remove phrase repetitions with more sophisticated detection
         let cleaned_words = Self::remove_phrase_repetitions(&cleaned_words);
 
-        // Check for overall repetition ratio
+        // Check the cleaned text for false phrases and excessive repetition.
         let final_text = cleaned_words.join(" ");
-        if Self::calculate_repetition_ratio(&final_text) > 0.7 {
-            // Performance optimization: reduce repetition ratio logging to debug level
-            perf_debug!("High repetition ratio detected, filtering out: '{}'", final_text);
+        if Self::is_meaningless_output(&final_text)
+            || Self::calculate_repetition_ratio(&final_text) > 0.7
+        {
+            perf_debug!("Detected meaningless or repetitive output, returning empty: '{}'", final_text);
             return String::new();
         }
 
@@ -450,9 +451,8 @@ impl WhisperEngine {
     /// because a stuck decoder loops them. A segment with any other word is
     /// speech and is kept, even when it also contains one of these phrases.
     ///
-    /// The check works on lowercase words with punctuation removed, before any
-    /// repetition cleanup rewrites the text, so case, punctuation and the number
-    /// of repeats do not change the result.
+    /// The check uses lowercase words with punctuation removed. It runs before
+    /// and after repetition cleanup.
     fn is_meaningless_output(text: &str) -> bool {
         const HALLUCINATED_PHRASES: &[&[&str]] = &[
             &["thank", "you", "for", "watching"],
@@ -1361,14 +1361,29 @@ mod tests {
     }
 
     #[test]
-    fn cleaning_a_sentence_that_mentions_laughter_keeps_the_sentence() {
+    fn cleaning_keeps_real_sentences_that_mention_hallucinated_phrases() {
         let text = "The whole room burst into laughter when he said that.";
         assert_eq!(WhisperEngine::clean_repetitive_text(text), text);
+        assert_eq!(
+            WhisperEngine::clean_repetitive_text(
+                "thank thank you for watching over the deployment last night"
+            ),
+            "thank you for watching over the deployment last night"
+        );
     }
 
     #[test]
     fn cleaning_a_repeated_hallucination_leaves_nothing() {
-        for text in ["applause applause applause", "Applause applause applause", "Thanks for watching thanks for watching"] {
+        for text in [
+            "applause applause applause",
+            "Applause applause applause",
+            "Thanks for watching thanks for watching",
+            "thank thank you for watching",
+            "thanks thanks for watching",
+            "like like and subscribe",
+            "thank you for watching watching",
+            "thank you thank you for watching",
+        ] {
             assert_eq!(WhisperEngine::clean_repetitive_text(text), "", "{text}");
         }
     }
