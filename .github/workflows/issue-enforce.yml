@@ -1,19 +1,16 @@
 name: issue-enforce
 
 # Check every author against the same issue templates. Incomplete issues close
-# with an explanation unless template-grace protects edits until the nightly
-# check. Removing template-grace makes the issue subject to normal checks.
-# Closed issues have no automatic checks or cleanup.
+# with an explanation. After an author edits a closed issue, a maintainer can
+# reopen it for the same check. Closed issues have no automatic checks or cleanup.
 
 on:
   issues:
-    types: [opened, reopened, edited, unlabeled]
+    types: [opened, reopened, edited]
 
 jobs:
   enforce:
-    if: >-
-      github.event.issue.state == 'open' &&
-      (github.event.action != 'unlabeled' || github.event.label.name == 'template-grace')
+    if: github.event.issue.state == 'open' && !github.event.issue.pull_request
     runs-on: ubuntu-latest
     timeout-minutes: 5
     concurrency:
