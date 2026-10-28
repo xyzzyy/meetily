@@ -502,6 +502,11 @@ impl WhisperEngine {
     // Enhanced word repetition removal
     fn remove_word_repetitions<'a>(words: &'a [&'a str]) -> Vec<&'a str> {
         let mut cleaned_words = Vec::new();
+        // Keep internal punctuation and the original token in the output.
+        let normalized: Vec<String> = words
+            .iter()
+            .map(|word| word.trim_matches(|c: char| !c.is_alphanumeric()).to_lowercase())
+            .collect();
         let mut i = 0;
 
         while i < words.len() {
@@ -509,7 +514,11 @@ impl WhisperEngine {
             let mut repeat_count = 1;
 
             // Count consecutive repetitions of the same word
-            while i + repeat_count < words.len() && words[i + repeat_count] == current_word {
+            while i + repeat_count < words.len()
+                && (words[i + repeat_count] == current_word
+                    || (!normalized[i].is_empty()
+                        && normalized[i + repeat_count] == normalized[i]))
+            {
                 repeat_count += 1;
             }
 
@@ -1385,6 +1394,36 @@ mod tests {
             "thank you thank you for watching",
         ] {
             assert_eq!(WhisperEngine::clean_repetitive_text(text), "", "{text}");
+        }
+    }
+
+    #[test]
+    fn cleaning_case_and_punctuation_stutters_leaves_nothing() {
+        let inputs = [
+            "Thank thank you for watching",
+            "Thanks thanks for watching",
+            "thank, thank you for watching",
+            "thank you for watching, watching",
+        ];
+        let outputs: Vec<_> = inputs
+            .iter()
+            .map(|text| WhisperEngine::clean_repetitive_text(text))
+            .collect();
+        assert_eq!(outputs, vec![""; inputs.len()]);
+    }
+
+    #[test]
+    fn cleaning_normalized_stutters_preserves_real_speech() {
+        for (input, expected) in [
+            ("Thank thank you for watching Alice", "Thank you for watching Alice"),
+            ("Thanks thanks for watching Alice", "Thanks for watching Alice"),
+            ("thank, thank you for watching Alice", "thank, you for watching Alice"),
+            ("thank you for watching, watching Alice", "thank you for watching, Alice"),
+            ("We're were the words he used.", "We're were the words he used."),
+            ("The values are 1.5 15 and 150.", "The values are 1.5 15 and 150."),
+            ("The pauses are , ; and :", "The pauses are , ; and :"),
+        ] {
+            assert_eq!(WhisperEngine::clean_repetitive_text(input), expected, "{input}");
         }
     }
 
