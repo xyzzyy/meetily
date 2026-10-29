@@ -85,3 +85,11 @@ for (const status of [{ kind: 'available' }, { kind: 'corrupted' }] as const) {
     expect(owned.buttons().some(button => button.props['aria-label']?.startsWith('Delete'))).toBe(true);
   });
 }
+
+test('shared files reported as missing still explain ownership without claiming absent Branch files exist', () => {
+  const shared = render({ isShared: true, status: { kind: 'missing' } });
+  expect(shared.text()).toContain('Shared from official Meetily. Read-only in Branch.');
+  const missing = render({ isShared: false, status: { kind: 'missing' } });
+  expect(missing.text()).not.toContain('Saved in Meetily Branch.');
+  expect(missing.text()).toContain('Downloads are saved in Meetily Branch.');
+});

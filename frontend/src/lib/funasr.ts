@@ -23,6 +23,24 @@ export interface FunAsrModelInfo {
   status: FunAsrModelStatus;
 }
 
+/** Missing can mean absent or damaged files; a false shared flag does not prove a Branch file exists. */
+export function funAsrStorageNote(model: Pick<FunAsrModelInfo, 'status' | 'encoder_is_shared' | 'decoder_is_shared'>): string | undefined {
+  const encoder = model.encoder_is_shared;
+  const decoder = model.decoder_is_shared;
+  if (encoder === undefined || decoder === undefined) return undefined;
+  if (model.status === 'Available') {
+    if (encoder && decoder) return 'Shared from official Meetily. Read-only in Branch.';
+    if (encoder) return 'Decoder saved in Meetily Branch. Encoder shared from official Meetily.';
+    if (decoder) return 'Encoder saved in Meetily Branch. Decoder shared from official Meetily.';
+    return 'Saved in Meetily Branch.';
+  }
+  const destination = 'Downloads are saved in Meetily Branch.';
+  if (!encoder && !decoder) return destination;
+  const source = encoder && decoder ? 'Encoder and decoder are shared from official Meetily.'
+    : encoder ? 'Encoder is shared from official Meetily.' : 'Decoder is shared from official Meetily.';
+  return `${source} Shared files are read-only in Branch. ${destination}`;
+}
+
 export const FUNASR_SUPPORTED_LANGUAGES = new Set(['auto', 'en', 'zh', 'ja']);
 
 /** The languages a transcription provider accepts, from a full language list. */

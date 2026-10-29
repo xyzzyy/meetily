@@ -802,6 +802,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn discovery_keeps_shared_ownership_for_damaged_official_files() {
+        let owned = tempfile::tempdir().unwrap();
+        let official = tempfile::tempdir().unwrap();
+        let encoder = official.path().join(encoder_relative_path());
+        let decoder = official.path().join(decoder_relative_path(&MODELS[0]));
+        write_file(&encoder, b"damaged shared encoder");
+        write_file(&decoder, b"GGUF");
+        std::fs::OpenOptions::new().write(true).open(&decoder).unwrap()
+            .set_len(MODELS[0].decoder.size).unwrap();
+        let engine = FunAsrEngine::new(owned.path().to_path_buf(), Some(official.path().to_path_buf())).unwrap();
+        let info = engine.discover_models().await.remove(0);
+        assert!(matches!(info.status, ModelStatus::Missing));
+        assert!(!info.encoder_available);
+        assert!(info.encoder_is_shared);
+        assert!(info.decoder_is_shared);
+        assert_eq!(info.path, decoder);
+        assert_eq!(std::fs::read(&encoder).unwrap(), b"damaged shared encoder");
+    }
+
+    #[tokio::test]
     async fn batch_session_model_changes_and_cleanup_do_not_change_the_recording_session() {
         let owned = tempfile::tempdir().unwrap();
         let recording = FunAsrEngine::new(owned.path().to_path_buf(), None).unwrap();

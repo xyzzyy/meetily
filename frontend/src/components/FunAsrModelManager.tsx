@@ -8,6 +8,7 @@ import {
   FunAsrModelInfo,
   FunAsrModelStatus,
   funAsrProgress,
+  funAsrStorageNote,
 } from '@/lib/funasr';
 import { useModelSelection } from '@/hooks/useModelSelection';
 import { Button } from './ui/button';
@@ -316,11 +317,7 @@ export function FunAsrModelManager({
             key={model.name}
             displayName={model.display_name}
             canDelete={!model.decoder_is_shared || model.has_partial_download}
-            storageNote={model.encoder_is_shared === undefined || model.decoder_is_shared === undefined ? undefined
-              : model.encoder_is_shared && model.decoder_is_shared ? 'Shared from official Meetily. Read-only in Branch.'
-              : model.encoder_is_shared ? 'Decoder saved in Meetily Branch. Encoder shared from official Meetily.'
-              : model.decoder_is_shared ? 'Encoder saved in Meetily Branch. Decoder shared from official Meetily.'
-              : 'Saved in Meetily Branch.'}
+            storageNote={funAsrStorageNote(model)}
             description={model.description}
             details={[`${model.decoder_size_mb} MB decoder`, `${model.size_mb} MB first install`]}
             recommended={model.recommended}

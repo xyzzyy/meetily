@@ -275,3 +275,23 @@ test('Branch partial downloads can be cleaned up while complete shared models st
   expect(invoke).toHaveBeenCalledWith('funasr_delete_model', { modelName: model.name });
   expect(selectButton().props.disabled).toBe(false);
 });
+
+for (const encoderShared of [false, true]) {
+  for (const decoderShared of [false, true]) {
+    test(`incomplete model source notice is accurate for encoder=${encoderShared}, decoder=${decoderShared}`, async () => {
+      available = [{ ...model, status: 'Missing', encoder_available: false,
+        encoder_is_shared: encoderShared, decoder_is_shared: decoderShared }];
+      await show();
+      const text = JSON.stringify(renderer!.toJSON());
+      expect(text).toContain('Downloads are saved in Meetily Branch.');
+      expect(text).not.toContain('Encoder saved in Meetily Branch.');
+      expect(text).not.toContain('Decoder saved in Meetily Branch.');
+      if (encoderShared && decoderShared) expect(text).toContain('Encoder and decoder are shared from official Meetily.');
+      else if (encoderShared) expect(text).toContain('Encoder is shared from official Meetily.');
+      else if (decoderShared) expect(text).toContain('Decoder is shared from official Meetily.');
+      if (encoderShared || decoderShared) expect(text).toContain('Shared files are read-only in Branch.');
+      expect(selectButton().props.disabled).toBe(true);
+      expect(renderer!.root.findAllByType('button').some(button => button.props.children?.includes?.('Download'))).toBe(true);
+    });
+  }
+}

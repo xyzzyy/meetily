@@ -86,7 +86,8 @@ export function TranscriptionModelCard({
   const available = status.kind === 'available';
   const deletionAllowed = canDelete ?? !isShared;
   const sourceNote = storageNote ?? (isShared === undefined ? undefined
-    : isShared ? 'Shared from official Meetily. Read-only in Branch.' : 'Saved in Meetily Branch.');
+    : isShared ? 'Shared from official Meetily. Read-only in Branch.'
+    : available || status.kind === 'corrupted' ? 'Saved in Meetily Branch.' : 'Downloads are saved in Meetily Branch.');
   const isSelected = selected && available;
   const partial = (status.kind === 'missing' || status.kind === 'error') && status.partial;
 
@@ -196,7 +197,7 @@ export function TranscriptionModelCard({
         </div>
       </div>
 
-      {sourceNote && (available || status.kind === 'corrupted') && (
+      {sourceNote && status.kind !== 'downloading' && (
         <p className="mt-2 text-xs text-gray-500 dark:text-ink-400">
           {sourceNote}
         </p>
