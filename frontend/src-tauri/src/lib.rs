@@ -921,6 +921,8 @@ pub fn run() {
             utils::open_system_settings,
             // Retranscription commands
             audio::retranscription::start_retranscription_command,
+            audio::retranscription::trim_and_retranscribe_command,
+            audio::trim::get_recording_trim_info,
             audio::retranscription::cancel_retranscription_command,
             audio::retranscription::is_retranscription_in_progress_command,
             // Import audio commands

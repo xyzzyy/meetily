@@ -859,6 +859,7 @@ pub async fn api_get_meeting<R: Runtime>(
     state: tauri::State<'_, AppState>,
     auth_token: Option<String>,
 ) -> Result<MeetingDetails, String> {
+    crate::audio::trim::check_ready(&meeting_id)?;
     log_info!(
         "api_get_meeting called(native) for meeting_id: {}, auth_token: {}",
         meeting_id,
@@ -902,6 +903,7 @@ pub async fn api_get_meeting_metadata<R: Runtime>(
     meeting_id: String,
     state: tauri::State<'_, AppState>,
 ) -> Result<MeetingMetadata, String> {
+    crate::audio::trim::check_ready(&meeting_id)?;
     log_info!(
         "api_get_meeting_metadata called for meeting_id: {}",
         meeting_id
@@ -940,6 +942,7 @@ pub async fn api_get_meeting_transcripts<R: Runtime>(
     offset: i64,
     state: tauri::State<'_, AppState>,
 ) -> Result<PaginatedTranscriptsResponse, String> {
+    crate::audio::trim::check_ready(&meeting_id)?;
     log_info!(
         "api_get_meeting_transcripts called for meeting_id: {}, limit: {}, offset: {}",
         meeting_id,

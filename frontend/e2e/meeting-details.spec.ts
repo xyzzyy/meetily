@@ -11,13 +11,14 @@ const contentTypes: Record<string, string> = {
 };
 
 async function openMeeting(page: Page, {
-  format = 'markdown', segmentCount = 1, summary = summaryText, longRowIndex, enhancement = false,
+  format = 'markdown', segmentCount = 1, summary = summaryText, longRowIndex, enhancement = false, recording = false,
 }: {
   format?: 'markdown' | 'blocknote' | 'empty';
   segmentCount?: number;
   summary?: string;
   longRowIndex?: number;
   enhancement?: boolean;
+  recording?: boolean;
 } = {}) {
     const errors: string[] = [];
     page.on('pageerror', error => errors.push(error.message));
@@ -28,12 +29,24 @@ async function openMeeting(page: Page, {
 
     // Exercise the real production chunks. Only the desktop IPC boundary is
     // replaced; no React components, editors, or extensions are mocked.
-    await page.addInitScript(({ format, transcriptText, summaryText, segmentCount, longRowIndex, enhancement }) => {
+    await page.addInitScript(({ format, transcriptText, summaryText, segmentCount, longRowIndex, enhancement, recording }) => {
       let enhanced = false;
       const controls = { finish: () => {} };
       Object.assign(window, { __ENHANCEMENT_TEST__: controls });
       let callbackId = 0;
       const callbacks = new Map<number, unknown>();
+      const listeners = new Map<number, { event: string; handler: number }>();
+      const emit = (event: string, payload: unknown) => {
+        for (const [id, listener] of listeners) {
+          if (listener.event === event) (callbacks.get(listener.handler) as Function)?.({ event, id, payload });
+        }
+      };
+      let trimmed = false;
+      let transcribed = false;
+      let trimCancelled = false;
+      let finishTrim: ((failure: boolean) => void) | null = null;
+      const trimCalls: unknown[] = [];
+      (window as any).__trimTest = { calls: trimCalls, finish: (failure = false) => finishTrim?.(failure) };
       const store = new Map<string, unknown>([
         ['analyticsOptedIn', false],
         ['analyticsDefaultOffMigrationV1', true],
@@ -57,8 +70,12 @@ async function openMeeting(page: Page, {
           convertFileSrc(file: string) { return file; },
           async invoke(command: string, args: Record<string, any> = {}) {
             switch (command) {
-              case 'plugin:event|listen': return ++callbackId;
-              case 'plugin:event|unlisten':
+              case 'plugin:event|listen': {
+                const id = ++callbackId;
+                listeners.set(id, { event: args.event, handler: args.handler });
+                return id;
+              }
+              case 'plugin:event|unlisten': listeners.delete(args.eventId); return null;
               case 'plugin:window|set_theme':
               case 'set_language_preference':
               case 'plugin:store|save':
@@ -77,9 +94,10 @@ async function openMeeting(page: Page, {
               case 'api_get_meeting_metadata': return {
                 id: args.meetingId, title: 'Saved planning meeting',
                 created_at: '2026-10-27T10:00:00Z', updated_at: '2026-10-27T10:00:00Z',
-                folder_path: enhancement ? '/recording' : null,
+                folder_path: recording ? '/recordings/saved-meeting' : enhancement ? '/recording' : null,
               };
               case 'api_get_meeting_transcripts': {
+                if (trimmed) return { transcripts: transcribed ? [{ id: 'new-transcript', text: 'Only the selected meeting audio.', timestamp: '00:00', audio_start_time: 0, audio_end_time: 40 }] : [], has_more: false, total_count: transcribed ? 1 : 0 };
                 const offset = args.offset ?? 0;
                 const count = Math.min(args.limit ?? 100, segmentCount - offset);
                 return {
@@ -99,9 +117,9 @@ async function openMeeting(page: Page, {
               }
               case 'api_get_summary': return {
                 meeting_id: args.meetingId, meetingName: 'Saved planning meeting',
-                status: format === 'empty' ? 'idle' : 'completed',
+                status: format === 'empty' || trimmed ? 'idle' : 'completed',
                 start: null, end: null, error: null,
-                data: format === 'empty' ? null : format === 'markdown'
+                data: format === 'empty' || trimmed ? null : format === 'markdown'
                   ? { markdown: summaryText }
                   : { summary_json: [{
                     id: 'summary-1', type: 'paragraph',
@@ -126,6 +144,37 @@ async function openMeeting(page: Page, {
               case 'get_diarization_settings': return { enabled: false, mode: 'off', showProvisionalLabels: false };
               case 'get_diarization_model_status': return { installed: false, refinementSupported: false };
               case 'get_recording_state': return { is_recording: false, is_paused: false };
+              case 'whisper_init':
+              case 'parakeet_init':
+              case 'funasr_init': return null;
+              case 'whisper_get_available_models': return [{ name: 'large-v3', size_mb: 100, status: 'Available' }];
+              case 'parakeet_get_available_models':
+              case 'funasr_get_available_models': return [];
+              case 'get_recording_trim_info': return 120;
+              case 'cancel_retranscription_command': trimCancelled = true; return null;
+              case 'trim_and_retranscribe_command':
+              case 'start_retranscription_command': {
+                trimCalls.push({ command, args });
+                trimCancelled = false;
+                if (command === 'trim_and_retranscribe_command') {
+                  trimmed = true;
+                  emit('recording-trimmed', { meeting_id: args.meetingId });
+                }
+                return new Promise((resolve, reject) => {
+                  finishTrim = failure => {
+                    if (failure || trimCancelled) {
+                      const error = `The recording was trimmed. New transcription did not finish: ${trimCancelled ? 'Retranscription cancelled' : 'Test model failure'}. Use Enhance to try transcription again.`;
+                      emit('retranscription-error', { meeting_id: args.meetingId, error });
+                      reject(error);
+                    } else {
+                      transcribed = true;
+                      const result = { meeting_id: args.meetingId, segments_count: 1, duration_seconds: 40, language: null };
+                      emit('retranscription-complete', result);
+                      resolve(result);
+                    }
+                  };
+                });
+              }
               case 'get_ollama_models':
               case 'get_meeting_speakers':
               case 'list_speaker_profiles':
@@ -135,7 +184,7 @@ async function openMeeting(page: Page, {
           },
         },
       });
-    }, { format, transcriptText, summaryText: summary, segmentCount, longRowIndex, enhancement });
+    }, { format, transcriptText, summaryText: summary, segmentCount, longRowIndex, enhancement, recording });
 
     // Serve the static export through request interception, with no dev server.
     await page.route('https://meetily.test/**', async route => {
@@ -316,5 +365,63 @@ test('an enhancement dialog reopened after navigation is ready for another job w
   await expect(resultNotice).toBeVisible();
   await page.mouse.move(0, 0);
   await expect(resultNotice).toHaveCount(0, { timeout: 10000 });
+
+for (const failure of [false, true]) {
+  test(`trims a saved recording and ${failure ? 'can retry text creation' : 'shows the new transcript'}`, async ({ page }) => {
+    const errors = await openMeeting(page, { recording: true });
+    await page.getByRole('button', { name: 'Trim saved recording', exact: true }).click();
+    const dialog = page.getByRole('dialog');
+    await expect(dialog.getByRole('heading', { name: 'Trim recording', exact: true })).toBeVisible();
+    await expect(dialog).toContainText('This cannot be undone.');
+    const start = dialog.getByRole('spinbutton', { name: 'Start (seconds)', exact: true });
+    const end = dialog.getByRole('spinbutton', { name: 'End (seconds)', exact: true });
+    const submit = dialog.getByRole('button', { name: 'Trim and transcribe', exact: true });
+    await expect(end).toHaveValue('120');
+    await expect(submit).toBeDisabled();
+    await start.fill('70');
+    await end.fill('50');
+    await expect(submit).toBeDisabled();
+    await start.fill('10');
+    await expect(dialog.getByRole('status')).toContainText('Keep 40.000 seconds.');
+    await expect(submit).toBeEnabled();
+    await submit.click();
+    await expect(page.getByText(transcriptText, { exact: true })).toHaveCount(0);
+    await expect(page.locator('.bn-editor')).toHaveCount(0);
+    const calls = await page.evaluate(() => (window as any).__trimTest.calls);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toEqual({ command: 'trim_and_retranscribe_command', args: {
+      meetingId: 'saved-meeting', range: { start_seconds: 10, end_seconds: 50 },
+      language: null, model: 'large-v3', provider: 'whisper', assignSpeakers: false,
+    } });
+    await page.evaluate(fail => (window as any).__trimTest.finish(fail), failure);
+    if (failure) {
+      await expect(dialog).toContainText('The recording was trimmed. New transcription did not finish');
+      await dialog.getByRole('button', { name: 'Try Again', exact: true }).click();
+      await expect(dialog.getByRole('spinbutton')).toHaveCount(0);
+      await dialog.getByRole('button', { name: 'Transcribe trimmed audio', exact: true }).click();
+      const retry = await page.evaluate(() => (window as any).__trimTest.calls[1]);
+      expect(retry.command).toBe('start_retranscription_command');
+      expect(retry.args.range).toBeUndefined();
+      await page.evaluate(() => (window as any).__trimTest.finish());
+    }
+    await expect(dialog).toHaveCount(0);
+    await expect(page.getByText('Only the selected meeting audio.', { exact: true })).toBeVisible();
+    await expect(page.getByText(transcriptText, { exact: true })).toHaveCount(0);
+    expect(errors).toEqual([]);
+  });
+}
+
+test('trim cancellation waits for the native job and keeps the saved trim result visible', async ({ page }) => {
+  const errors = await openMeeting(page, { recording: true });
+  await page.getByRole('button', { name: 'Trim saved recording', exact: true }).click();
+  const dialog = page.getByRole('dialog');
+  await dialog.getByRole('spinbutton', { name: 'Start (seconds)', exact: true }).fill('10');
+  await dialog.getByRole('button', { name: 'Trim and transcribe', exact: true }).click();
+  await dialog.getByRole('button', { name: 'Cancel', exact: true }).click();
+  await expect(dialog.getByRole('button', { name: 'Stopping...', exact: true })).toBeDisabled();
+  await expect(dialog).toBeVisible();
+  await page.evaluate(() => (window as any).__trimTest.finish());
+  await expect(dialog).toContainText('The recording was trimmed. New transcription did not finish: Retranscription cancelled');
+  await expect(page.getByText(transcriptText, { exact: true })).toHaveCount(0);
   expect(errors).toEqual([]);
 });

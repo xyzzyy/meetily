@@ -3,7 +3,7 @@
 import { useState } from 'react';
 import { Button } from '@/components/ui/button';
 import { ButtonGroup } from '@/components/ui/button-group';
-import { Copy, FolderOpen, RefreshCw } from 'lucide-react';
+import { Copy, FolderOpen, RefreshCw, Scissors } from 'lucide-react';
 import Analytics from '@/lib/analytics';
 import { RetranscribeDialog } from './RetranscribeDialog';
 import { useConfig } from '@/contexts/ConfigContext';
@@ -27,6 +27,7 @@ export function TranscriptButtonGroup({
 }: TranscriptButtonGroupProps) {
   const { betaFeatures } = useConfig();
   const [showRetranscribeDialog, setShowRetranscribeDialog] = useState(false);
+  const [showTrimDialog, setShowTrimDialog] = useState(false);
 
   return (
     <div className="flex items-center justify-center w-full gap-2">
@@ -76,6 +77,16 @@ export function TranscriptButtonGroup({
           </Button>
         )}
       </ButtonGroup>
+
+      {betaFeatures.importAndRetranscribe && meetingId && meetingFolderPath && (
+        <>
+          <Button size="sm" variant="outline" onClick={() => setShowTrimDialog(true)} title="Trim saved recording" aria-label="Trim saved recording">
+            <Scissors size={18} /><span className="hidden @[22rem]:inline">Trim</span>
+          </Button>
+          <RetranscribeDialog open={showTrimDialog} onOpenChange={setShowTrimDialog} meetingId={meetingId}
+            meetingFolderPath={meetingFolderPath} onComplete={handleRetranscribeComplete} trim />
+        </>
+      )}
 
       {betaFeatures.importAndRetranscribe && meetingId && meetingFolderPath && (
         <RetranscribeDialog

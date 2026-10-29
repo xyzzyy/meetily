@@ -1,11 +1,12 @@
 "use client"
 import { useSidebar } from "@/components/Sidebar/SidebarProvider";
-import { useState, useEffect, useCallback, Suspense } from "react";
+import { useState, useEffect, useCallback, useRef, Suspense } from "react";
 import { MeetingSummary, SummaryProcessResponse, Transcript } from "@/types";
 import PageContent from "./page-content";
 import { useRouter, useSearchParams } from "next/navigation";
 import Analytics from "@/lib/analytics";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { LoaderIcon } from "lucide-react";
 import { useConfig } from "@/contexts/ConfigContext";
 import { usePaginatedTranscripts } from "@/hooks/usePaginatedTranscripts";
@@ -35,6 +36,7 @@ function MeetingDetailsContent() {
   const [isLoading, setIsLoading] = useState<boolean>(true);
   const [shouldAutoGenerate, setShouldAutoGenerate] = useState<boolean>(false);
   const [hasCheckedAutoGen, setHasCheckedAutoGen] = useState<boolean>(false);
+  const trimRevision = useRef(0);
 
   // Use pagination hook for efficient transcript loading
   const {
@@ -52,6 +54,20 @@ function MeetingDetailsContent() {
   } = usePaginatedTranscripts({ meetingId: meetingId || '' });
 
   useEnhancementCompletion(meetingId, refetch);
+
+  useEffect(() => {
+    let disposed = false;
+    const listener = listen<{ meeting_id: string }>('recording-trimmed', event => {
+      if (disposed || event.payload.meeting_id !== meetingId) return;
+      trimRevision.current += 1;
+      setMeetingSummary(null);
+      setSummaryResponse({ meeting_id: meetingId, meetingName: null, status: 'idle', data: null, start: null, end: null, error: null });
+      setShouldAutoGenerate(false);
+      setHasCheckedAutoGen(true);
+      void refetch();
+    });
+    return () => { disposed = true; void listener.then(unlisten => unlisten()); };
+  }, [meetingId, refetch]);
 
   // Check if gemma3:1b model is available in Ollama
   const checkForGemmaModel = useCallback(async (): Promise<boolean> => {
@@ -197,12 +213,13 @@ function MeetingDetailsContent() {
     setIsLoading(true);
 
     let cancelled = false;
+    const revision = trimRevision.current;
     const fetchMeetingSummary = async () => {
       try {
         const response = await invoke<SummaryProcessResponse>('api_get_summary', {
           meetingId,
         });
-        if (cancelled) return;
+        if (cancelled || revision !== trimRevision.current) return;
         setSummaryResponse(response);
         const summary = parseSummaryContent(response.data);
         setMeetingSummary(response.status === 'idle' ? null : summary);

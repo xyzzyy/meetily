@@ -14,6 +14,7 @@ export interface EnhancementRequest {
   model: string;
   provider: string;
   assignSpeakers: boolean;
+  range?: { start_seconds: number; end_seconds: number };
 }
 interface Progress {
   meeting_id: string;
@@ -95,7 +96,7 @@ export function TranscriptEnhancementProvider({ children }: { children: React.Re
     }).catch(error => console.warn('Could not track enhancement:', error));
     void (async () => {
       try {
-        const result = await invoke<{ segments_count: number; duration_seconds: number }>('start_retranscription_command', { ...request });
+        const result = await invoke<{ segments_count: number; duration_seconds: number }>(request.range ? 'trim_and_retranscribe_command' : 'start_retranscription_command', { ...request });
         if (!mounted.current || active.current?.token !== current.token) return;
         active.current = null; setJob(null);
         setCompletion({ meetingId: request.meetingId, token: current.token });
@@ -110,7 +111,7 @@ export function TranscriptEnhancementProvider({ children }: { children: React.Re
         const cancelled = active.current.cancelling;
         active.current = null; setJob(null);
         if (cancelled) toast.info('Enhancement cancelled', {
-          ...resultNotice, description: 'The saved transcript was kept.',
+          ...resultNotice, description: request.range ? String(error) : 'The saved transcript was kept.',
         });
         else toast.error('Enhancement failed', { ...resultNotice, description: String(error) });
         void Analytics.trackError('enhance_transcript_failed', String(error)).catch(() => {});
