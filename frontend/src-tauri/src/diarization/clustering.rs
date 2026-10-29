@@ -39,6 +39,7 @@ pub struct SpeakerClusterer {
     last_label: Option<String>,
     last_cluster: Option<usize>,
     anon_speaker_count: usize,
+    profiles: Vec<super::profile_matching::VoiceProfile>,
 }
 
 pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
@@ -56,19 +57,30 @@ impl SpeakerClusterer {
             last_label: None,
             last_cluster: None,
             anon_speaker_count: 0,
+            profiles: Vec::new(),
         }
     }
 
     /// Seed the clusterer with a saved voice profile so returning speakers
     /// are recognized by name instead of getting an anonymous label.
     pub fn seed_profile(&mut self, id: &str, name: &str, centroid: Vec<f32>) {
-        self.clusters.push(SpeakerCluster {
-            centroid,
-            count: 0,
-            label: name.to_string(),
-            from_profile: true,
-            profile_id: Some(id.to_string()),
+        self.seed_profile_samples(super::profile_matching::VoiceProfile {
+            id: id.into(),
+            name: name.into(),
+            embedding: centroid,
+            samples: Vec::new(),
         });
+    }
+
+    pub fn seed_profile_samples(&mut self, profile: super::profile_matching::VoiceProfile) {
+        self.clusters.push(SpeakerCluster {
+            centroid: profile.embedding.clone(),
+            count: 0,
+            label: profile.name.clone(),
+            from_profile: true,
+            profile_id: Some(profile.id.clone()),
+        });
+        self.profiles.push(profile);
     }
 
     /// Label of the most recently assigned segment (used to carry labels
@@ -83,8 +95,8 @@ impl SpeakerClusterer {
     }
 
     /// Assign an L2-normalized embedding to a cluster, returning its label.
-    /// Unmatched profile-seeded clusters require the stricter profile
-    /// threshold for their first match.
+    /// Saved identities require the profile threshold and margin on every
+    /// match. Anonymous clusters use the cluster threshold.
     pub fn assign(&mut self, embedding: &[f32]) -> String {
         self.assign_detailed(embedding).label
     }
@@ -97,42 +109,34 @@ impl SpeakerClusterer {
             .map(|(i, c)| (i, cosine_similarity(embedding, &c.centroid)))
             .filter(|(i, similarity)| {
                 let cluster = &self.clusters[*i];
-                (!cluster.from_profile || cluster.count > 0)
-                    && *similarity >= CLUSTER_SIMILARITY_THRESHOLD
+                !cluster.from_profile && *similarity >= CLUSTER_SIMILARITY_THRESHOLD
             })
             .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
 
-
-        let mut profile_matches: Vec<(usize, f32)> = self
-            .clusters
-            .iter()
-            .enumerate()
-            .filter(|(_, cluster)| cluster.from_profile && cluster.count == 0)
-            .map(|(index, cluster)| (index, cosine_similarity(embedding, &cluster.centroid)))
-            .collect();
-        profile_matches.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-
-        if let Some(&(index, similarity)) = profile_matches.first() {
-            let runner_up = profile_matches
-                .get(1)
-                .map(|match_| match_.1)
-                .unwrap_or(-1.0)
-                .max(best.map(|(_, score)| score).unwrap_or(-1.0));
-            if similarity >= PROFILE_MATCH_THRESHOLD
-                && similarity - runner_up >= PROFILE_MATCH_MARGIN
-            {
-                let label = self.update_cluster(index, embedding);
-                self.last_label = Some(label.clone());
-                self.last_cluster = Some(index);
-                return ClusterAssignment {
-                    label,
-                    profile_id: self.clusters[index].profile_id.clone(),
-                    confidence: similarity,
-                    needs_review: false,
-                };
-            }
+        // Profiles always use the saved references and the stricter identity
+        // threshold, including after their first live match. Their samples
+        // compete by identity, never against another sample of the same voice.
+        if let Some((profile, similarity)) = super::profile_matching::best_profile(
+            embedding,
+            &self.profiles,
+            best.map(|(_, score)| score),
+        ) {
+            let id = self.profiles[profile].id.clone();
+            let index = self
+                .clusters
+                .iter()
+                .position(|cluster| cluster.profile_id.as_deref() == Some(id.as_str()))
+                .expect("each saved profile has a seeded cluster");
+            let label = self.update_cluster(index, embedding);
+            self.last_label = Some(label.clone());
+            self.last_cluster = Some(index);
+            return ClusterAssignment {
+                label,
+                profile_id: Some(id),
+                confidence: similarity,
+                needs_review: false,
+            };
         }
-
 
         let (label, profile_id, confidence, needs_review) = match best {
             Some((idx, similarity)) => {
@@ -287,6 +291,41 @@ mod tests {
         let assignment = clusterer.assign_detailed(&unit(vec![1.0, 0.0]));
         assert_eq!(assignment.label, "Speaker 1");
         assert_eq!(assignment.profile_id, None);
+    }
+
+    #[test]
+    fn saved_samples_identify_a_voice_hidden_by_its_blend() {
+        let mut clusterer = SpeakerClusterer::new();
+        clusterer.seed_profile_samples(super::super::profile_matching::VoiceProfile {
+            id: "alice".into(),
+            name: "Alice".into(),
+            embedding: unit(vec![0.5, 0.8660254]),
+            samples: vec![vec![1.0, 0.0]],
+        });
+        for _ in 0..2 {
+            let result = clusterer.assign_detailed(&[1.0, 0.0]);
+            assert_eq!(result.profile_id.as_deref(), Some("alice"));
+            assert_eq!(result.label, "Alice");
+        }
+    }
+
+    #[test]
+    fn a_previous_match_does_not_lower_the_identity_threshold_or_margin() {
+        let mut clusterer = SpeakerClusterer::new();
+        clusterer.seed_profile("alice", "Alice", vec![1.0, 0.0]);
+        clusterer.seed_profile("bob", "Bob", vec![0.0, 1.0]);
+        assert_eq!(
+            clusterer.assign_detailed(&[1.0, 0.0]).profile_id.as_deref(),
+            Some("alice")
+        );
+        assert!(clusterer
+            .assign_detailed(&unit(vec![0.71, 0.704]))
+            .profile_id
+            .is_none());
+        let mut clusterer = SpeakerClusterer::new();
+        clusterer.seed_profile("alice", "Alice", vec![1.0, 0.0]);
+        clusterer.assign_detailed(&[1.0, 0.0]);
+        assert!(clusterer.assign_detailed(&[0.6, 0.8]).profile_id.is_none());
     }
 
     #[test]

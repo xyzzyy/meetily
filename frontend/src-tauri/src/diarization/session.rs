@@ -30,9 +30,29 @@ impl DiarizationSession {
         embedding_model_path: &Path,
         profiles: Vec<(String, String, Vec<f32>)>,
     ) -> Result<Self, EmbeddingError> {
+        Self::with_voice_profiles(
+            embedding_model_path,
+            profiles
+                .into_iter()
+                .map(
+                    |(id, name, embedding)| super::profile_matching::VoiceProfile {
+                        id,
+                        name,
+                        embedding,
+                        samples: Vec::new(),
+                    },
+                )
+                .collect(),
+        )
+    }
+
+    pub fn with_voice_profiles(
+        embedding_model_path: &Path,
+        profiles: Vec<super::profile_matching::VoiceProfile>,
+    ) -> Result<Self, EmbeddingError> {
         let mut clusterer = SpeakerClusterer::new();
-        for (id, name, centroid) in profiles {
-            clusterer.seed_profile(&id, &name, centroid);
+        for profile in profiles {
+            clusterer.seed_profile_samples(profile);
         }
         Ok(Self {
             extractor: EmbeddingExtractor::new(embedding_model_path)?,

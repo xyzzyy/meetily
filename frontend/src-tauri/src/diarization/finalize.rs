@@ -1092,14 +1092,9 @@ async fn recognize_final_profiles<R: Runtime>(
     audio: &HashMap<String, Vec<f32>>,
 ) -> HashMap<String, String> {
     let state = app.state::<AppState>();
-    let profiles = crate::database::repositories::speaker_profile::SpeakerProfilesRepository::list(
-        state.speaker_store.pool(),
-    )
-    .await
-    .unwrap_or_default()
-    .into_iter()
-    .filter(|profile| profile.model_version == crate::diarization::models::EMBEDDING_MODEL_VERSION)
-    .collect::<Vec<_>>();
+    let profiles = crate::database::repositories::speaker_profile::SpeakerProfilesRepository::recognition_profiles(
+        state.speaker_store.pool(), crate::diarization::models::EMBEDDING_MODEL_VERSION,
+    ).await.unwrap_or_default();
     if profiles.is_empty() {
         return HashMap::new();
     }
@@ -1140,28 +1135,10 @@ async fn recognize_final_profiles<R: Runtime>(
         let Ok(embedding) = extractor.compute(&samples) else {
             continue;
         };
-        let mut matches = profiles
-            .iter()
-            .map(|profile| {
-                (
-                    profile,
-                    crate::diarization::clustering::cosine_similarity(
-                        &embedding,
-                        &profile.embedding,
-                    ),
-                )
-            })
-            .collect::<Vec<_>>();
-        matches.sort_by(|left, right| right.1.total_cmp(&left.1));
-        if let Some((best, best_score)) = matches.first() {
-            let second_score = matches.get(1).map(|entry| entry.1).unwrap_or(-1.0);
-            if *best_score >= crate::diarization::clustering::PROFILE_MATCH_THRESHOLD
-                && *best_score - second_score
-                    >= crate::diarization::clustering::PROFILE_MATCH_MARGIN
-            {
-                names.insert(speaker_id.clone(), best.name.clone());
-                matches_by_speaker.insert(speaker_id, best.id.clone());
-            }
+        if let Some((best, _)) = super::profile_matching::best_profile(&embedding, &profiles, None)
+        {
+            names.insert(speaker_id.clone(), profiles[best].name.clone());
+            matches_by_speaker.insert(speaker_id, profiles[best].id.clone());
         }
     }
     for window in windows {
