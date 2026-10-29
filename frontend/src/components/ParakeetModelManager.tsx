@@ -166,7 +166,7 @@ export function ParakeetModelManager({
             setModels(prevModels =>
               prevModels.map(model =>
                 model.name === modelName
-                  ? { ...model, status: 'Available' as ModelStatus }
+                  ? { ...model, status: 'Available' as ModelStatus, is_shared: false }
                   : model
               )
             );

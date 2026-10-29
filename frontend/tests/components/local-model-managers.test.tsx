@@ -119,6 +119,24 @@ for (const engine of engines) {
     expect(renderer!.root.findAllByProps({ title: 'Cancel download' }).length).toBeGreaterThan(0);
   });
 
+  test(`${engine.label}: a Branch replacement clears the shared notice without reopening settings`, async () => {
+    available = [{ ...engine.model, is_shared: true,
+      status: { Corrupted: { file_size: 1, expected_min_size: 2 } } }];
+    reply = respond;
+    await show();
+    expect(JSON.stringify(renderer!.toJSON())).toContain('Shared from official Meetily');
+    const download = renderer!.root.findAllByType('button').find(button => button.props.children?.includes?.('Re-download'))!;
+    await act(async () => { await download.props.onClick(); });
+    await act(async () => { await handlers.get(engine.complete)!({ payload: { modelName: engine.model.name } }); });
+    const text = JSON.stringify(renderer!.toJSON());
+    expect(text).toContain('Saved in Meetily Branch.');
+    expect(text).not.toContain('Shared from official Meetily');
+    expect(renderer!.root.findAllByType('button').some(button => button.props.title === 'Delete model')).toBe(true);
+    expect(selectButton().props.disabled).toBe(false);
+    expect(selected).not.toHaveBeenCalled();
+    expect(invoke.mock.calls.some(([command]) => command === 'api_save_transcript_config')).toBe(false);
+  });
+
   test(`${engine.label}: a finished download does not change the saved model`, async () => {
     available = [{ ...engine.model, status: 'Missing' }];
     reply = respond;
