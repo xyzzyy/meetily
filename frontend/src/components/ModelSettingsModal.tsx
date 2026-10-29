@@ -1314,40 +1314,40 @@ export function ModelSettingsModal({
                       const modelIsDownloading = isDownloading(model.name);
 
                       return (
-                        <div
+                        <button type="button"
                           key={model.id}
+                          disabled={modelIsDownloading} aria-pressed={modelConfig.model === model.name}
+                          onClick={() => setModelConfig((prev: ModelConfig) => ({ ...prev, model: model.name }))}
                           className={cn(
-                            'bg-card p-2 m-0 rounded-md border transition-colors',
+                            'w-full text-left bg-card p-2 m-0 rounded-md border transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-blue-500',
                             modelConfig.model === model.name
                               ? 'ring-1 ring-blue-500 border-blue-500 background-blue-100'
                               : 'hover:bg-muted/50',
                             !modelIsDownloading && 'cursor-pointer'
                           )}
                         >
-                          <button type="button" className="w-full text-left rounded focus-visible:outline focus-visible:outline-2 focus-visible:outline-blue-500"
-                            disabled={modelIsDownloading} aria-pressed={modelConfig.model === model.name}
-                            onClick={() => setModelConfig((prev: ModelConfig) => ({ ...prev, model: model.name }))}>
+                          <span className="block w-full text-left">
                             <b className="font-bold">{model.name}&nbsp;</b>
                             <span className="text-muted-foreground">with a size of </span>
                             <span className="font-mono font-bold text-sm">{model.size}</span>
-                          </button>
+                          </span>
 
                           {/* Progress bar for downloading models */}
                           {modelIsDownloading && progress !== undefined && (
-                            <div className="mt-3 pt-3 border-t border-gray-200 dark:border-ink-800">
-                              <div className="flex items-center justify-between mb-2">
+                            <span className="block mt-3 pt-3 border-t border-gray-200 dark:border-ink-800">
+                              <span className="flex items-center justify-between mb-2">
                                 <span className="text-sm font-medium text-blue-600 dark:text-blue-400">Downloading...</span>
                                 <span className="text-sm font-semibold text-blue-600 dark:text-blue-400">{Math.round(progress)}%</span>
-                              </div>
-                              <div className="w-full h-2 bg-gray-200 dark:bg-ink-800 rounded-full overflow-hidden">
-                                <div
-                                  className="h-full bg-gradient-to-r from-blue-500 to-blue-600 rounded-full transition-all duration-300"
+                              </span>
+                              <span className="block w-full h-2 bg-gray-200 dark:bg-ink-800 rounded-full overflow-hidden">
+                                <span
+                                  className="block h-full bg-gradient-to-r from-blue-500 to-blue-600 rounded-full transition-all duration-300"
                                   style={{ width: `${progress}%` }}
                                 />
-                              </div>
-                            </div>
+                              </span>
+                            </span>
                           )}
-                        </div>
+                        </button>
                       );
                     })}
                   </div>

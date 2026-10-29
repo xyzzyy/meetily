@@ -134,17 +134,17 @@ export function SettingsModals({
                     )}
                     <div className="grid gap-4 max-h-[400px] overflow-y-auto pr-2">
                       {models.map((model) => (
-                        <div
+                        <button type="button"
                           key={model.id}
-                          className={`bg-white dark:bg-ink-900 p-4 rounded-lg shadow cursor-pointer transition-colors ${modelConfig.model === model.name ? 'ring-2 ring-blue-500 bg-blue-50 dark:bg-blue-500/10' : 'hover:bg-gray-50 dark:hover:bg-ink-800/50'
+                          aria-pressed={modelConfig.model === model.name}
+                          onClick={() => setModelConfig((prev: ModelConfig) => ({ ...prev, model: model.name }))}
+                          className={`w-full text-left focus-visible:outline focus-visible:outline-2 focus-visible:outline-blue-500 bg-white dark:bg-ink-900 p-4 rounded-lg shadow cursor-pointer transition-colors ${modelConfig.model === model.name ? 'ring-2 ring-blue-500 bg-blue-50 dark:bg-blue-500/10' : 'hover:bg-gray-50 dark:hover:bg-ink-800/50'
                             }`}
                         >
-                          <h3 className="font-bold"><button type="button" className="w-full text-left"
-                            aria-pressed={modelConfig.model === model.name}
-                            onClick={() => setModelConfig((prev: ModelConfig) => ({ ...prev, model: model.name }))}>{model.name}</button></h3>
-                          <p className="text-gray-600 dark:text-ink-300">Size: {model.size}</p>
-                          <p className="text-gray-600 dark:text-ink-300">Modified: {model.modified}</p>
-                        </div>
+                          <span className="block font-bold">{model.name}</span>
+                          <span className="block text-gray-600 dark:text-ink-300">Size: {model.size}</span>
+                          <span className="block text-gray-600 dark:text-ink-300">Modified: {model.modified}</span>
+                        </button>
                       ))}
                     </div>
                   </div>

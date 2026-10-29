@@ -40,7 +40,7 @@ async function openMeeting(page: Page, {
         ['user_id', 'keyboard-test-user'],
         ['analyticsDefaultOffMigrationV1', true],
       ]);
-      const controls: { finishDelete?: () => void; finishAnalytics?: () => void } = {};
+      const controls: { finishDelete?: () => void; finishAnalytics?: () => void; downloadProgress?: (modelName: string, progress: number) => void } = {};
       localStorage.setItem('summaryLanguageRecents', JSON.stringify(recentLanguages));
       Object.assign(window, {
         __KEYBOARD_TEST__: controls,
@@ -62,7 +62,13 @@ async function openMeeting(page: Page, {
           convertFileSrc(file: string) { return file; },
           async invoke(command: string, args: Record<string, any> = {}) {
             switch (command) {
-              case 'plugin:event|listen': return ++callbackId;
+              case 'plugin:event|listen':
+                if (args.event === 'ollama-model-download-progress') {
+                  controls.downloadProgress = (modelName, progress) => {
+                    (callbacks.get(args.handler) as Function)?.({ payload: { modelName, progress } });
+                  };
+                }
+                return ++callbackId;
               case 'plugin:event|unlisten':
               case 'plugin:window|set_theme':
               case 'set_language_preference':
@@ -381,7 +387,7 @@ test('language picker focuses search and returns focus on Escape', async ({ page
   expect(errors).toEqual([]);
 });
 
-test('Ollama model selection works with Enter and Space', async ({ page }) => {
+test('Ollama model selection works from card padding, size, Enter, and Space', async ({ page }) => {
   const errors = await openMeeting(page, { ollamaModels: [
     { id: 'one', name: 'test-model', size: '1 GB', modified: 'today' },
     { id: 'two', name: 'other-model', size: '2 GB', modified: 'today' },
@@ -391,10 +397,23 @@ test('Ollama model selection works with Enter and Space', async ({ page }) => {
   const first = dialog.getByRole('button', { name: /test-model with a size of/ });
   const second = dialog.getByRole('button', { name: /other-model with a size of/ });
   await expect(first).toHaveAttribute('aria-pressed', 'true');
+  const secondCard = dialog.locator('.bg-card').filter({ hasText: 'other-model' });
+  await secondCard.click({ position: { x: 2, y: 2 } });
+  await expect(second).toHaveAttribute('aria-pressed', 'true');
+  await first.click();
+  await secondCard.getByText('2 GB', { exact: true }).click();
+  await expect(second).toHaveAttribute('aria-pressed', 'true');
+  await first.click();
   await second.focus(); await page.keyboard.press('Space');
   await expect(second).toHaveAttribute('aria-pressed', 'true');
   await expect(first).toHaveAttribute('aria-pressed', 'false');
   await first.focus(); await page.keyboard.press('Enter');
+  await expect(first).toHaveAttribute('aria-pressed', 'true');
+  await expect(second).toHaveAttribute('aria-pressed', 'false');
+  await page.evaluate(() => (window as any).__KEYBOARD_TEST__.downloadProgress('other-model', 42));
+  await expect(second).toBeDisabled();
+  await expect(second).toContainText('42%');
+  await secondCard.click({ position: { x: 2, y: 2 }, force: true });
   await expect(first).toHaveAttribute('aria-pressed', 'true');
   await expect(second).toHaveAttribute('aria-pressed', 'false');
   expect(errors).toEqual([]);
