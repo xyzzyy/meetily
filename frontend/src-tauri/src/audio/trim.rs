@@ -250,13 +250,15 @@ fn finish_files(intent: &TrimIntent) -> Result<()> {
         if hash_file(&staged)? != intent.audio_hash {
             bail!("The staged trim changed. The saved audio was kept.");
         }
+        // The staged audio and its recovery record are durable. Remove the
+        // original before publication: audio.MP4 can name the same file as
+        // audio.mp4 on a case-insensitive filesystem. After publication, never
+        // remove an original filename that could now point at the new audio.
+        remove_saved_path(&folder.join(&intent.original_filename))?;
         fs::rename(&staged, &target)?;
         sync_folder(folder)?;
     } else if hash_file(&target)? != intent.audio_hash {
         bail!("The trimmed audio is missing or changed. Trim recovery stopped.");
-    }
-    if intent.original_filename != "audio.mp4" {
-        remove_saved_path(&folder.join(&intent.original_filename))?;
     }
     // These files can contain audio or text from outside the selected range.
     // New speaker work must use the trimmed mixed recording.
@@ -406,7 +408,8 @@ pub(crate) async fn trim_recording(
             if cancelled.load(Ordering::SeqCst) {
                 bail!("Trim cancelled. The saved recording was kept.");
             }
-            File::open(&staged)?.sync_all()?;
+            // Windows requires a writable handle to flush file buffers.
+            File::options().write(true).open(&staged)?.sync_all()?;
             sync_folder(&prepare_folder)?;
             Ok((
                 source.file_name().unwrap().to_string_lossy().into_owned(),
@@ -772,16 +775,19 @@ mod tests {
 
     #[tokio::test]
     async fn startup_finishes_each_interrupted_file_transition_before_speaker_recovery() {
-        for step in 0..3 {
+        for step in 0..4 {
             let fixture = Fixture::new().await;
             let intent = fixture.intent().await;
-            if step == 1 {
+            if step == 1 || step == 2 {
+                fs::remove_file(fixture.folder.join("original.wav")).unwrap();
+            }
+            if step == 2 {
                 fs::rename(
                     fixture.folder.join(STAGED_AUDIO),
                     fixture.folder.join("audio.mp4"),
                 )
                 .unwrap();
-            } else if step == 2 {
+            } else if step == 3 {
                 finish_files(&intent).unwrap();
             }
             crate::diarization::finalize::reconcile_interrupted_runs(
@@ -844,6 +850,58 @@ mod tests {
         assert!(recover(&fixture.core, &fixture.feature).await.is_err());
         assert_eq!(
             fs::read(fixture.folder.join("audio.mp4")).unwrap(),
+            b"original audio"
+        );
+        assert!(fixture.folder.join("transcripts.json").exists());
+    }
+
+    #[tokio::test]
+    async fn uppercase_import_extension_does_not_remove_the_trimmed_output() {
+        let fixture = Fixture::new().await;
+        fixture.intent().await;
+        fs::rename(
+            fixture.folder.join("original.wav"),
+            fixture.folder.join("audio.MP4"),
+        )
+        .unwrap();
+        sqlx::query(
+            "UPDATE recording_trims SET original_filename = 'audio.MP4' WHERE meeting_id = ?",
+        )
+        .bind(&fixture.id)
+        .execute(&fixture.feature)
+        .await
+        .unwrap();
+        recover(&fixture.core, &fixture.feature).await.unwrap();
+        assert_eq!(
+            fs::read(fixture.folder.join("audio.mp4")).unwrap(),
+            b"trimmed audio"
+        );
+        let media: Vec<_> = fs::read_dir(&fixture.folder)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| {
+                path.extension()
+                    .is_some_and(|extension| extension.eq_ignore_ascii_case("mp4"))
+            })
+            .collect();
+        assert_eq!(media.len(), 1);
+        // Recovery after the audio rename must not remove the output either.
+        recover(&fixture.core, &fixture.feature).await.unwrap();
+        fixture.assert_cleared().await;
+        assert_eq!(
+            fs::read(fixture.folder.join("audio.mp4")).unwrap(),
+            b"trimmed audio"
+        );
+    }
+
+    #[tokio::test]
+    async fn changed_staged_audio_is_rejected_before_the_original_is_removed() {
+        let fixture = Fixture::new().await;
+        fixture.intent().await;
+        fs::write(fixture.folder.join(STAGED_AUDIO), b"unexpected contents").unwrap();
+        assert!(recover(&fixture.core, &fixture.feature).await.is_err());
+        assert_eq!(
+            fs::read(fixture.folder.join("original.wav")).unwrap(),
             b"original audio"
         );
         assert!(fixture.folder.join("transcripts.json").exists());
