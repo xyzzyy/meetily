@@ -66,3 +66,58 @@ Run the scorer checks without API access or audio files:
 ```sh
 python3 -m unittest discover -s diarization-sidecar/Benchmarks -p 'test_*.py' -v
 ```
+
+## Remembered-voice benchmark
+
+Use the local Rust evaluator to compare a profile blend with that blend plus its
+saved meeting samples. It uses the app's decoder, feature extractor, embedding
+model, profile blending, threshold, and margin. It does not send audio to a
+service or change the app database.
+
+The checked-in recipe selects 64 recordings from 16 speakers in
+[LibriSpeech test-clean](https://www.openslr.org/12/), by Vassil Panayotov,
+Guoguo Chen, Daniel Povey, and Sanjeev Khudanpur (CC BY 4.0). Eight speakers each
+have two enrolment recordings and two separate probes. The other eight speakers
+have no enrolled profile and supply 32 unknown-speaker probes. This is read
+English speech, not meeting audio. The recipe records every selected file's hash.
+
+Prepare the files in an external cache. This streams the public archive until
+all selected files are found; it can download more data than it keeps. A complete
+cache is reused. Changed files are not overwritten.
+
+```sh
+python3 diarization-sidecar/Benchmarks/prepare_voice_profiles.py \
+  --output-directory /tmp/meetily-voice-evaluation
+
+cargo run --locked --release -p meetily --example evaluate_voice_profiles -- \
+  /path/to/wespeaker_en_voxceleb_CAM++.onnx \
+  /tmp/meetily-voice-evaluation/manifest.json \
+  /tmp/meetily-voice-evaluation/results.json
+```
+
+The evaluator checks model and audio hashes. It rejects repeated recordings,
+including copies with another filename, and refuses to overwrite a report.
+Each recording contributes at most its first 30 seconds. Profiles use the same
+speech-duration weighting as the app. Results include individual decisions,
+input and model hashes, and the embedding version.
+
+The first run, before the input-scale correction, produced these counts. There
+were 16 known-speaker probes and 32 unknown-speaker probes.
+
+| References | Correct known names | Wrong known names | Missed known names | False names on unknown speakers |
+|---|---:|---:|---:|---:|
+| Blend only | 3 | 6 | 7 | 13 |
+| Blend and saved samples | 4 | 4 | 8 | 5 |
+
+Both methods produced incorrect names. This test exposed a feature-input scale
+mismatch: the model's [published metadata recipe](https://github.com/k2-fsa/sherpa-onnx/blob/master/scripts/wespeaker/add_meta_data.py)
+requires PCM16-scale input, while the app supplied normalized samples. Correcting
+that extraction path and handling older voiceprints are separate work. These
+counts do not establish meeting accuracy or justify a threshold change.
+
+Run the evaluator's score and data-leak checks without a model or audio download:
+
+```sh
+cargo test --locked --release -p meetily --example evaluate_voice_profiles
+python3 -m unittest discover -s diarization-sidecar/Benchmarks -p 'test_*.py' -v
+```
