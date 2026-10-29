@@ -568,7 +568,7 @@ const Sidebar: React.FC = () => {
     return (
       <div key={item.id}>
         <div
-          className={`flex items-center transition-all duration-150 group ${item.type === 'folder' && depth === 0
+          className={`relative flex items-center transition-all duration-150 group ${item.type === 'folder' && depth === 0
             ? 'p-3 text-lg font-semibold h-10 mx-3 mt-3 rounded-lg'
             : `px-3 py-2 my-0.5 rounded-md text-sm ${isActive ? 'bg-blue-100 dark:bg-blue-500/15 text-blue-700 dark:text-blue-300 font-medium' :
               hasTranscriptMatch ? 'bg-yellow-50 dark:bg-yellow-500/10' : 'hover:bg-gray-50 dark:hover:bg-ink-800/50'
@@ -577,7 +577,7 @@ const Sidebar: React.FC = () => {
           style={item.type === 'folder' && depth === 0 ? {} : { paddingLeft }}
         >
           {item.type === 'folder' ? (
-            <button type="button" className="flex items-center w-full text-left rounded focus-visible:outline focus-visible:outline-2 focus-visible:outline-blue-500" aria-expanded={isExpanded} onClick={() => toggleFolder(item.id)}>
+            <button type="button" className="flex items-center w-full text-left rounded after:absolute after:inset-0 after:rounded-md after:content-[''] focus-visible:outline focus-visible:outline-2 focus-visible:outline-blue-500" aria-expanded={isExpanded} onClick={() => toggleFolder(item.id)}>
               {item.id === 'meetings' ? (
                 <Calendar className="w-4 h-4 mr-2" />
               ) : item.id === 'notes' ? (
@@ -598,7 +598,7 @@ const Sidebar: React.FC = () => {
           ) : (
             <div className="flex flex-col w-full">
               <div className="flex items-center w-full">
-                <button type="button" className="flex flex-1 min-w-0 items-center text-left rounded focus-visible:outline focus-visible:outline-2 focus-visible:outline-blue-500"
+                <button type="button" className="flex flex-1 min-w-0 items-center text-left rounded after:absolute after:inset-0 after:rounded-md after:content-[''] focus-visible:outline focus-visible:outline-2 focus-visible:outline-blue-500"
                   aria-current={isActive ? 'page' : undefined}
                   onClick={() => {
                     setCurrentMeeting({ id: item.id, title: item.title });
@@ -618,7 +618,7 @@ const Sidebar: React.FC = () => {
                 <span className="flex-1 break-words">{item.title}</span>
                 </button>
                 {isMeetingItem && (
-                  <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 transition-opacity duration-150">
+                  <div className="relative z-10 flex items-center gap-1 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 transition-opacity duration-150">
                     <button
                       onClick={(e) => {
                         e.stopPropagation();

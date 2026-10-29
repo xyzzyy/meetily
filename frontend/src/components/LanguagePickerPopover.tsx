@@ -30,7 +30,8 @@ export function LanguagePickerPopover({
     const container = containerRef.current;
     inputRef.current?.focus();
     return () => {
-      if (returnFocusRef.current && opener?.isConnected && (document.activeElement === document.body || container?.contains(document.activeElement))) opener.focus();
+      if (returnFocusRef.current && opener?.isConnected && !opener.matches(':disabled, [aria-disabled="true"]')
+        && (document.activeElement === document.body || container?.contains(document.activeElement))) opener.focus();
     };
   }, []);
 

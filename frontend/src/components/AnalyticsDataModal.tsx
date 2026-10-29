@@ -8,16 +8,21 @@ interface AnalyticsDataModalProps {
   isOpen: boolean;
   onClose: () => void;
   onConfirmDisable: () => void;
+  returnFocusRef?: React.RefObject<HTMLElement>;
 }
 
-export default function AnalyticsDataModal({ isOpen, onClose, onConfirmDisable }: AnalyticsDataModalProps) {
+export default function AnalyticsDataModal({ isOpen, onClose, onConfirmDisable, returnFocusRef }: AnalyticsDataModalProps) {
   const opener = useRef<HTMLElement | null>(null);
 
   return (
     <Dialog open={isOpen} onOpenChange={open => { if (!open) onClose(); }}>
       <DialogContent aria-describedby={undefined} className="max-w-2xl max-h-[90vh] overflow-y-auto p-0"
         onOpenAutoFocus={() => { opener.current = document.activeElement as HTMLElement; }}
-        onCloseAutoFocus={event => { if (opener.current?.isConnected) { event.preventDefault(); opener.current.focus(); } }}>
+        onCloseAutoFocus={event => {
+          const target = opener.current?.isConnected && !opener.current.matches(':disabled, [aria-disabled="true"]')
+            ? opener.current : returnFocusRef?.current;
+          if (target?.isConnected) { event.preventDefault(); target.focus(); }
+        }}>
         {/* Header */}
         <div className="flex items-center justify-between p-6 border-b border-gray-200 dark:border-ink-800">
           <div className="flex items-center gap-3">

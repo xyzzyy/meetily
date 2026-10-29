@@ -11,12 +11,15 @@ const contentTypes: Record<string, string> = {
 };
 
 async function openMeeting(page: Page, {
-  format = 'markdown', segmentCount = 1, summary = summaryText, longRowIndex, ollamaModels = [],
+  format = 'markdown', segmentCount = 1, summary = summaryText, longRowIndex, ollamaModels = [], slowDelete = false, analyticsEnabled = false, recentLanguages = [],
 }: {
   format?: 'markdown' | 'blocknote' | 'empty';
   segmentCount?: number;
   summary?: string;
   longRowIndex?: number;
+  slowDelete?: boolean;
+  analyticsEnabled?: boolean;
+  recentLanguages?: string[];
   ollamaModels?: { id: string; name: string; size: string; modified: string }[];
 } = {}) {
     const errors: string[] = [];
@@ -28,15 +31,19 @@ async function openMeeting(page: Page, {
 
     // Exercise the real production chunks. Only the desktop IPC boundary is
     // replaced; no React components, editors, or extensions are mocked.
-    await page.addInitScript(({ format, transcriptText, summaryText, segmentCount, longRowIndex, ollamaModels }) => {
+    await page.addInitScript(({ format, transcriptText, summaryText, segmentCount, longRowIndex, ollamaModels, slowDelete, analyticsEnabled, recentLanguages }) => {
       const meetingTitles = new Map([['saved-meeting', 'Saved planning meeting'], ['other-meeting', 'Other planning meeting']]);
       let callbackId = 0;
       const callbacks = new Map<number, unknown>();
       const store = new Map<string, unknown>([
-        ['analyticsOptedIn', false],
+        ['analyticsOptedIn', analyticsEnabled],
+        ['user_id', 'keyboard-test-user'],
         ['analyticsDefaultOffMigrationV1', true],
       ]);
+      const controls: { finishDelete?: () => void; finishAnalytics?: () => void } = {};
+      localStorage.setItem('summaryLanguageRecents', JSON.stringify(recentLanguages));
       Object.assign(window, {
+        __KEYBOARD_TEST__: controls,
         __TAURI_OS_PLUGIN_INTERNALS__: {
           platform: 'macos', version: '15.0', family: 'unix', os_type: 'macos',
           arch: 'aarch64', eol: '\n', exe_extension: '',
@@ -73,7 +80,10 @@ async function openMeeting(page: Page, {
               case 'is_recording': return false;
               case 'plugin:app|version': return '0.4.1';
               case 'api_get_meetings': return [...meetingTitles].map(([id, title]) => ({ id, title }));
-              case 'api_delete_meeting': meetingTitles.delete(args.meetingId); return null;
+              case 'api_delete_meeting':
+                if (slowDelete) await new Promise<void>(resolve => { controls.finishDelete = resolve; });
+                meetingTitles.delete(args.meetingId); return null;
+              case 'api_search_transcripts': return [{ id: 'other-meeting', title: 'Other planning meeting', matchContext: 'An office discussion', timestamp: '10:00:00' }];
               case 'api_save_meeting_title': meetingTitles.set(args.meetingId, args.title); return null;
               case 'api_get_auto_generate_setting': return false;
               case 'api_get_meeting_metadata': return {
@@ -119,6 +129,20 @@ async function openMeeting(page: Page, {
               case 'get_diarization_settings': return { enabled: false, mode: 'off', showProvisionalLabels: false };
               case 'get_diarization_model_status': return { installed: false, refinementSupported: false };
               case 'get_recording_state': return { is_recording: false, is_paused: false };
+              case 'get_notification_settings': return { notification_preferences: { show_recording_started: true, show_recording_stopped: true } };
+              case 'get_database_directory':
+              case 'whisper_get_models_directory':
+              case 'get_default_recordings_folder_path': return '/keyboard-test';
+              case 'init_analytics':
+              case 'identify_user':
+              case 'track_event':
+              case 'track_daily_active_user':
+              case 'end_analytics_session':
+              case 'track_analytics_transparency_viewed':
+              case 'disable_analytics': return null;
+              case 'start_analytics_session': return 'keyboard-test-session';
+              case 'is_analytics_enabled': return store.get('analyticsOptedIn');
+              case 'track_analytics_disabled': return new Promise<void>(resolve => { controls.finishAnalytics = resolve; });
               case 'get_audio_devices': return [{ name: 'Test microphone', device_type: 'Input' }];
               case 'get_ollama_models': return ollamaModels;
               case 'get_meeting_speakers':
@@ -129,7 +153,7 @@ async function openMeeting(page: Page, {
           },
         },
       });
-    }, { format, transcriptText, summaryText: summary, segmentCount, longRowIndex, ollamaModels });
+    }, { format, transcriptText, summaryText: summary, segmentCount, longRowIndex, ollamaModels, slowDelete, analyticsEnabled, recentLanguages });
 
     // Serve the static export through request interception, with no dev server.
     await page.route('https://meetily.test/**', async route => {
@@ -267,36 +291,43 @@ for (const { segmentCount, longRowIndex, timestamp } of [
 }
 
 
-test('keyboard navigation, title editing, and delete confirmation preserve focus', async ({ page, browserName }) => {
-  // WebKit follows macOS policy: Option+Tab includes native buttons.
-  const tab = (reverse = false) => page.keyboard.press(`${reverse ? 'Shift+' : ''}${browserName === 'webkit' ? 'Alt+' : ''}Tab`);
-  const errors = await openMeeting(page);
-  await page.getByRole('button', { name: 'Expand sidebar', exact: true }).focus();
-  await page.keyboard.press('Enter');
-  const other = page.getByRole('button', { name: 'Other planning meeting', exact: true });
-  await other.focus(); await page.keyboard.press('Space');
-  await expect(page).toHaveURL(/id=other-meeting/);
-  await expect(other).toHaveAttribute('aria-current', 'page');
-  await other.focus(); await tab();
-  const edit = page.getByRole('button', { name: 'Edit meeting title', exact: true }).last();
-  await expect(edit).toBeFocused(); await page.keyboard.press('Enter');
-  await expect(page.getByRole('dialog').getByLabel('Meeting Title')).toBeFocused();
-  await page.keyboard.press('Escape'); await expect(edit).toBeFocused();
-  await tab();
-  const remove = page.getByRole('button', { name: 'Delete meeting', exact: true }).last();
-  await expect(remove).toBeFocused(); await page.keyboard.press('Enter');
-  const confirmation = page.getByRole('dialog', { name: 'Confirm Delete' });
-  await expect(confirmation.getByRole('button', { name: 'Cancel', exact: true })).toBeFocused();
-  await tab(true);
-  expect(await confirmation.evaluate(dialog => dialog.contains(document.activeElement))).toBe(true);
-  await page.keyboard.press('Escape'); await expect(remove).toBeFocused();
-  await page.keyboard.press('Enter'); await tab();
-  await expect(confirmation.getByRole('button', { name: 'Delete', exact: true })).toBeFocused();
-  await page.keyboard.press('Enter'); await expect(confirmation).toHaveCount(0);
-  await expect(page.getByRole('button', { name: 'Collapse sidebar', exact: true })).toBeFocused();
-  await expect(other).toHaveCount(0);
-  expect(errors).toEqual([]);
-});
+for (const slowDelete of [false, true]) {
+  test(`keyboard navigation, title editing, and delete confirmation preserve focus (slow=${slowDelete})`, async ({ page, browserName }) => {
+    // WebKit follows macOS policy: Option+Tab includes native buttons.
+    const tab = (reverse = false) => page.keyboard.press(`${reverse ? 'Shift+' : ''}${browserName === 'webkit' ? 'Alt+' : ''}Tab`);
+    const errors = await openMeeting(page, { slowDelete });
+    await page.getByRole('button', { name: 'Expand sidebar', exact: true }).focus();
+    await page.keyboard.press('Enter');
+    const other = page.getByRole('button', { name: 'Other planning meeting', exact: true });
+    await other.focus(); await page.keyboard.press('Space');
+    await expect(page).toHaveURL(/id=other-meeting/);
+    await expect(other).toHaveAttribute('aria-current', 'page');
+    await other.focus(); await tab();
+    const edit = page.getByRole('button', { name: 'Edit meeting title', exact: true }).last();
+    await expect(edit).toBeFocused(); await page.keyboard.press('Enter');
+    await expect(page.getByRole('dialog').getByLabel('Meeting Title')).toBeFocused();
+    await page.keyboard.press('Escape'); await expect(edit).toBeFocused();
+    await tab();
+    const remove = page.getByRole('button', { name: 'Delete meeting', exact: true }).last();
+    await expect(remove).toBeFocused(); await page.keyboard.press('Enter');
+    const confirmation = page.getByRole('dialog', { name: 'Confirm Delete' });
+    await expect(confirmation.getByRole('button', { name: 'Cancel', exact: true })).toBeFocused();
+    await tab(true);
+    expect(await confirmation.evaluate(dialog => dialog.contains(document.activeElement))).toBe(true);
+    await page.keyboard.press('Escape'); await expect(remove).toBeFocused();
+    await page.keyboard.press('Enter'); await tab();
+    await expect(confirmation.getByRole('button', { name: 'Delete', exact: true })).toBeFocused();
+    await page.keyboard.press('Enter'); await expect(confirmation).toHaveCount(0);
+    await expect(page.getByRole('button', { name: 'Collapse sidebar', exact: true })).toBeFocused();
+    if (slowDelete) {
+      await expect(other).toHaveCount(1);
+      await page.evaluate(() => (window as any).__KEYBOARD_TEST__.finishDelete());
+    }
+    await expect(other).toHaveCount(0);
+    await expect(page.getByRole('button', { name: 'Collapse sidebar', exact: true })).toBeFocused();
+    expect(errors).toEqual([]);
+  });
+}
 
 for (const format of ['markdown', 'blocknote'] as const) {
   test(`Alt+Enter follows the reference under the caret without changing ${format} text`, async ({ page }) => {
@@ -366,5 +397,62 @@ test('Ollama model selection works with Enter and Space', async ({ page }) => {
   await first.focus(); await page.keyboard.press('Enter');
   await expect(first).toHaveAttribute('aria-pressed', 'true');
   await expect(second).toHaveAttribute('aria-pressed', 'false');
+  expect(errors).toEqual([]);
+});
+
+for (const area of ['snippet', 'padding']) {
+  test(`meeting search result ${area} opens the matching meeting`, async ({ page }) => {
+    const errors = await openMeeting(page);
+    await page.getByRole('button', { name: 'Expand sidebar', exact: true }).click();
+    const sidebar = page.locator('.fixed.top-0.left-0.h-screen');
+    await expect(sidebar.locator(':scope > div.h-screen')).toHaveCSS('width', '256px');
+    await sidebar.getByPlaceholder('Search meeting content...').fill('office');
+    const snippet = sidebar.getByText('Match:', { exact: true }).locator('..');
+    await expect(snippet).toContainText('An office discussion');
+    // Hit the displayed snippet or padding, including the native button's stretched hit area.
+    if (area === 'snippet') await snippet.click({ force: true });
+    else await sidebar.locator('.group').filter({ hasText: 'Other planning meeting' }).click({ position: { x: 2, y: 2 }, force: true });
+    await expect(page).toHaveURL(/id=other-meeting/);
+    if (area === 'snippet') {
+      await sidebar.getByRole('button', { name: 'Edit meeting title', exact: true }).click();
+      await expect(page.getByRole('dialog').getByLabel('Meeting Title')).toBeFocused();
+      await page.keyboard.press('Escape');
+      await sidebar.getByRole('button', { name: 'Delete meeting', exact: true }).click();
+      await expect(page.getByRole('dialog', { name: 'Confirm Delete' })).toBeVisible();
+      await page.keyboard.press('Escape');
+    }
+    expect(errors).toEqual([]);
+  });
+}
+
+test('adding the fifth quick language returns focus to the new language control', async ({ page }) => {
+  const errors = await openMeeting(page, { recentLanguages: ['en', 'fr', 'de', 'es'] });
+  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  await page.getByRole('tab', { name: 'Summary', exact: true }).click();
+  const add = page.getByRole('button', { name: 'Add language' });
+  await add.focus(); await page.keyboard.press('Enter');
+  const picker = page.getByRole('dialog', { name: 'Pick summary language' });
+  await picker.getByRole('textbox', { name: 'Search summary languages' }).fill('Italian');
+  await picker.getByRole('button', { name: /Italian/ }).press('Enter');
+  await expect(add).toBeDisabled();
+  await expect(page.getByRole('button', { name: 'Pin Italian as default', exact: true })).toBeFocused();
+  expect(errors).toEqual([]);
+});
+
+test('analytics confirmation returns focus while its switch is disabled during a slow update', async ({ page }) => {
+  const errors = await openMeeting(page, { analyticsEnabled: true });
+  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  const analytics = page.getByRole('heading', { name: 'Usage Analytics', exact: true }).locator('..').locator('..');
+  const toggle = analytics.getByRole('switch');
+  await expect(toggle).toBeChecked();
+  await toggle.focus(); await page.keyboard.press('Space');
+  const dialog = page.getByRole('dialog', { name: 'What Analytics Collects' });
+  await dialog.getByRole('button', { name: 'Confirm: Disable Analytics' }).press('Enter');
+  await expect(dialog).toHaveCount(0);
+  await expect(toggle).toBeDisabled();
+  await expect(analytics).toBeFocused();
+  await page.evaluate(() => (window as any).__KEYBOARD_TEST__.finishAnalytics());
+  await expect(toggle).toBeEnabled();
+  await expect(toggle).not.toBeChecked();
   expect(errors).toEqual([]);
 });
