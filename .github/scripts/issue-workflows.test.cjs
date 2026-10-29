@@ -168,6 +168,19 @@ test("a recovered issue gets its matching label and an explanation", async () =>
   assert.match(f.comments[0].body, /remove these labels: `invalid-template`/);
 });
 
+for (const labels of [["template-grace"], ["invalid-template-again"], ["template-grace", "invalid-template-again"]]) {
+  for (const action of ["opened", "edited", "reopened"]) {
+    test(`legacy cleanup preserves maintainer triage on ${action}: ${labels.join(", ")}`, async () => {
+      const f = fixture({ action, issue: { body: completeBody, labels: [...labels, "triaged"] } });
+      await enforce(f);
+      assert.equal(f.issue.state, "open");
+      assert.deepEqual(f.labels(), ["triaged"]);
+      assert.ok(!f.calls.some(call => call.method === "addLabels"));
+      assert.doesNotMatch(f.comments[0].body, /add the `bug` label/);
+    });
+  }
+}
+
 test("a missing title prefix closes with links to all four forms", async () => {
   const f = fixture({ issue: { title: "The app stops" } });
   await enforce(f);

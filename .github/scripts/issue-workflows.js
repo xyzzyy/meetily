@@ -104,9 +104,9 @@ async function checkOpenIssue({ context, github, core }, issue) {
   const key = "template-check:" + context.runId + ":" + issue.number;
   if (result.ok) {
     const removed = [INVALID, ...LEGACY_LABELS].filter((name) => api.labels.has(name));
-    // The forms label new issues. Add the type label only when recovering an
-    // issue, so a maintainer who removes it during triage is not overridden.
-    const added = removed.length && !api.labels.has(result.template.label) ? [result.template.label] : [];
+    // Restore the type only when clearing invalid-template. Legacy-label cleanup
+    // must preserve a maintainer's decision to remove the type label.
+    const added = removed.includes(INVALID) && !api.labels.has(result.template.label) ? [result.template.label] : [];
     if (!removed.length) return;
     core.info("#" + issue.number + " follows its template; updating its labels.");
     const changes = [];

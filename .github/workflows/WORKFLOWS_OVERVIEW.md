@@ -196,7 +196,7 @@ This document provides a quick overview of all available CI/CD workflows in this
 - Reuses a closure explanation after a partial API failure. A changed report or a new reopen gets a fresh explanation.
 - Keeps pending events in the queue for that issue, with cancellation disabled.
 
-There is no `/reopen` bot command, grace period, or nightly sweep. Closed issues have no automatic checks or label cleanup. The old `template-grace` and `invalid-template-again` labels have no effect. The next check of an open issue removes them. This change does not delete repository labels or scan old issues.
+There is no `/reopen` bot command, grace period, or nightly sweep. Closed issues have no automatic checks or label cleanup. The old `template-grace` and `invalid-template-again` labels have no effect. The next check of an open issue removes them and preserves the maintainer's type-label choice. This change does not delete repository labels or scan old issues.
 
 Tests run in `pr-build.yml`. Run them locally with `node --test .github/scripts/issue-workflows.test.cjs`.
 
