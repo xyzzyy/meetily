@@ -73,10 +73,10 @@ test('applies settings loaded after the dialog opens, but keeps a manual choice'
 
 test('lists and restores the downloaded local Nemotron model', async () => {
   respond = command => command.endsWith('_init') ? undefined : command.startsWith('nemotron_')
-    ? [{ name: 'nemotron-mlx', display_name: 'Nemotron 3.5 Transcribe', size_mb: 19300, status: 'Available' }]
+    ? [{ name: 'nemotron-3.5-transcribe-q2_0_l', display_name: 'Nemotron 3.5 Transcribe', size_mb: 17218, status: 'Available' }]
     : models;
-  await show({ provider: 'nemotron', model: 'nemotron-mlx' });
+  await show({ provider: 'nemotron', model: 'nemotron-3.5-transcribe-q2_0_l' });
   await act(async () => { await state.fetchModels(); });
-  expect(state.selectedModelKey).toBe('nemotron:nemotron-mlx');
+  expect(state.selectedModelKey).toBe('nemotron:nemotron-3.5-transcribe-q2_0_l');
   expect(state.availableModels.find(m => m.provider === 'nemotron')?.displayName).toContain('Nemotron 3.5 Transcribe');
 });

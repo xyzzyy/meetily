@@ -18,7 +18,7 @@ mock.module('../../src/components/TranscriptionModelCard', () => ({ ...cards, Tr
 const { NemotronModelManager } = await import('../../src/components/NemotronModelManager');
 let renderer: ReactTestRenderer | undefined;
 const selected = mock(() => {});
-const model = { name: 'nemotron-test', display_name: 'Nemotron', supported: true, status: 'Available' };
+const model = { name: 'nemotron-test', display_name: 'Nemotron', size_mb: 17218, memory: '24 GB memory or more', supported: true, status: 'Available' };
 beforeEach(() => { card = undefined; selected.mockClear(); invoke.mockClear(); toast.error.mockClear(); response = command => command === 'nemotron_get_available_models' ? [model] : undefined; });
 afterEach(async () => { if (renderer) await act(async () => renderer!.unmount()); renderer = undefined; });
 afterAll(() => {
@@ -29,7 +29,7 @@ afterAll(() => {
   mock.module('../../src/components/TranscriptionModelCard', () => cards);
 });
 async function show(selectedModel?: string) { await act(async () => { renderer = create(<NemotronModelManager autoSave selectedModel={selectedModel} onModelSelect={selected} />); }); }
-const deleted = () => invoke.mock.calls.some(([command]) => command === 'nemotron_delete_model');
+const deleted = () => invoke.mock.calls.some(([command, args]: any[]) => command === 'nemotron_delete_model' && args?.model === model.name);
 test('saves the model before reporting a selection, and keeps settings open if save fails', async () => {
   response = command => { if (command === 'api_save_transcript_config') throw new Error('database locked'); return [model]; };
   await show();
@@ -61,4 +61,10 @@ test('keeps the selected model and deletes it only after another model is select
   await show('another-model');
   await act(async () => { await card.onDelete(); });
   expect(deleted()).toBe(true);
+});
+test('downloads the chosen model', async () => {
+  response = command => command === 'nemotron_get_available_models' ? [{ ...model, status: 'Missing' }] : undefined;
+  await show();
+  await act(async () => { await card.onDownload(); });
+  expect(invoke.mock.calls.some(([command, args]: any[]) => command === 'nemotron_download_model' && args?.model === model.name)).toBe(true);
 });

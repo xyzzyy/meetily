@@ -1,97 +1,64 @@
-// Pinned MLX model export. Sizes are bytes; digests are SHA-256.
-pub const ARTIFACTS: &[(&str, u64, &str)] = &[
-    (
-        "config.json",
-        15115,
-        "c178d329abd4d9c36f33c29201f5ee3e6a902fa48144a3d672f245a022ef95cf",
-    ),
-    (
-        "generation_config.json",
-        56,
-        "d48f72c695fa8a239373070371a404a51d778d30018a1768307a2d0209549e43",
-    ),
-    (
-        "model-00001-of-00004.safetensors",
-        5122763825,
-        "72737e0960410385d7f6d92a4d07531a6fd7affee8336e8358289424c1fde9a9",
-    ),
-    (
-        "model-00002-of-00004.safetensors",
-        5296388939,
-        "8de12b1043c12b97088b2232349db22b1c5667cf02af5b4ea03237c6726fddd0",
-    ),
-    (
-        "model-00003-of-00004.safetensors",
-        5296388917,
-        "9a44be756a7301e797013d133d9d32b11af1675b41fc8415a62f6e90c71f9951",
-    ),
-    (
-        "model-00004-of-00004.safetensors",
-        3543096893,
-        "bc90f06481c4f855be9f56f86a99beff2396b368d59591972fd40079d01cd258",
-    ),
-    (
-        "model.safetensors.index.json",
-        161810,
-        "277763e61bd9156072d7a29834a6ca84234f0e59136788a1df308525f90b7142",
-    ),
-    (
-        "tokenizer.json",
-        17078144,
-        "d071004cb4450d3aa31f87aab979cd09ffc99c4e709e6cf72c324346cd948d0d",
-    ),
-    (
-        "tokenizer_config.json",
-        10673,
-        "c4fb466fb2cd94746dbefc5f768ead8e5760a4ff15d89f55e92b7caf49b96aae",
-    ),
+//! Pinned Nemotron files. Sizes are bytes; digests are SHA-256.
+
+/// One downloaded file.
+pub struct Artifact {
+    pub name: &'static str,
+    pub size: u64,
+    pub sha256: &'static str,
+}
+
+/// A decoder the user can choose. Every decoder uses the shared encoder.
+pub struct Decoder {
+    pub id: &'static str,
+    pub display_name: &'static str,
+    pub memory: &'static str,
+    pub file: Artifact,
+}
+
+/// AtomicChat's GGUF conversion for NVIDIA's NeMo-Speech.cpp, at a fixed revision.
+pub const REPO: &str = "AtomicChat/NVIDIA-Nemotron-3.5-Transcribe-30B-A4B-GGUF";
+pub const REVISION: &str = "dbd06c5cad7a2f33c8e06be2fb3ef814dbd9aa59";
+
+/// Speech encoder, speaker branch and CTC timestamp head. The decoder names it,
+/// so the file name must not change.
+pub const ENCODER: Artifact = Artifact {
+    name: "NVIDIA-Nemotron-3.5-Transcribe-30B-A4B-Encoder-F16.gguf",
+    size: 1_670_410_080,
+    sha256: "4221029c8a565c4a80c507ffa760c716e595acf663f9f4273ce69910050e7ba2",
+};
+
+pub const DECODERS: &[Decoder] = &[
+    Decoder {
+        id: "nemotron-3.5-transcribe-q2_0_l",
+        display_name: "Nemotron 3.5 Transcribe · Q2_0_L",
+        memory: "24 GB memory or more",
+        file: Artifact {
+            name: "NVIDIA-Nemotron-3.5-Transcribe-30B-A4B-AD-Q2_0_L.gguf",
+            size: 15_547_824_288,
+            sha256: "67eee66a7bb205867e3f9b7c0944e287fc4d2661db2280030e1c26e6ebdea7b4",
+        },
+    },
+    Decoder {
+        id: "nemotron-3.5-transcribe-iq4_nl",
+        display_name: "Nemotron 3.5 Transcribe · IQ4_NL",
+        memory: "32 GB memory or more",
+        file: Artifact {
+            name: "NVIDIA-Nemotron-3.5-Transcribe-30B-A4B-AD-IQ4_NL.gguf",
+            size: 19_678_656_672,
+            sha256: "0c47d4ab6c783e7606ec03714b354fab0b2052027a7ea1991e7e2d3009c345ad",
+        },
+    },
 ];
 
-// Pinned Qwen3-ForcedAligner export. It adds word times to Nemotron transcripts.
-pub const ALIGNER_ARTIFACTS: &[(&str, u64, &str)] = &[
-    (
-        "chat_template.json",
-        1161,
-        "75a8cfca24f00de72d796fbfed6858fc9614ef3dabd8696684cc3bc03a9c58ff",
-    ),
-    (
-        "config.json",
-        6940,
-        "8dc126e1a4ac001acb02f3a9ca6277c8a20a25485fde293bc99eeab3aedc604d",
-    ),
-    (
-        "generation_config.json",
-        115,
-        "948d089b23bca1d214e768d59c4438365665f52ec6d33678f4062206b3fbbb8c",
-    ),
-    (
-        "merges.txt",
-        1671853,
-        "8831e4f1a044471340f7c0a83d7bd71306a5b867e95fd870f74d0c5308a904d5",
-    ),
-    (
-        "model.safetensors",
-        1271924386,
-        "be19ef8ac4326d032e7673342930b14c2df30bd68c1632493b0f563e30829f91",
-    ),
-    (
-        "model.safetensors.index.json",
-        79108,
-        "766eb50873855eeb4d95ab92def358cfd173bfc8c7aabd8635ababa1edf6db79",
-    ),
-    (
-        "preprocessor_config.json",
-        330,
-        "45e120a4eda2c20c5d7f2ea9354e63536bf35e27aa573fb7cdf78017b378770d",
-    ),
-    (
-        "tokenizer_config.json",
-        12666,
-        "3ab80063f8511deb9566e6ad438d17b7a6277fcffd52d92854112f19d36bd81c",
-    ),
-    (
-        "vocab.json",
-        2776833,
-        "ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910",
-    ),
-];
+/// NVIDIA's NeMo-Speech.cpp Metal build at commit 66d50d9 (nightly of
+/// 2026-10-28). NVIDIA replaces its nightly archive each day, so the verified
+/// archive is mirrored on the fork's releases.
+pub const RUNTIME: Artifact = Artifact {
+    name: "nemo-speech-nightly-66d50d9-macos-aarch64-metal.tar.gz",
+    size: 7_234_179,
+    sha256: "4621515b0050d283d3a2a3f0382631ee7f876eea46608fdb52f7a05f50c958fc",
+};
+pub const RUNTIME_URL: &str = "https://github.com/xyzzyy/meetily/releases/download/nemo-speech-66d50d9/nemo-speech-nightly-66d50d9-macos-aarch64-metal.tar.gz";
+/// The folder inside the archive.
+pub const RUNTIME_DIR: &str = "nemo-speech-nightly-macos-aarch64-metal";
+pub const RUNTIME_VERSION: &str = "0.2.0+nightly.66d50d9";

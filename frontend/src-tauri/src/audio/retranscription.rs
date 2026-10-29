@@ -286,6 +286,24 @@ async fn run_retranscription<R: Runtime>(
         audio_samples.len()
     );
 
+    if use_nemotron && assign_speakers {
+        let (transcripts, analysis) =
+            nemotron_with_speakers(&app, &meeting_id, &folder_path, model.as_deref(), &audio_samples)
+                .await?;
+        return save_retranscription(
+            &app,
+            meeting_id,
+            &folder_path,
+            &audio_path,
+            &original,
+            duration_seconds,
+            language,
+            transcripts,
+            Some(analysis),
+        )
+        .await;
+    }
+
     let speaker_analysis = if assign_speakers {
         emit_progress(
             &app,
@@ -571,6 +589,77 @@ async fn run_retranscription<R: Runtime>(
         transcribed_count, processable_count, avg_confidence
     );
 
+    save_retranscription(
+        &app,
+        meeting_id,
+        &folder_path,
+        &audio_path,
+        &original,
+        duration_seconds,
+        language,
+        all_transcripts,
+        speaker_analysis,
+    )
+    .await
+}
+
+/// Transcribes the whole recording with Nemotron, using the speakers the model
+/// finds. Rows come from its word times and end where the speaker changes.
+async fn nemotron_with_speakers<R: Runtime>(
+    app: &AppHandle<R>,
+    meeting_id: &str,
+    folder_path: &Path,
+    model: Option<&str>,
+    audio_samples: &[f32],
+) -> Result<(
+    Vec<(String, f64, f64)>,
+    crate::diarization::finalize::EnhancementSpeakerAnalysis,
+)> {
+    emit_progress(app, meeting_id, "transcribing", 25, "Loading Nemotron...");
+    let provider = crate::nemotron::configured_provider(app, model)
+        .await
+        .map_err(anyhow::Error::msg)?;
+    let minutes = audio_samples.len() as f64 / 16000.0 / 60.0;
+    emit_progress(
+        app,
+        meeting_id,
+        "transcribing",
+        30,
+        &format!("Transcribing {minutes:.0} min and identifying speakers with Nemotron..."),
+    );
+    let meeting = provider
+        .transcribe_meeting(audio_samples, &RETRANSCRIPTION_CANCELLED)
+        .await;
+    if RETRANSCRIPTION_CANCELLED.load(Ordering::SeqCst) {
+        return Err(anyhow!("Retranscription cancelled"));
+    }
+    let meeting = meeting.map_err(|e| anyhow!("Nemotron transcription failed: {e}"))?;
+    drop(provider);
+    emit_progress(app, meeting_id, "speakers", 75, "Matching speakers...");
+    let analysis = crate::diarization::finalize::prepare_enhancement_from_turns(
+        app,
+        meeting_id,
+        folder_path,
+        &meeting.turns,
+        &RETRANSCRIPTION_CANCELLED,
+    )
+    .await?;
+    Ok((super::enhancement::word_rows(meeting.words, Some(&analysis)), analysis))
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn save_retranscription<R: Runtime>(
+    app: &AppHandle<R>,
+    meeting_id: String,
+    folder_path: &Path,
+    audio_path: &Path,
+    original: &[crate::database::models::Transcript],
+    duration_seconds: f64,
+    language: Option<String>,
+    all_transcripts: Vec<(String, f64, f64)>,
+    speaker_analysis: Option<crate::diarization::finalize::EnhancementSpeakerAnalysis>,
+) -> Result<RetranscriptionResult> {
+    let app = app.clone();
     // Check for cancellation
     if RETRANSCRIPTION_CANCELLED.load(Ordering::SeqCst) {
         return Err(anyhow!("Retranscription cancelled"));
