@@ -455,6 +455,7 @@ impl DiarizationRepository {
             "meeting_diarization_status",
             "diarization_runs",
             "enhancement_publications",
+            "enhancement_reviews",
         ] {
             let query = format!("DELETE FROM {table} WHERE meeting_id = ?");
             sqlx::query(&query)

@@ -26,6 +26,7 @@ import { LANGUAGES } from '@/constants/languages';
 import { languagesForProvider } from '@/lib/funasr';
 import { useTranscriptionModels, ModelOption } from '@/hooks/useTranscriptionModels';
 import Analytics from '@/lib/analytics';
+import { compareTranscriptText } from '@/lib/transcript-comparison';
 
 interface RetranscribeDialogProps {
   open: boolean;
@@ -47,6 +48,16 @@ interface RetranscriptionResult {
   segments_count: number;
   duration_seconds: number;
   language: string | null;
+  warning?: string | null;
+}
+
+interface EnhancementReview {
+  id: string;
+  original: { transcript: string }[];
+  proposed: { text: string }[];
+  warnings: string[];
+  model?: string;
+  applied?: boolean;
 }
 
 interface RetranscriptionError {
@@ -67,6 +78,12 @@ export function RetranscribeDialog({
   const canAssignSpeakers = speakerLabelsEnabled && refinementSupported;
   const [assignSpeakers, setAssignSpeakers] = useState(canAssignSpeakers);
   const [isProcessing, setIsProcessing] = useState(false);
+  const [review, setReview] = useState<EnhancementReview | null>(null);
+  const [isApplying, setIsApplying] = useState(false);
+  const [loadingReview, setLoadingReview] = useState(false);
+  const comparison = useMemo(() => review ? compareTranscriptText(
+    review.original.map(row => row.transcript).join('\n\n'),
+    review.proposed.map(row => row.text).join('\n\n')) : null, [review]);
   const [progress, setProgress] = useState<RetranscriptionProgress | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [selectedLang, setSelectedLang] = useState(selectedLanguage || 'auto');
@@ -143,6 +160,47 @@ export function RetranscribeDialog({
     if (open) setAssignSpeakers(canAssignSpeakers);
   }, [open, canAssignSpeakers]);
 
+  useEffect(() => {
+    if (!open) return;
+    let active = true;
+    setLoadingReview(true);
+    setReview(null);
+    invoke<EnhancementReview | null>('get_enhancement_review', { meetingId })
+      .then(value => { if (active) setReview(value); })
+      .catch(error => { if (active) setError(String(error)); })
+      .finally(() => { if (active) setLoadingReview(false); });
+    return () => { active = false; };
+  }, [open, meetingId]);
+
+  const handleApplyReview = async () => {
+    if (!review || isApplying) return;
+    setIsApplying(true);
+    setError(null);
+    try {
+      const warning = await invoke<string | null>('apply_enhancement_review', { meetingId, reviewId: review.id });
+      if (warning) toast.warning(warning); else toast.success('Proposed transcript applied.');
+      setReview(null);
+      onCompleteRef.current?.();
+      onOpenChangeRef.current(false);
+    } catch (error) { setError(String(error)); }
+    finally { setIsApplying(false); }
+  };
+
+  const handleKeepSaved = async () => {
+    if (!review || isApplying) return;
+    setIsApplying(true);
+    try {
+      if (review.applied) {
+        const warning=await invoke<string | null>('undo_enhancement', {meetingId,reviewId:review.id});
+        if (warning) toast.warning(warning); else toast.success('Enhancement undone.');
+        onCompleteRef.current?.();
+      } else await invoke('discard_enhancement_review', { meetingId, reviewId: review.id });
+      setReview(null);
+      onOpenChangeRef.current(false);
+    } catch (error) { setError(String(error)); }
+    finally { setIsApplying(false); }
+  };
+
   // Listen for retranscription events
   useEffect(() => {
     if (!open) return;
@@ -178,11 +236,14 @@ export function RetranscribeDialog({
             });
 
             setIsProcessing(false);
-            toast.success(
-              `Retranscription complete! ${event.payload.segments_count} segments created.`
-            );
-            onCompleteRef.current?.();
-            onOpenChangeRef.current(false);
+            try {
+              const proposed = await invoke<EnhancementReview | null>('get_enhancement_review', { meetingId });
+              if (event.payload.warning) toast.warning(event.payload.warning);
+              else toast.success('Enhancement applied. Undo is available.');
+              onCompleteRef.current?.();
+              setReview(proposed);
+              if (!proposed) setError('The proposed transcript could not be loaded. The saved transcript was kept.');
+            } catch (error) { setError(String(error)); }
           }
         }
       );
@@ -227,7 +288,7 @@ export function RetranscribeDialog({
       return;
     }
 
-    if (speakerLabelsEnabled && checkingRefinement) return;
+    if (review || loadingReview || (speakerLabelsEnabled && checkingRefinement)) return;
 
     if (loadingModels || !selectedModelDetails) {
       setError(loadingModels ? 'Wait for the models to load.' : 'Select an available transcription model.');
@@ -279,7 +340,7 @@ export function RetranscribeDialog({
 
   // Prevent closing during processing
   const handleOpenChange = (newOpen: boolean) => {
-    if (!newOpen && isProcessing) {
+    if (!newOpen && (isProcessing || isApplying)) {
       return;
     }
     onOpenChange(newOpen);
@@ -300,13 +361,13 @@ export function RetranscribeDialog({
   return (
     <Dialog open={open} onOpenChange={handleOpenChange}>
       <DialogContent
-        className="sm:max-w-[450px]"
+        className={review ? "sm:max-w-5xl" : "sm:max-w-[450px]"}
         onEscapeKeyDown={handleEscapeKeyDown}
         onInteractOutside={handleInteractOutside}
       >
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
-            {isProcessing ? (
+            {review ? (review.applied ? 'Enhancement applied' : 'Enhancement result') : isProcessing ? (
               <>
                 <Loader2 className="h-5 w-5 animate-spin text-blue-600 dark:text-blue-400" />
                 Retranscribing...
@@ -324,16 +385,16 @@ export function RetranscribeDialog({
             )}
           </DialogTitle>
           <DialogDescription>
-            {isProcessing
+            {review ? (review.applied ? 'Compare the changes or undo this enhancement.' : 'This result was not applied. Your saved transcript was kept.') : isProcessing
               ? progress?.message || 'Processing audio...'
               : error
                 ? 'The enhancement could not finish'
-                : 'Create new text and timing from the recording. The saved transcript stays unchanged until enhancement succeeds.'}
+                : 'Improve text and timing from the recording. The result is applied automatically, and Undo is available.'}
           </DialogDescription>
         </DialogHeader>
 
         <div className="space-y-4 py-4">
-          {!isProcessing && !error && (
+          {!isProcessing && !error && !review && (
             !isParakeetModel ? (
               <div className="space-y-3">
                 <div className="flex items-center gap-2">
@@ -369,10 +430,10 @@ export function RetranscribeDialog({
             )
           )}
 
-          {!isProcessing && !error && modelNotice && (
+          {!isProcessing && !error && !review && modelNotice && (
             <p className="text-sm text-amber-700 dark:text-amber-300" role="status">{modelNotice}</p>
           )}
-          {!isProcessing && !error && availableModels.length > 0 && (
+          {!isProcessing && !error && !review && availableModels.length > 0 && (
             <div className="space-y-3">
               <div className="flex items-center gap-2">
                 <Cpu className="h-4 w-4 text-muted-foreground" />
@@ -396,7 +457,7 @@ export function RetranscribeDialog({
             </div>
           )}
 
-          {!isProcessing && !error && (
+          {!isProcessing && !error && !review && (
             <div className="flex items-center justify-between gap-4 rounded-md border px-3 py-2">
               <div>
                 <label htmlFor="enhance-assign-speakers" className="text-sm font-medium">Assign speakers</label>
@@ -429,6 +490,23 @@ export function RetranscribeDialog({
             </div>
           )}
 
+          {review && comparison && (
+            <>
+              {review.model && <p className="text-sm">Model: {review.model}</p>}
+              {review.warnings.map(warning => <p key={warning} className="text-sm text-amber-700 dark:text-amber-300">{warning}</p>)}
+              <div className="grid max-h-[55vh] grid-cols-1 gap-4 overflow-y-auto md:grid-cols-2">
+                <section aria-label="Previous transcript" className="rounded-md border p-3">
+                  <h3 className="mb-3 font-medium">Previous transcript</h3>
+                  <p className="whitespace-pre-wrap text-sm">{comparison.before.map((part, i) => <span key={i} className={part.changed ? 'bg-red-100 text-red-900 dark:bg-red-900/40 dark:text-red-100' : undefined}>{part.text}</span>)}</p>
+                </section>
+                <section aria-label="Enhanced transcript" className="rounded-md border p-3">
+                  <h3 className="mb-3 font-medium">Enhanced transcript</h3>
+                  <p className="whitespace-pre-wrap text-sm">{comparison.after.map((part, i) => <span key={i} className={part.changed ? 'bg-green-100 text-green-900 dark:bg-green-900/40 dark:text-green-100' : undefined}>{part.text}</span>)}</p>
+                </section>
+              </div>
+            </>
+          )}
+
           {error && (
             <div className="bg-red-50 dark:bg-red-500/10 border border-red-200 dark:border-red-500/30 rounded-lg p-3">
               <p className="text-sm text-red-800 dark:text-red-200">{error}</p>
@@ -437,7 +515,16 @@ export function RetranscribeDialog({
         </div>
 
         <DialogFooter>
-          {!isProcessing && !error && (
+          {review && (
+            <>
+              <Button variant="outline" disabled={isApplying} onClick={handleKeepSaved}>{review.applied ? 'Undo enhancement' : 'Keep saved transcript'}</Button>
+              {review.applied && <Button variant="outline" disabled={isApplying} onClick={() => {setReview(null);setError(null);}}>Enhance again</Button>}
+              {review.applied
+                ? <Button disabled={isApplying} onClick={() => onOpenChange(false)}>Done</Button>
+                : <Button disabled={isApplying} onClick={handleApplyReview}>{isApplying ? 'Applying...' : 'Apply proposed transcript'}</Button>}
+            </>
+          )}
+          {!isProcessing && !error && !review && (
             <>
               <Button variant="outline" onClick={() => onOpenChange(false)}>
                 Cancel
@@ -445,7 +532,7 @@ export function RetranscribeDialog({
               <Button
                 onClick={handleStartRetranscription}
                 className="bg-blue-600 hover:bg-blue-700"
-                disabled={!meetingFolderPath || loadingModels || !selectedModelDetails || (speakerLabelsEnabled && checkingRefinement)}
+                disabled={loadingReview || !meetingFolderPath || loadingModels || !selectedModelDetails || (speakerLabelsEnabled && checkingRefinement)}
               >
                 <RefreshCw className="h-4 w-4 mr-2" />
                 Start enhancement
@@ -458,7 +545,7 @@ export function RetranscribeDialog({
               Cancel
             </Button>
           )}
-          {error && (
+          {error && !review && (
             <>
               <Button variant="outline" onClick={() => onOpenChange(false)}>
                 Close

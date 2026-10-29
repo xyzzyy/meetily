@@ -90,6 +90,13 @@ impl ContinuousVadProcessor {
     /// Process incoming audio samples and return any complete speech segments
     /// Handles resampling from input sample rate to 16kHz for VAD processing
     pub fn process_audio(&mut self, samples: &[f32]) -> Result<Vec<SpeechSegment>> {
+        self.process_audio_with_observer(samples, |_| {})
+    }
+
+    /// Expose the exact converted samples used by VAD and the recognizer.
+    pub(crate) fn process_audio_with_observer(
+        &mut self, samples: &[f32], observe: impl FnOnce(&[f32]),
+    ) -> Result<Vec<SpeechSegment>> {
         // Resample to 16kHz if needed
         let resampled_audio = if self.sample_rate == 16000 {
             samples.to_vec()
@@ -97,6 +104,7 @@ impl ContinuousVadProcessor {
             self.resample_to_16k(samples)?
         };
 
+        observe(&resampled_audio);
         self.buffer.extend_from_slice(&resampled_audio);
         let mut completed_segments = Vec::new();
 

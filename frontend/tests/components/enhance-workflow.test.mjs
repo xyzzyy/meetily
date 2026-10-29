@@ -13,7 +13,7 @@ function visit(node) {
   ts.forEachChild(node, visit);
 }
 visit(ast);
-function dialog(provider, loading = false, selected = true, supported = true, checking = false) {
+function dialog(provider, loading = false, selected = true, supported = true, checking = false, review = null) {
   let cursor = 0;
   const states = new Map();
   const calls = [];
@@ -21,7 +21,7 @@ function dialog(provider, loading = false, selected = true, supported = true, ch
   const jsx = (type, props) => ({ type, props: props || {} });
   const hooks = { useState(initial) {
     const name = names[cursor++];
-    if (!states.has(name)) states.set(name, initial);
+    if (!states.has(name)) states.set(name, name === 'review' ? review : initial);
     return [states.get(name), value => states.set(name, typeof value === 'function' ? value(states.get(name)) : value)];
   }, useEffect() {}, useRef: value => ({ current: value }), useMemo: fn => fn() };
   const require = name => {
@@ -34,6 +34,13 @@ function dialog(provider, loading = false, selected = true, supported = true, ch
       selectedModelKey: selected ? `${provider}:${model.name}` : '', loadingModels: loading,
       setSelectedModelKey() {}, fetchModels() {}, resetSelection() {} }) };
     if (name === '@/lib/analytics') return { default: { track: async () => {}, trackError: async () => {} } };
+    if (name === '@/lib/transcript-comparison') {
+      const helper = { exports: {} };
+      const helperSource = fs.readFileSync(new URL('../../src/lib/transcript-comparison.ts', import.meta.url), 'utf8');
+      const compiledHelper = ts.transpileModule(helperSource, { compilerOptions: { module: ts.ModuleKind.CommonJS } });
+      vm.runInNewContext(compiledHelper.outputText, { module: helper, exports: helper.exports });
+      return helper.exports;
+    }
     if (name === '@/lib/funasr') {
       const helper = { exports: {} };
       const helperSource = fs.readFileSync(new URL('../../src/lib/funasr.ts', import.meta.url), 'utf8');
@@ -92,3 +99,31 @@ for (const [loading, selected] of [[true, true], [false, false]]) {
   assert.equal(instance.calls.length, 0);
 }
 console.log('Enhance workflow: all checks passed');
+
+// A completed run is reviewed before any saved text is replaced.
+for (const action of ['Keep saved transcript', 'Apply proposed transcript']) {
+  const instance = dialog('whisper', false, true, true, false, {
+    id: 'review-1', original: [{ transcript: 'Andrew feel free to drop or stay' }],
+    proposed: [{ text: 'Enter feel free to drop' }], warnings: ['Check changed wording.'],
+  });
+  assert.equal(start(instance.tree), undefined, 'review must not start another model run');
+  const button = nodes(instance.tree).find(node => node.type === 'Button' && node.props.children === action);
+  assert.ok(button, action);
+  await button.props.onClick();
+  assert.equal(instance.calls[0].command, action === 'Keep saved transcript' ? 'discard_enhancement_review' : 'apply_enhancement_review');
+  assert.equal(instance.calls[0].args.reviewId, 'review-1');
+  assert.equal(instance.calls.length, 1);
+}
+
+{
+  const instance = dialog('whisper', false, true, true, false, {
+    id: 'applied-1', applied: true, original: [{ transcript: 'Andrew' }],
+    proposed: [{ text: 'Enter' }], warnings: [],
+  });
+  const undo = nodes(instance.tree).find(node => node.type === 'Button' && node.props.children === 'Undo enhancement');
+  assert.ok(undo, 'an applied result needs a visible Undo action');
+  assert.equal(nodes(instance.tree).some(node => node.type === 'Button' && node.props.children === 'Apply proposed transcript'), false);
+  await undo.props.onClick();
+  assert.equal(instance.calls[0].command, 'undo_enhancement');
+  assert.equal(instance.calls[0].args.reviewId, 'applied-1');
+}

@@ -5,3 +5,6 @@
 pub const AUDIO_EXTENSIONS: &[&str] = &[
     "mp4", "m4a", "wav", "mp3", "flac", "ogg", "aac", "mkv", "webm", "wma"
 ];
+
+/// Capture mixing windows also define the live resampler frame boundaries.
+pub(crate) const MIXING_WINDOW_MS: usize = 600;

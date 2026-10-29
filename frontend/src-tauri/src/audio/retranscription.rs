@@ -2,7 +2,6 @@
 
 use super::common::{create_transcript_segments, write_transcripts_json};
 use super::constants::AUDIO_EXTENSIONS;
-use crate::audio::decoder::decode_audio_file;
 use crate::audio::vad::get_speech_chunks_with_progress;
 use crate::config::{DEFAULT_PARAKEET_MODEL, DEFAULT_WHISPER_MODEL};
 use crate::parakeet_engine::ParakeetEngine;
@@ -45,23 +44,21 @@ impl Drop for RetranscriptionGuard {
     }
 }
 
-/// VAD redemption time in milliseconds - bridges natural pauses in speech
-/// Batch processing needs longer redemption (2000ms) than the live pipeline
-/// because it has no latency requirement, and short redemption fragments
-/// speech at every breath. Short Whisper inputs are zero-padded to its 30s
-/// window and invite hallucinated boilerplate (see pipeline.rs).
+/// Whisper finds short speech boundaries, then groups nearby spans for model
+/// context. Other engines keep the established longer pause window.
 const VAD_REDEMPTION_TIME_MS: u32 = 2000;
+const WHISPER_VAD_REDEMPTION_TIME_MS: u32 = 500;
 
-/// Redemption time when Enhance also assigns speakers. Short pauses are kept
-/// apart so a row can end where the speaker changes. Parakeet row boundaries
-/// come from its token times; Whisper uses these shorter spans as a fallback.
-const SPEAKER_VAD_REDEMPTION_TIME_MS: u32 = 500;
+fn vad_redemption_time(engine: super::common::BatchEngine) -> u32 {
+    if engine == super::common::BatchEngine::Whisper {
+        WHISPER_VAD_REDEMPTION_TIME_MS
+    } else {
+        VAD_REDEMPTION_TIME_MS
+    }
+}
 
 /// Longest input sent to the engine in one piece (16 kHz samples).
 const MAX_SEGMENT_SAMPLES: usize = 25 * 16000;
-
-/// Whisper input limit when assigning speakers, so turns aren't merged.
-const SPEAKER_WHISPER_MAX_SEGMENT_SAMPLES: usize = 8 * 16000;
 
 /// Progress update emitted during retranscription
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -79,6 +76,8 @@ pub struct RetranscriptionResult {
     pub segments_count: usize,
     pub duration_seconds: f64,
     pub language: Option<String>,
+    pub review_id: String,
+    pub warning: Option<String>,
 }
 
 /// Error during retranscription
@@ -159,7 +158,9 @@ pub async fn start_retranscription<R: Runtime>(
                     "meeting_id": res.meeting_id,
                     "segments_count": res.segments_count,
                     "duration_seconds": res.duration_seconds,
-                    "language": res.language
+                    "language": res.language,
+                    "review_id": res.review_id,
+                    "warning": res.warning
                 }),
             );
         }
@@ -253,9 +254,11 @@ async fn run_retranscription<R: Runtime>(
 
     // Decode the audio file (CPU-intensive, run in blocking task)
     let path_for_decode = audio_path.clone();
-    let decoded = tokio::task::spawn_blocking(move || decode_audio_file(&path_for_decode))
-        .await
-        .map_err(|e| anyhow!("Decode task panicked: {}", e))??;
+    let decoded = tokio::task::spawn_blocking(move || {
+        super::enhancement::decode_enhancement_audio(&path_for_decode)
+    })
+    .await
+    .map_err(|e| anyhow!("Decode task panicked: {}", e))??;
     let duration_seconds = decoded.duration_seconds;
 
     info!(
@@ -276,15 +279,6 @@ async fn run_retranscription<R: Runtime>(
         return Err(anyhow!("Retranscription cancelled"));
     }
 
-    // Convert to 16kHz mono format (CPU-intensive, run in blocking task)
-    let audio_samples = tokio::task::spawn_blocking(move || decoded.to_whisper_format())
-        .await
-        .map_err(|e| anyhow!("Resample task panicked: {}", e))?;
-    info!(
-        "Converted to 16kHz mono format: {} samples",
-        audio_samples.len()
-    );
-
     let speaker_analysis = if assign_speakers {
         emit_progress(
             &app,
@@ -294,8 +288,13 @@ async fn run_retranscription<R: Runtime>(
             "Identifying speakers in the recording...",
         );
         Some(
-            crate::diarization::finalize::prepare_enhancement(&app, &meeting_id, &folder_path, &RETRANSCRIPTION_CANCELLED)
-                .await?,
+            crate::diarization::finalize::prepare_enhancement(
+                &app,
+                &meeting_id,
+                &folder_path,
+                &RETRANSCRIPTION_CANCELLED,
+            )
+            .await?,
         )
     } else {
         None
@@ -314,33 +313,45 @@ async fn run_retranscription<R: Runtime>(
     let app_for_vad = app.clone();
     let meeting_id_for_vad = meeting_id.clone();
 
-    let redemption_time_ms = if assign_speakers {
-        SPEAKER_VAD_REDEMPTION_TIME_MS
-    } else {
-        VAD_REDEMPTION_TIME_MS
-    };
+    // Speaker estimates describe output labels, not safe cuts in the audio.
+    // Keep the same speech context with or without speaker assignment.
+    let redemption_time_ms = vad_redemption_time(batch_engine);
+    let known_speech = original.clone();
     let speech_segments = tokio::task::spawn_blocking(move || {
-        get_speech_chunks_with_progress(
-            &audio_samples,
-            redemption_time_ms,
-            |vad_progress, segments_found| {
-                // Map VAD progress (0-100) to overall progress (20-25)
-                let overall_progress = 20 + (vad_progress as f32 * 0.05) as u32;
-                emit_progress(
-                    &app_for_vad,
-                    &meeting_id_for_vad,
-                    "vad",
-                    overall_progress,
-                    &format!(
-                        "Detecting speech segments... {}% ({} found)",
-                        vad_progress, segments_found
-                    ),
-                );
-
-                // Return false to cancel if cancellation requested
-                !RETRANSCRIPTION_CANCELLED.load(Ordering::SeqCst)
-            },
-        )
+        let on_progress = |vad_progress, segments_found| {
+            let overall_progress = 20 + (vad_progress as f32 * 0.05) as u32;
+            emit_progress(
+                &app_for_vad,
+                &meeting_id_for_vad,
+                "vad",
+                overall_progress,
+                &format!(
+                    "Detecting speech segments... {}% ({} found)",
+                    vad_progress, segments_found
+                ),
+            );
+            !RETRANSCRIPTION_CANCELLED.load(Ordering::SeqCst)
+        };
+        if batch_engine == super::common::BatchEngine::Whisper {
+            super::enhancement::whisper_recognition_inputs(
+                &decoded,
+                redemption_time_ms,
+                &known_speech,
+                on_progress,
+            )
+        } else {
+            get_speech_chunks_with_progress(
+                &decoded.to_whisper_format(),
+                redemption_time_ms,
+                on_progress,
+            )
+            .map(|segments| {
+                segments
+                    .into_iter()
+                    .map(super::enhancement::RecognitionInput::mixed)
+                    .collect()
+            })
+        }
     })
     .await
     .map_err(|e| anyhow!("VAD task panicked: {}", e))?
@@ -413,35 +424,26 @@ async fn run_retranscription<R: Runtime>(
         None
     };
     let funasr_provider = if batch_engine == super::common::BatchEngine::FunAsr {
-        let engine = super::common::get_or_init_funasr(&app, model.as_deref(), language.as_deref()).await?;
+        let engine =
+            super::common::get_or_init_funasr(&app, model.as_deref(), language.as_deref()).await?;
         Some(crate::audio::transcription::FunAsrProvider::new(engine))
     } else {
         None
     };
 
-    // Keep input context for Parakeet, but use its token times for output rows.
-    // Whisper and FUN-ASR have no word timing on this path. When assigning
-    // speakers they get shorter, turn-aware input. Otherwise keep longer input.
-    let max_samples = if assign_speakers && !use_parakeet {
-        SPEAKER_WHISPER_MAX_SEGMENT_SAMPLES
-    } else {
-        MAX_SEGMENT_SAMPLES
-    };
-    let turns = if use_parakeet {
-        Vec::new()
-    } else {
-        speaker_analysis
-            .as_ref()
-            .map(|analysis| analysis.turn_boundaries())
-            .unwrap_or_default()
-    };
+    // Transcribe complete speech spans before assigning speakers. A change on
+    // one track can occur during speech on the other track; cutting the mixed
+    // audio at that estimate can remove word context on both sides of the cut.
     let mut processable_segments = Vec::new();
     for segment in &speech_segments {
-        processable_segments.extend(super::enhancement::input_chunks(
-            segment,
-            max_samples,
-            &turns,
-        ));
+        processable_segments.extend(
+            super::enhancement::input_chunks(segment, MAX_SEGMENT_SAMPLES)
+                .into_iter()
+                .map(|chunk| super::enhancement::RecognitionInput {
+                    segment: chunk,
+                    source: segment.source.clone(),
+                }),
+        );
     }
 
     let processable_count = processable_segments.len();
@@ -453,6 +455,7 @@ async fn run_retranscription<R: Runtime>(
     // Process each speech segment with progress updates
     let mut all_transcripts: Vec<(String, f64, f64)> = Vec::new(); // (text, start_ms, end_ms)
     let mut total_confidence = 0.0f32;
+    let mut transcript_sources = Vec::new();
 
     for (i, segment) in processable_segments.iter().enumerate() {
         // Check for cancellation before each segment
@@ -492,12 +495,16 @@ async fn run_retranscription<R: Runtime>(
                 .transcribe(segment.samples.clone(), language.clone())
                 .await
                 .map_err(|e| anyhow!("FUN-ASR transcription failed on segment {}: {}", i, e))?;
-            // FUN-ASR has no word times. Keep the VAD and speaker-turn spans
+            // FUN-ASR has no word times. Keep the complete VAD spans
             // selected above, without changing Parakeet's token-timed rows.
             let rows = if result.text.trim().is_empty() {
                 Vec::new()
             } else {
-                vec![(result.text, segment.start_timestamp_ms, segment.end_timestamp_ms)]
+                vec![(
+                    result.text,
+                    segment.start_timestamp_ms,
+                    segment.end_timestamp_ms,
+                )]
             };
             (rows, 0.9f32)
         } else if use_parakeet {
@@ -524,7 +531,7 @@ async fn run_retranscription<R: Runtime>(
             let (text, confidence, _) = whisper_engine
                 .as_ref()
                 .unwrap()
-                .transcribe_audio_with_confidence(segment.samples.clone(), language.clone())
+                .transcribe_batch_audio_with_confidence(segment.samples.clone(), language.clone())
                 .await
                 .map_err(|error| anyhow!("Whisper transcription failed on segment {i}: {error}"))?;
             let rows = if text.trim().is_empty() {
@@ -535,8 +542,15 @@ async fn run_retranscription<R: Runtime>(
             (rows, confidence)
         };
         total_confidence += confidence * rows.len() as f32;
+        transcript_sources.extend(std::iter::repeat_n(segment.source.clone(), rows.len()));
         all_transcripts.extend(rows);
     }
+    let mut ordered: Vec<_> = all_transcripts
+        .into_iter()
+        .zip(transcript_sources)
+        .collect();
+    ordered.sort_by(|a, b| a.0 .1.total_cmp(&b.0 .1).then(a.1.cmp(&b.1)));
+    let (all_transcripts, transcript_sources): (Vec<_>, Vec<_>) = ordered.into_iter().unzip();
 
     let transcribed_count = all_transcripts.len();
     let avg_confidence = if transcribed_count > 0 {
@@ -562,62 +576,52 @@ async fn run_retranscription<R: Runtime>(
 
     let rows = super::enhancement::transcript_rows(&meeting_id, &segments);
     let labels = speaker_analysis
-        .map(|analysis| analysis.label(&rows))
+        .map(|analysis| analysis.label_with_sources(&rows, &transcript_sources))
         .transpose()?;
     let state = app.state::<AppState>();
-    super::enhancement::publish(
+    let effective_model = if let Some(engine) = whisper_engine.as_ref() {
+        engine.get_current_model().await
+    } else if let Some(engine) = parakeet_engine.as_ref() {
+        engine.get_current_model().await
+    } else {
+        model.clone()
+    };
+    let review_id = super::enhancement_review::stage(
         state.db_manager.pool(),
         state.speaker_store.pool(),
-        &meeting_id,
-        &original,
-        &segments,
-        labels.as_ref(),
-        &RETRANSCRIPTION_CANCELLED,
+        super::enhancement_review::Proposal {
+            meeting_id: meeting_id.clone(),
+            folder: meeting_folder_path,
+            original,
+            segments,
+            labels,
+            duration_seconds,
+            language: language.clone(),
+            provider,
+            model: effective_model,
+            core_backup: Vec::new(),
+            speaker_backup: String::new(),
+            publication_rows: String::new(),
+        },
     )
     .await?;
-    let _ = app.emit("diarization-progress", serde_json::json!({
-        "meetingId": meeting_id, "status": if labels.is_some() { "completed" } else { "none" }, "progress": if labels.is_some() {100} else {0},
-    }));
-
-    // Write updated transcripts.json and metadata.json to the meeting folder
-    emit_progress(
-        &app,
-        &meeting_id,
-        "saving",
-        90,
-        "Writing transcript files...",
-    );
-
-    if let Err(e) = write_transcripts_json(&folder_path, &segments) {
-        warn!("Failed to write transcripts.json: {}", e);
-    }
-
-    // Find audio filename for metadata
-    let audio_filename = audio_path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("audio.mp4")
-        .to_string();
-
-    if let Err(e) =
-        write_retranscription_metadata(&folder_path, &meeting_id, duration_seconds, &audio_filename)
-    {
-        warn!("Failed to update metadata.json: {}", e);
-    }
-
+    let warning = apply_review_content(&app, &meeting_id, &review_id, &RETRANSCRIPTION_CANCELLED)
+        .await
+        .map_err(|e| anyhow!(e))?;
     emit_progress(
         &app,
         &meeting_id,
         "complete",
         100,
-        "Retranscription complete",
+        "Enhancement applied. Undo is available.",
     );
-
     Ok(RetranscriptionResult {
         meeting_id,
-        segments_count: segments.len(),
+        segments_count: rows.len(),
         duration_seconds,
         language,
+        review_id,
+        warning,
     })
 }
 
@@ -976,6 +980,109 @@ pub async fn start_retranscription_command<R: Runtime>(
 }
 
 #[tauri::command]
+pub async fn get_enhancement_review<R: Runtime>(
+    app: AppHandle<R>,
+    meeting_id: String,
+) -> Result<Option<super::enhancement_review::ReviewPreview>, String> {
+    super::enhancement_review::latest(app.state::<AppState>().speaker_store.pool(), &meeting_id)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn discard_enhancement_review<R: Runtime>(
+    app: AppHandle<R>,
+    meeting_id: String,
+    review_id: String,
+) -> Result<(), String> {
+    let _edit = crate::diarization::operations::try_meeting_edit(&meeting_id)?;
+    super::enhancement_review::discard(
+        app.state::<AppState>().speaker_store.pool(),
+        &meeting_id,
+        &review_id,
+    )
+    .await
+    .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn apply_enhancement_review<R: Runtime>(
+    app: AppHandle<R>,
+    meeting_id: String,
+    review_id: String,
+) -> Result<Option<String>, String> {
+    let _edit = crate::diarization::operations::try_meeting_edit(&meeting_id)?;
+    apply_review_content(&app, &meeting_id, &review_id, &AtomicBool::new(false)).await
+}
+
+async fn apply_review_content<R: Runtime>(
+    app: &AppHandle<R>,
+    meeting_id: &str,
+    review_id: &str,
+    cancelled: &AtomicBool,
+) -> Result<Option<String>, String> {
+    let state = app.state::<AppState>();
+    let proposal =
+        super::enhancement_review::load(state.speaker_store.pool(), &meeting_id, &review_id)
+            .await
+            .map_err(|e| e.to_string())?;
+    let speaker_snapshot =
+        super::enhancement_review::speaker_snapshot(state.speaker_store.pool(), &meeting_id)
+            .await
+            .map_err(|e| e.to_string())?;
+    if speaker_snapshot != proposal.speaker_backup {
+        return Err("Speaker labels changed while Enhance was running. The saved transcript was kept. Run Enhance again.".into());
+    }
+    super::enhancement::publish(
+        state.db_manager.pool(),
+        state.speaker_store.pool(),
+        &meeting_id,
+        &proposal.original,
+        &proposal.segments,
+        proposal.labels.as_ref(),
+        cancelled,
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+    let folder = PathBuf::from(&proposal.folder);
+    let transcript_export = write_transcripts_json(&folder, &proposal.segments);
+    let audio = find_audio_file(&folder)
+        .ok()
+        .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+        .unwrap_or_else(|| "audio.mp4".into());
+    let metadata_export =
+        write_retranscription_metadata(&folder, &meeting_id, proposal.duration_seconds, &audio);
+    if transcript_export.is_err() || metadata_export.is_err() {
+        return Ok(Some("The transcript is saved in the app, but its recording folder export could not be updated.".into()));
+    }
+    Ok(None)
+}
+
+#[tauri::command]
+pub async fn undo_enhancement<R: Runtime>(
+    app: AppHandle<R>,
+    meeting_id: String,
+    review_id: String,
+) -> Result<Option<String>, String> {
+    let _edit = crate::diarization::operations::try_meeting_edit(&meeting_id)?;
+    let state = app.state::<AppState>();
+    let proposal = super::enhancement_review::undo(
+        state.db_manager.pool(),
+        state.speaker_store.pool(),
+        &meeting_id,
+        &review_id,
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+    let segments =
+        super::enhancement_review::original_segments(&proposal).map_err(|e| e.to_string())?;
+    if write_transcripts_json(&PathBuf::from(&proposal.folder), &segments).is_err() {
+        return Ok(Some("Undo restored the transcript in the app, but its recording folder export could not be updated.".into()));
+    }
+    Ok(None)
+}
+
+#[tauri::command]
 pub async fn cancel_retranscription_command() -> Result<(), String> {
     if !is_retranscription_in_progress() {
         return Err("No retranscription in progress".to_string());
@@ -1085,10 +1192,19 @@ mod tests {
 
     #[test]
     fn test_vad_redemption_time_constant() {
-        // Batch processing uses 2000ms to bridge natural pauses in full-file VAD.
-        // Only speaker assignment keeps short pauses apart.
-        assert_eq!(VAD_REDEMPTION_TIME_MS, 2000);
-        assert_eq!(SPEAKER_VAD_REDEMPTION_TIME_MS, 500);
+        // Short Whisper spans are joined by speech_context after detection.
+        assert_eq!(
+            vad_redemption_time(super::super::common::BatchEngine::Whisper),
+            500
+        );
+        assert_eq!(
+            vad_redemption_time(super::super::common::BatchEngine::Parakeet),
+            2000
+        );
+        assert_eq!(
+            vad_redemption_time(super::super::common::BatchEngine::FunAsr),
+            2000
+        );
         assert_eq!(MAX_SEGMENT_SAMPLES, 25 * 16000);
     }
 
@@ -1209,5 +1325,177 @@ mod tests {
         assert_eq!(metadata["summary_language"], "fr");
         assert_eq!(metadata["custom_field"], "preserve me");
         assert!(metadata.get("detected_summary_language").is_none());
+    }
+    /// Local full-recording replay. Supply private audio and model paths in the
+    /// environment; the test does not download models or package meeting audio.
+    /// MEETILY_BENCHMARK_BASELINE can supply saved live JSON for quiet-speech regions.
+    #[tokio::test]
+    #[ignore = "requires MEETILY_BENCHMARK_AUDIO, MEETILY_BENCHMARK_MODELS, and MEETILY_BENCHMARK_OUTPUT"]
+    async fn replay_whole_recording_for_quality_comparison() {
+        use std::io::Write;
+        let audio = PathBuf::from(
+            std::env::var("MEETILY_BENCHMARK_AUDIO").expect("set the source audio path"),
+        );
+        let models = PathBuf::from(
+            std::env::var("MEETILY_BENCHMARK_MODELS").expect("set the read-only model directory"),
+        );
+        let output = PathBuf::from(
+            std::env::var("MEETILY_BENCHMARK_OUTPUT").expect("set a new output path"),
+        );
+        let model = std::env::var("MEETILY_BENCHMARK_MODEL").unwrap_or_else(|_| "large-v3".into());
+        let language = std::env::var("MEETILY_BENCHMARK_LANGUAGE")
+            .ok()
+            .filter(|s| s != "auto");
+        let owned = tempfile::tempdir().unwrap();
+        let engine = WhisperEngine::new_with_models_dir(Some(owned.path().to_path_buf()))
+            .unwrap()
+            .with_shared_models_dir(Some(models));
+        engine.discover_models().await.unwrap();
+        engine.load_model(&model).await.unwrap();
+        let decoded = super::super::enhancement::decode_enhancement_audio(&audio).unwrap();
+        let baseline:Vec<crate::database::models::Transcript>=std::env::var("MEETILY_BENCHMARK_BASELINE").ok().map(|path| {
+            let source:serde_json::Value=serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+            source["segments"].as_array().unwrap().iter().enumerate().map(|(i,row)| {
+                serde_json::from_value(serde_json::json!({"id":format!("baseline-{i}"),"meeting_id":"benchmark",
+                    "transcript":row["text"],"timestamp":"","audio_start_time":row["audio_start_time"],
+                    "audio_end_time":row["audio_end_time"],"duration":row["duration"]})).unwrap()
+            }).collect()
+        }).unwrap_or_default();
+        let contexts = super::super::enhancement::whisper_recognition_inputs(
+            &decoded,
+            vad_redemption_time(super::super::common::BatchEngine::Whisper),
+            &baseline,
+            |_, _| true,
+        )
+        .unwrap();
+        let chunks: Vec<_> = contexts
+            .iter()
+            .flat_map(|s| {
+                super::super::enhancement::input_chunks(s, MAX_SEGMENT_SAMPLES)
+                    .into_iter()
+                    .map(|segment| super::super::enhancement::RecognitionInput {
+                        segment,
+                        source: s.source.clone(),
+                    })
+            })
+            .collect();
+        let mut rows = Vec::new();
+        let mut sources = Vec::new();
+        let live_settings = std::env::var("MEETILY_BENCHMARK_LIVE_SETTINGS").as_deref() == Ok("1");
+        for chunk in chunks {
+            let (text, _, _) = if live_settings {
+                engine
+                    .transcribe_audio_with_confidence(chunk.samples.clone(), language.clone())
+                    .await
+                    .unwrap()
+            } else {
+                engine
+                    .transcribe_batch_audio_with_confidence(chunk.samples.clone(), language.clone())
+                    .await
+                    .unwrap()
+            };
+            if !text.trim().is_empty() {
+                rows.push((text, chunk.start_timestamp_ms, chunk.end_timestamp_ms));
+                sources.push(chunk.source);
+            }
+        }
+        let mut ordered: Vec<_> = rows.into_iter().zip(sources).collect();
+        ordered.sort_by(|a, b| a.0 .1.total_cmp(&b.0 .1).then(a.1.cmp(&b.1)));
+        let (rows, sources): (Vec<_>, Vec<_>) = ordered.into_iter().unzip();
+        let segments = create_transcript_segments(&rows);
+        assert!(!segments.is_empty(), "the replay must produce text");
+        let report = serde_json::json!({"provider":"whisper","model":model,"language":language,
+            "duration_seconds":decoded.duration_seconds,"source_sample_rate":decoded.sample_rate,"preprocessing":"live-compatible","live_settings":live_settings,"segments":segments,"sources":sources,"baseline":baseline});
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&output)
+            .unwrap();
+        file.write_all(&serde_json::to_vec_pretty(&report).unwrap())
+            .unwrap();
+        if let Ok(expected) = std::env::var("MEETILY_BENCHMARK_EXPECT_TEXT") {
+            let normalize = |text: &str| {
+                text.to_lowercase()
+                    .chars()
+                    .map(|c| if c.is_alphanumeric() { c } else { ' ' })
+                    .collect::<String>()
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            };
+            let actual = report["segments"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|r| r["text"].as_str().unwrap())
+                .collect::<Vec<_>>()
+                .join(" ");
+            assert!(
+                normalize(&actual).contains(&normalize(&expected)),
+                "the checked phrase was not retained; inspect {}",
+                output.display()
+            );
+        }
+    }
+
+    /// Controlled word-error diagnosis through the loaded application engine.
+    #[tokio::test]
+    #[ignore = "requires MEETILY_DIAGNOSTIC_CASES, MEETILY_BENCHMARK_MODELS, and MEETILY_BENCHMARK_OUTPUT"]
+    async fn diagnose_recognition_on_fixed_audio() {
+        use sha2::Digest;
+        use std::io::Write;
+        #[derive(Deserialize)]
+        struct Case {
+            name: String,
+            path: PathBuf,
+            start: f64,
+            end: f64,
+            #[serde(default)]
+            language: Option<String>,
+            #[serde(default)]
+            live_settings: bool,
+            #[serde(default)]
+            options: crate::whisper_engine::whisper_engine::DiagnosticDecodeOptions,
+        }
+        let cases: Vec<Case> = serde_json::from_slice(
+            &std::fs::read(std::env::var("MEETILY_DIAGNOSTIC_CASES").unwrap()).unwrap(),
+        )
+        .unwrap();
+        let owned = tempfile::tempdir().unwrap();
+        let engine = WhisperEngine::new_with_models_dir(Some(owned.path().to_path_buf()))
+            .unwrap()
+            .with_shared_models_dir(Some(PathBuf::from(
+                std::env::var("MEETILY_BENCHMARK_MODELS").unwrap(),
+            )));
+        engine.discover_models().await.unwrap();
+        engine.load_model("large-v3").await.unwrap();
+        let mut output = Vec::new();
+        for case in cases {
+            let bytes = std::fs::read(&case.path).unwrap();
+            let all: Vec<f32> = bytes
+                .chunks_exact(4)
+                .map(|b| f32::from_le_bytes(b.try_into().unwrap()))
+                .collect();
+            let audio = all
+                [(case.start * 16000.0).round() as usize..(case.end * 16000.0).round() as usize]
+                .to_vec();
+            let digest = format!(
+                "{:x}",
+                sha2::Sha256::digest(bytemuck::cast_slice::<f32, u8>(&audio))
+            );
+            let (text, _, _) = engine
+                .transcribe_diagnostic(audio, case.language, !case.live_settings, case.options)
+                .await
+                .unwrap();
+            println!("{}: {}", case.name, text);
+            output.push(serde_json::json!({"case":case.name,"start":case.start,"end":case.end,"audio_sha256":digest,"text":text}));
+        }
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(std::env::var("MEETILY_BENCHMARK_OUTPUT").unwrap())
+            .unwrap();
+        file.write_all(&serde_json::to_vec_pretty(&output).unwrap())
+            .unwrap();
     }
 }
