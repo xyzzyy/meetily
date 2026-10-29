@@ -392,6 +392,7 @@ export function ParakeetModelManager({
         return (
           <TranscriptionModelCard
             key={model.name}
+            isShared={model.is_shared}
             displayName={getModelDisplayName(model.name)}
             icon={displayInfo?.icon || '📦'}
             description={displayInfo?.tagline || model.description}

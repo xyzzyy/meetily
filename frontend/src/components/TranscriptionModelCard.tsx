@@ -43,6 +43,8 @@ export function modelCardStatus(status: EngineModelStatus, options: CardStatusOp
 interface TranscriptionModelCardProps {
   displayName: string;
   isShared?: boolean;
+  storageNote?: string;
+  canDelete?: boolean;
   icon?: string;
   description?: string;
   details?: string[];
@@ -65,6 +67,8 @@ const deleteIconClass = 'text-gray-400 dark:text-ink-400 hover:text-red-600 dark
 export function TranscriptionModelCard({
   displayName,
   isShared,
+  storageNote,
+  canDelete,
   icon,
   description,
   details = [],
@@ -80,6 +84,9 @@ export function TranscriptionModelCard({
   onDelete,
 }: TranscriptionModelCardProps) {
   const available = status.kind === 'available';
+  const deletionAllowed = canDelete ?? !isShared;
+  const sourceNote = storageNote ?? (isShared === undefined ? undefined
+    : isShared ? 'Shared from official Meetily. Read-only in Branch.' : 'Saved in Meetily Branch.');
   const isSelected = selected && available;
   const partial = (status.kind === 'missing' || status.kind === 'error') && status.partial;
 
@@ -133,7 +140,7 @@ export function TranscriptionModelCard({
                 <span className="h-2 w-2 rounded-full bg-green-500" aria-hidden="true" />
                 Ready
               </span>
-              {!isShared && <Button
+              {deletionAllowed && <Button
                 variant="ghost"
                 size="icon"
                 className={`h-8 w-8 ${deleteIconClass} ${isSelected ? 'opacity-50' : ''}`}
@@ -149,7 +156,7 @@ export function TranscriptionModelCard({
 
           {(status.kind === 'missing' || status.kind === 'error') && (
             <>
-              {partial && (
+              {partial && deletionAllowed && (
                 <Button
                   variant="ghost"
                   size="icon"
@@ -170,7 +177,7 @@ export function TranscriptionModelCard({
 
           {status.kind === 'corrupted' && (
             <>
-              {!isShared && <Button
+              {deletionAllowed && <Button
                 variant="ghost"
                 size="icon"
                 className={`h-8 w-8 ${deleteIconClass}`}
@@ -189,9 +196,9 @@ export function TranscriptionModelCard({
         </div>
       </div>
 
-      {(isShared !== undefined && (available || status.kind === 'corrupted')) && (
+      {sourceNote && (available || status.kind === 'corrupted') && (
         <p className="mt-2 text-xs text-gray-500 dark:text-ink-400">
-          {isShared ? 'Shared from official Meetily. Read-only in Branch.' : 'Saved in Meetily Branch.'}
+          {sourceNote}
         </p>
       )}
 

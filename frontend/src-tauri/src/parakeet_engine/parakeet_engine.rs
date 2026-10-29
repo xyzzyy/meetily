@@ -74,6 +74,8 @@ impl DownloadProgress {
 pub struct ModelInfo {
     pub name: String,
     pub path: PathBuf,
+    #[serde(default)]
+    pub is_shared: bool,
     pub size_mb: u32,
     pub quantization: QuantizationType,
     pub speed: String,     // Performance description
@@ -378,6 +380,7 @@ impl ParakeetEngine {
 
                 models.push(ModelInfo {
                     name: spec.name.to_string(),
+                    is_shared: !model_path.starts_with(&self.models_dir),
                     path: model_path,
                     size_mb: spec.size_mb,
                     quantization: spec.quantization,
@@ -1202,6 +1205,7 @@ impl ParakeetEngine {
             } else {
                 model.status = ModelStatus::Available;
                 model.path = model_dir.to_path_buf();
+                model.is_shared = false;
             }
         }
         active_downloads.revision = active_downloads.revision.wrapping_add(1);
@@ -1302,6 +1306,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(models[0].path, shared_model);
+        assert!(models[0].is_shared);
         assert!(matches!(models[0].status, ModelStatus::Available));
         assert!(engine
             .delete_model(TEST_MODEL_NAME)
@@ -1317,6 +1322,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(models[0].path, owned_model);
+        assert!(!models[0].is_shared);
         assert!(matches!(models[0].status, ModelStatus::Corrupted { .. }));
         engine.delete_model(TEST_MODEL_NAME).await.unwrap();
         assert!(!owned_model.exists());
@@ -1422,6 +1428,7 @@ mod tests {
             ModelInfo {
                 name: TEST_MODEL_NAME.to_string(),
                 path: model_dir.clone(),
+                is_shared: false,
                 size_mb: 1,
                 quantization: QuantizationType::Int8,
                 speed: "test".to_string(),

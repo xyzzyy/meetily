@@ -125,7 +125,8 @@ impl FunAsrEngine {
     }
 
     pub async fn discover_models(&self) -> Vec<ModelInfo> {
-        let encoder_ready = validate_artifact(&self.encoder_path(), ENCODER, false)
+        let encoder_path = self.encoder_path();
+        let encoder_ready = validate_artifact(&encoder_path, ENCODER, false)
             .await
             .is_ok();
         let active: HashMap<String, u8> = self
@@ -149,6 +150,8 @@ impl FunAsrEngine {
             models.push(ModelInfo {
                 name: spec.id.to_string(),
                 display_name: spec.display_name.to_string(),
+                encoder_is_shared: !encoder_path.starts_with(&self.owned_models_root),
+                decoder_is_shared: !decoder_path.starts_with(&self.owned_models_root),
                 path: decoder_path,
                 encoder_available: encoder_ready,
                 has_orphaned_encoder,
@@ -764,6 +767,38 @@ mod tests {
         let error = engine.load_selected_model(MODELS[0].id).await.unwrap_err();
         assert!(error.to_string().contains(MODELS[0].id));
         assert_eq!(engine.get_current_model().await, None);
+    }
+
+    #[tokio::test]
+    async fn discovery_reports_encoder_and_decoder_storage_independently() {
+        for encoder_shared in [false, true] {
+            for decoder_shared in [false, true] {
+                let owned = tempfile::tempdir().unwrap();
+                let official = tempfile::tempdir().unwrap();
+                let encoder_root = if encoder_shared { official.path() } else { owned.path() };
+                let decoder_root = if decoder_shared { official.path() } else { owned.path() };
+                let encoder = encoder_root.join(encoder_relative_path());
+                let decoder = decoder_root.join(decoder_relative_path(&MODELS[0]));
+                for (path, size) in [(&encoder, ENCODER.size), (&decoder, MODELS[0].decoder.size)] {
+                    write_file(path, b"GGUF");
+                    std::fs::OpenOptions::new().write(true).open(path).unwrap().set_len(size).unwrap();
+                }
+                let engine = FunAsrEngine::new(owned.path().to_path_buf(), Some(official.path().to_path_buf())).unwrap();
+                let info = engine.discover_models().await.remove(0);
+                assert!(matches!(info.status, ModelStatus::Available));
+                assert_eq!(info.encoder_is_shared, encoder_shared);
+                assert_eq!(info.decoder_is_shared, decoder_shared);
+                let deleted = engine.delete_model(MODELS[0].id).await;
+                if decoder_shared {
+                    assert!(deleted.is_err());
+                    assert!(decoder.is_file());
+                } else {
+                    deleted.unwrap();
+                    assert!(!decoder.exists());
+                }
+                if encoder_shared { assert!(encoder.is_file()); }
+            }
+        }
     }
 
     #[tokio::test]

@@ -77,7 +77,7 @@ for (const engine of engines) {
     return renderer!.root.findAllByType('button').find(button => button.props.className?.includes('min-w-0'))!;
   }
 
-  if (engine.prefix === 'whisper') test('Whisper: shared models explain ownership and remain selectable without deletion', async () => {
+  test(`${engine.label}: shared models explain ownership and remain selectable without deletion`, async () => {
     available = [{ ...engine.model, is_shared: true }];
     reply = respond;
     await show();

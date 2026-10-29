@@ -242,3 +242,36 @@ test('the note says a selected model that is not installed is not ready', async 
   expect(text).toContain('is selected but not ready');
   expect(text).not.toContain('for transcription');
 });
+
+for (const encoderShared of [false, true]) {
+  for (const decoderShared of [false, true]) {
+    test(`storage notices and deletion match encoder=${encoderShared}, decoder=${decoderShared}`, async () => {
+      available = [{ ...model, encoder_is_shared: encoderShared, decoder_is_shared: decoderShared }];
+      await show();
+      const text = JSON.stringify(renderer!.toJSON());
+      const notice = encoderShared && decoderShared ? 'Shared from official Meetily. Read-only in Branch.'
+        : encoderShared ? 'Decoder saved in Meetily Branch. Encoder shared from official Meetily.'
+        : decoderShared ? 'Encoder saved in Meetily Branch. Decoder shared from official Meetily.'
+        : 'Saved in Meetily Branch.';
+      expect(text).toContain(notice);
+      const remove = renderer!.root.findAllByType('button').find(button => button.props['aria-label'] === 'Delete Nano Q4');
+      expect(Boolean(remove)).toBe(!decoderShared);
+      await act(async () => { await selectButton().props.onClick(); });
+      expect(selected).toHaveBeenCalledWith(model.name);
+      if (remove) {
+        await act(async () => { await remove.props.onClick(); });
+        expect(confirm.mock.calls[0]?.[0]).toContain('Files from official Meetily stay unchanged');
+      }
+    });
+  }
+}
+test('Branch partial downloads can be cleaned up while complete shared models stay usable', async () => {
+  available = [{ ...model, encoder_is_shared: true, decoder_is_shared: true, has_partial_download: true }];
+  await show();
+  const remove = renderer!.root.findAllByType('button').find(button => button.props['aria-label'] === 'Delete Nano Q4');
+  expect(remove).toBeDefined();
+  await act(async () => { await remove!.props.onClick(); });
+  expect(confirm.mock.calls[0]?.[0]).toContain('Delete the Branch files');
+  expect(invoke).toHaveBeenCalledWith('funasr_delete_model', { modelName: model.name });
+  expect(selectButton().props.disabled).toBe(false);
+});

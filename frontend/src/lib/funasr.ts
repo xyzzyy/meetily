@@ -10,6 +10,8 @@ export interface FunAsrModelInfo {
   name: string;
   display_name: string;
   path: string;
+  encoder_is_shared?: boolean;
+  decoder_is_shared?: boolean;
   encoder_available: boolean;
   has_partial_download: boolean;
   has_orphaned_encoder: boolean;

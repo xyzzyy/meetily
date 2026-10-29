@@ -247,7 +247,7 @@ export function FunAsrModelManager({
       const accepted = await confirm(
         model.has_orphaned_encoder
           ? 'Delete the unused shared FUN-ASR encoder? No model uses it. You will need to download it again to install a FUN-ASR model.'
-          : `Delete transcription model ${model.display_name}, including any partial download? The shared encoder is kept while another FUN-ASR variant needs it.`,
+          : `Delete the Branch files for ${model.display_name}, including partial downloads? Files from official Meetily stay unchanged. The Branch encoder can also be removed if no Branch decoder needs it.`,
         {
           title: model.has_orphaned_encoder ? 'Delete unused encoder?' : 'Delete transcription model?',
           kind: 'warning',
@@ -259,7 +259,7 @@ export function FunAsrModelManager({
       await FunAsrAPI.deleteModel(model.name);
       toast.success(model.has_orphaned_encoder
         ? 'Unused FUN-ASR encoder deleted'
-        : `${model.display_name} deleted`, { description: 'Model removed to free up space' });
+        : `Branch files for ${model.display_name} deleted`, { description: 'Files from official Meetily stay unchanged' });
       await refresh().catch(error => toast.error('Could not refresh FUN-ASR models', { description: String(error) }));
     } catch (error) {
       toast.error(`Failed to delete ${model.display_name}`, { description: errorMessage(error) });
@@ -315,6 +315,12 @@ export function FunAsrModelManager({
           <TranscriptionModelCard
             key={model.name}
             displayName={model.display_name}
+            canDelete={!model.decoder_is_shared || model.has_partial_download}
+            storageNote={model.encoder_is_shared === undefined || model.decoder_is_shared === undefined ? undefined
+              : model.encoder_is_shared && model.decoder_is_shared ? 'Shared from official Meetily. Read-only in Branch.'
+              : model.encoder_is_shared ? 'Decoder saved in Meetily Branch. Encoder shared from official Meetily.'
+              : model.decoder_is_shared ? 'Encoder saved in Meetily Branch. Decoder shared from official Meetily.'
+              : 'Saved in Meetily Branch.'}
             description={model.description}
             details={[`${model.decoder_size_mb} MB decoder`, `${model.size_mb} MB first install`]}
             recommended={model.recommended}
