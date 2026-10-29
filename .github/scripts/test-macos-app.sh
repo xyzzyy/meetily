@@ -14,10 +14,21 @@ xcodegen generate --spec "$RUNNER_TEMP/meetily-launch/project.yml"
 # XCTest does not keep the app's stderr. After a failure, relaunch the app
 # with info logs so the job shows where startup stopped.
 show_app_log() {
-  local log="$RUNNER_TEMP/meetily-launch/app.log"
+  local out="$RUNNER_TEMP/meetily-launch"
+  local log="$out/app.log"
+  log show --last 10m --style compact \
+    --predicate 'process == "meetily" OR process BEGINSWITH "com.apple.WebKit"' \
+    >"$out/system.log" 2>&1 || true
   RUST_LOG=info "$app/Contents/MacOS/meetily" >"$log" 2>&1 &
   local pid=$!
-  sleep 45
+  sleep 20
+  # Stacks show what blocks the app or its web page if startup stalls.
+  sample "$pid" 3 -file "$out/app.sample.txt" >/dev/null 2>&1 || true
+  local web
+  for web in $(pgrep -f com.apple.WebKit.WebContent || true); do
+    sample "$web" 3 -file "$out/webcontent-$web.sample.txt" >/dev/null 2>&1 || true
+  done
+  sleep 25
   kill "$pid" 2>/dev/null || true
   wait "$pid" 2>/dev/null || true
   echo "::group::App log after a failed launch test"
