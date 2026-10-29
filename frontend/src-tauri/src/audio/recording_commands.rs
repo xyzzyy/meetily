@@ -853,6 +853,7 @@ async fn stop_recording_session<R: Runtime>(
 
     // Only the owner may report this fatal error. A delayed failure must not
     // open the model selector after its recording stopped or a new one started.
+    let save_failed_worker_recording = fatal_error.is_some();
     if let Some(error) = fatal_error {
         let _ = app.emit("transcription-error", serde_json::json!({
             "error": error,
@@ -1288,8 +1289,10 @@ async fn stop_recording_session<R: Runtime>(
         return Err(error);
     }
     if expected_session.is_some() {
-        // Fatal worker stops use the global handler without claiming transcription success.
-        app.emit("recording-stop-complete", false).map_err(|error| error.to_string())?;
+        // A failed worker still needs database persistence; transcript quality is
+        // reported separately. Startup notification rollback only resets the UI.
+        app.emit("recording-stop-complete", save_failed_worker_recording)
+            .map_err(|error| error.to_string())?;
     }
     if transcript_warning.is_some() {
         warn!("Recording stopped and saved; the final transcript may be incomplete");
