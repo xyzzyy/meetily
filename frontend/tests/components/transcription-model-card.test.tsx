@@ -40,7 +40,7 @@ test('a model that is not installed cannot be selected', () => {
   expect(buttons().some(button => button.props.children?.[1] === 'Download')).toBe(true);
 });
 
-test('the delete control is always present and explains a selected model', () => {
+test('the owned model delete control explains a selected model', () => {
   const unselected = render({});
   expect(unselected.buttons().some(button => button.props.title === 'Delete model')).toBe(true);
   const chosen = render({ selected: true });
@@ -65,3 +65,23 @@ test('a cancellation request replaces Cancel with its pending state', () => {
   expect(cancelling.buttons().some(button => button.props.title === 'Cancel download')).toBe(false);
   expect(cancelling.text()).toContain('Cancellation requested');
 });
+
+for (const status of [{ kind: 'available' }, { kind: 'corrupted' }] as const) {
+  test(`shared ${status.kind} files stay usable without a delete control`, () => {
+    const shared = render({ isShared: true, status });
+    expect(shared.text()).toContain('Shared from official Meetily. Read-only in Branch.');
+    expect(shared.buttons().some(button => button.props['aria-label']?.startsWith('Delete'))).toBe(false);
+    if (status.kind === 'available') {
+      expect(shared.buttons()[0].props.disabled).toBe(false);
+      shared.buttons()[0].props.onClick();
+      expect(shared.handlers.onSelect).toHaveBeenCalled();
+    } else {
+      expect(shared.text()).toContain('Download a copy for Branch');
+      shared.buttons()[1].props.onClick();
+      expect(shared.handlers.onDownload).toHaveBeenCalled();
+    }
+    const owned = render({ isShared: false, status });
+    expect(owned.text()).toContain('Saved in Meetily Branch.');
+    expect(owned.buttons().some(button => button.props['aria-label']?.startsWith('Delete'))).toBe(true);
+  });
+}

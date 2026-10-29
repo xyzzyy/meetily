@@ -89,6 +89,9 @@ pub struct ModelInfo {
 
     /// File path (if available)
     pub path: PathBuf,
+    /// True when the resolved file is outside Branch-owned model storage.
+    #[serde(default)]
+    pub is_shared: bool,
 
     /// Size in MB
     pub size_mb: u64,
@@ -285,6 +288,7 @@ impl ModelManager {
                 name: model_def.name.clone(),
                 display_name: model_def.display_name.clone(),
                 status,
+                is_shared: !model_path.starts_with(&self.models_dir),
                 path: model_path,
                 size_mb: model_def.size_mb,
                 context_size: model_def.context_size,
@@ -769,6 +773,7 @@ impl ModelManager {
             if let Some(model_info) = models.get_mut(model_name) {
                 model_info.status = ModelStatus::Available;
                 model_info.path = file_path.clone();
+                model_info.is_shared = false;
             }
         }
 
@@ -892,6 +897,7 @@ mod tests {
 
         let info = manager.get_model_info(&model_def.name).await.unwrap();
         assert_eq!(info.path, shared_model);
+        assert!(info.is_shared);
         assert_eq!(info.status, ModelStatus::Available);
         assert!(manager.is_model_ready(&model_def.name, true).await);
         assert!(manager
@@ -907,6 +913,7 @@ mod tests {
         manager.scan_models().await.unwrap();
         let info = manager.get_model_info(&model_def.name).await.unwrap();
         assert_eq!(info.path, owned_model);
+        assert!(!info.is_shared);
         assert!(matches!(info.status, ModelStatus::Corrupted { .. }));
         manager.delete_model(&model_def.name).await.unwrap();
         assert!(!owned_model.exists());

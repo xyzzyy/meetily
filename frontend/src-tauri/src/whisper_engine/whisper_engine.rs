@@ -28,6 +28,9 @@ pub enum ModelStatus {
 pub struct ModelInfo {
     pub name: String,
     pub path: PathBuf,
+    /// True when the resolved file is outside Branch-owned model storage.
+    #[serde(default)]
+    pub is_shared: bool,
     pub size_mb: u32,
     pub accuracy: String,
     pub speed: String,
@@ -266,6 +269,7 @@ impl WhisperEngine {
             
             let model_info = ModelInfo {
                 name: name.to_string(),
+                is_shared: !model_path.starts_with(&self.models_dir),
                 path: model_path,
                 size_mb: size_mb as u32,
                 accuracy: accuracy.to_string(),
@@ -1075,6 +1079,7 @@ impl WhisperEngine {
                 if result.is_ok() {
                     model_info.status = ModelStatus::Available;
                     model_info.path = file_path.clone();
+                    model_info.is_shared = false;
                 } else {
                     model_info.status = ModelStatus::Missing;
                 }
@@ -1320,6 +1325,7 @@ mod tests {
 
         let models = engine.discover_models().await.unwrap();
         assert_eq!(tiny_model(&models).path, shared_model);
+        assert!(tiny_model(&models).is_shared);
         assert!(matches!(tiny_model(&models).status, ModelStatus::Available));
         assert!(engine
             .delete_model("tiny")
@@ -1337,6 +1343,7 @@ mod tests {
             .unwrap();
         let models = engine.discover_models().await.unwrap();
         assert_eq!(tiny_model(&models).path, owned_model);
+        assert!(!tiny_model(&models).is_shared);
         assert!(!matches!(
             tiny_model(&models).status,
             ModelStatus::Available
@@ -1360,6 +1367,7 @@ mod tests {
             ModelInfo {
                 name: "tiny".to_string(),
                 path: dir.path().join("ggml-tiny.bin"),
+                is_shared: false,
                 size_mb: 75,
                 accuracy: "Basic".to_string(),
                 speed: "Fast".to_string(),
