@@ -23,6 +23,8 @@ The Download button fetches the runtime archive, the encoder and the chosen deco
 
 ## Transcription
 
+Finish or cancel any Nemotron download in Settings before you start transcription. If a download or another model load is in progress, Meetily shows an error instead of waiting at "Loading Nemotron".
+
 Meetily starts `nemo-speech serve` on a free loopback port with a random API key in its environment, and stops it when transcription ends. Audio goes to `/v1/chat/completions` as 16 kHz mono WAV. One request covers up to one hour.
 
 - Live recording and import send each speech segment and use the text.

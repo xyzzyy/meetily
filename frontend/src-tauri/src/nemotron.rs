@@ -697,6 +697,12 @@ impl Drop for NemotronProvider {
         ACTIVE.fetch_sub(1, Ordering::SeqCst);
     }
 }
+fn lock_model_files_for_start(lock: &Mutex<()>) -> Result<tokio::sync::MutexGuard<'_, ()>, String> {
+    lock.try_lock().map_err(|_| {
+        "Nemotron is downloading or loading a model. Wait for it to finish, or cancel the download in Settings, then try again.".to_string()
+    })
+}
+
 pub async fn configured_provider<R: Runtime>(
     app: &AppHandle<R>,
     requested: Option<&str>,
@@ -715,7 +721,9 @@ pub async fn configured_provider<R: Runtime>(
     };
     validate_install(app, &selected)?;
     let decoder = decoder(&selected).ok_or("Select a Nemotron model in Settings.")?;
-    let _lock = INSTALL_LOCK.lock().await;
+    // A download can take many minutes. Report it instead of leaving Enhance
+    // at "Loading Nemotron" while another model's download holds this lock.
+    let _lock = lock_model_files_for_start(&INSTALL_LOCK)?;
     if ACTIVE.load(Ordering::SeqCst) > 0 {
         return Err("Nemotron is in use. Stop the current transcription first.".into());
     }
@@ -907,6 +915,16 @@ mod tests {
         std::fs::create_dir_all(path.join("runtime/bin")).unwrap();
         std::fs::write(binary(path), "").unwrap();
         std::fs::write(path.join("runtime/.version"), RUNTIME_VERSION).unwrap();
+    }
+
+    #[tokio::test]
+    async fn starting_during_a_download_returns_an_error_without_waiting() {
+        let lock = Mutex::new(());
+        let download = lock.lock().await;
+        let error = lock_model_files_for_start(&lock).unwrap_err();
+        assert!(error.contains("cancel the download in Settings"));
+        drop(download);
+        assert!(lock_model_files_for_start(&lock).is_ok());
     }
 
     #[test]
