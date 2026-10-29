@@ -521,15 +521,16 @@ pub(crate) async fn prepare_enhancement<R: Runtime>(
 }
 
 impl EnhancementSpeakerAnalysis {
-    pub(crate) fn speaker_key(&self, start: f64, end: f64) -> Option<String> {
+    pub(crate) fn speaker_key(&self, start: f64, end: f64, source: Option<&str>) -> Option<String> {
         self.windows
             .iter()
+            .filter(|window| source.is_none_or(|source| window.source == source))
             .filter_map(|window| {
                 let overlap = (end.min(window.end) - start.max(window.start)).max(0.0);
                 (overlap > 0.0).then(|| {
                     (
                         overlap,
-                        if window.is_overlap {
+                        if window.is_overlap && (source.is_none() || window.speaker_id.is_none()) {
                             format!("overlap:{}", window.candidate_speaker_ids.join(","))
                         } else {
                             window.speaker_id.clone().unwrap_or_default()
@@ -2541,6 +2542,35 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(status, "needs_review");
+    }
+
+    #[test]
+    fn token_rows_ignore_turns_on_the_other_capture_track() {
+        let analysis = EnhancementSpeakerAnalysis {
+            windows: rebuild_windows(&[
+                source_interval("system", "remote", 0.0, 4.0),
+                source_interval("microphone", "local-a", 0.0, 2.0),
+                source_interval("microphone", "local-b", 2.0, 4.0),
+            ]),
+            labels: HashMap::new(),
+            quality_flags: vec![],
+        };
+        assert_eq!(
+            analysis.speaker_key(0.5, 1.0, Some("system")),
+            Some("remote".into())
+        );
+        assert_eq!(
+            analysis.speaker_key(2.5, 3.0, Some("system")),
+            Some("remote".into())
+        );
+        assert_eq!(
+            analysis.speaker_key(0.5, 1.0, Some("microphone")),
+            Some("local-a".into())
+        );
+        assert_eq!(
+            analysis.speaker_key(2.5, 3.0, Some("microphone")),
+            Some("local-b".into())
+        );
     }
 
     #[test]

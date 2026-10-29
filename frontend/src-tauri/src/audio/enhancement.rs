@@ -65,6 +65,7 @@ pub(crate) fn parakeet_rows(
     offset_ms: f64,
     duration_ms: f64,
     speakers: Option<&EnhancementSpeakerAnalysis>,
+    source: Option<&str>,
 ) -> Result<Vec<(String, f64, f64)>> {
     let words = timed_words(result, offset_ms, duration_ms).ok_or_else(|| {
         anyhow!(
@@ -72,7 +73,7 @@ pub(crate) fn parakeet_rows(
         )
     })?;
     Ok(group_words(words, |start, end| {
-        speakers.and_then(|analysis| analysis.speaker_key(start / 1000.0, end / 1000.0))
+        speakers.and_then(|analysis| analysis.speaker_key(start / 1000.0, end / 1000.0, source))
     }))
 }
 
@@ -107,7 +108,7 @@ fn group_words(
 }
 
 /// The mixed recording is the fallback. Retained capture tracks stay separate
-/// for Whisper so one input cannot mask speech on the other input.
+/// so one input cannot mask speech on the other input.
 pub(crate) struct EnhancementAudio {
     pub mixed: super::decoder::DecodedAudio,
     pub tracks: Vec<(String, super::decoder::DecodedAudio)>,
@@ -288,23 +289,28 @@ fn weak_cross_track_pickup(
 
 /// Detect speech on each retained input. A quiet microphone must not change
 /// the words decoded from the system input. Keep both inputs on one timeline.
-pub(crate) fn whisper_recognition_inputs(
+pub(crate) fn recognition_inputs(
     audio: &EnhancementAudio,
+    engine: super::common::BatchEngine,
     pause_ms: u32,
     known_speech: &[Transcript],
     mut progress: impl FnMut(u32, usize) -> bool,
 ) -> Result<Vec<RecognitionInput>> {
     if audio.tracks.is_empty() {
-        return Ok(
-            whisper_speech_segments(&audio.mixed, pause_ms, known_speech, progress)?
-                .into_iter()
-                .map(RecognitionInput::mixed)
-                .collect(),
-        );
+        return Ok(recognition_speech_segments(
+            &audio.mixed,
+            engine,
+            pause_ms,
+            known_speech,
+            progress,
+        )?
+        .into_iter()
+        .map(RecognitionInput::mixed)
+        .collect());
     }
     let mut inputs = Vec::new();
     for (index, (source, track)) in audio.tracks.iter().enumerate() {
-        let spans = whisper_speech_segments(track, pause_ms, &[], |percent, count| {
+        let spans = recognition_speech_segments(track, engine, pause_ms, &[], |percent, count| {
             progress(
                 (index as u32 * 100 + percent) / audio.tracks.len() as u32,
                 count,
@@ -364,14 +370,28 @@ pub(crate) fn whisper_recognition_inputs(
     Ok(inputs)
 }
 
-/// Reuse live conversion and frame boundaries for saved Whisper audio.
-/// Keep the converted waveform so joined spans retain their original pauses.
-pub(crate) fn whisper_speech_segments(
+/// Keep each engine's audio conversion policy. Whisper reuses live conversion;
+/// other engines retain the sinc conversion used by batch processing. Keep the
+/// full waveform so joined spans and recovered quiet speech retain pauses.
+pub(crate) fn recognition_speech_segments(
     decoded: &super::decoder::DecodedAudio,
+    engine: super::common::BatchEngine,
     pause_ms: u32,
     known_speech: &[Transcript],
     mut progress: impl FnMut(u32, usize) -> bool,
 ) -> Result<Vec<super::vad::SpeechSegment>> {
+    let converted_input;
+    let decoded = if engine == super::common::BatchEngine::Whisper {
+        decoded
+    } else {
+        converted_input = super::decoder::DecodedAudio {
+            samples: decoded.to_whisper_format(),
+            sample_rate: 16000,
+            channels: 1,
+            duration_seconds: decoded.duration_seconds,
+        };
+        &converted_input
+    };
     let mut mono = if decoded.channels > 1 {
         super::audio_processing::audio_to_mono(&decoded.samples, decoded.channels)
     } else {
@@ -454,7 +474,7 @@ pub(crate) fn whisper_speech_segments(
     Ok(speech_context(&distinct, &converted))
 }
 
-/// Give short Whisper inputs nearby speech context. Keep the original audio
+/// Give short recognition inputs nearby speech context. Keep the original audio
 /// between spans, including pauses; do not concatenate isolated speech bursts.
 pub(crate) fn speech_context(
     segments: &[super::vad::SpeechSegment],
@@ -931,7 +951,7 @@ mod tests {
     #[test]
     fn parakeet_rows_reject_unusable_token_times() {
         let result = timed("hello", &["hello"], &[]);
-        let error = parakeet_rows(&result, 0.0, 1000.0, None).unwrap_err();
+        let error = parakeet_rows(&result, 0.0, 1000.0, None, None).unwrap_err();
         assert!(error.to_string().contains("invalid token times"));
     }
 
@@ -1116,11 +1136,24 @@ mod tests {
             channels: 1,
             duration_seconds: 5000.0 / 48000.0,
         };
-        assert!(whisper_speech_segments(&decoded, 500, &[], |_, _| true).is_ok());
-        assert!(whisper_speech_segments(&decoded, 500, &[], |_, _| false)
-            .unwrap_err()
-            .to_string()
-            .contains("cancelled"));
+        assert!(recognition_speech_segments(
+            &decoded,
+            super::super::common::BatchEngine::Whisper,
+            500,
+            &[],
+            |_, _| true
+        )
+        .is_ok());
+        assert!(recognition_speech_segments(
+            &decoded,
+            super::super::common::BatchEngine::Whisper,
+            500,
+            &[],
+            |_, _| false
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("cancelled"));
     }
 
     #[test]
@@ -1132,7 +1165,14 @@ mod tests {
             duration_seconds: 10.0,
         };
         let baseline:Transcript=serde_json::from_value(serde_json::json!({"id":"old","meeting_id":"m1","transcript":"Quiet speech","timestamp":"old","audio_start_time":4.0,"audio_end_time":5.0,"duration":1.0})).unwrap();
-        let chunks = whisper_speech_segments(&decoded, 500, &[baseline], |_, _| true).unwrap();
+        let chunks = recognition_speech_segments(
+            &decoded,
+            super::super::common::BatchEngine::Whisper,
+            500,
+            &[baseline],
+            |_, _| true,
+        )
+        .unwrap();
         assert_eq!(chunks.len(), 1);
         assert!(chunks[0].start_timestamp_ms <= 4000.0 && chunks[0].end_timestamp_ms >= 5000.0);
         assert_eq!(
@@ -1203,15 +1243,62 @@ mod tests {
             ],
         };
         let baseline:Transcript=serde_json::from_value(serde_json::json!({"id":"quiet","meeting_id":"m1","transcript":"Original quiet words","timestamp":"old","audio_start_time":4.0,"audio_end_time":5.0,"duration":1.0})).unwrap();
-        let inputs = whisper_recognition_inputs(&audio, 500, &[baseline], |_, _| true).unwrap();
-        assert_eq!(
-            inputs.len(),
-            1,
-            "do not decode a missed baseline region once per silent track"
-        );
-        assert_eq!(inputs[0].source, None);
-        assert_eq!(inputs[0].samples.len(), 48_000);
-        assert!(whisper_recognition_inputs(&audio, 500, &[], |_, _| false).is_err());
+        use super::super::common::BatchEngine;
+        for (engine, pause) in [
+            (BatchEngine::Whisper, 500),
+            (BatchEngine::Parakeet, 500),
+            (BatchEngine::FunAsr, 500),
+        ] {
+            let inputs = recognition_inputs(
+                &audio,
+                engine,
+                pause,
+                std::slice::from_ref(&baseline),
+                |_, _| true,
+            )
+            .unwrap();
+            assert_eq!(
+                inputs.len(),
+                1,
+                "{engine:?}: recover a missed region once, not once per track"
+            );
+            assert_eq!(inputs[0].source, None);
+            assert_eq!(inputs[0].samples.len(), 48_000);
+            assert!(
+                recognition_inputs(&audio, engine, pause, &[], |_, _| false).is_err(),
+                "{engine:?}: cancellation must stop input preparation"
+            );
+        }
+    }
+
+    #[test]
+    fn non_whisper_engines_keep_sinc_audio_conversion_in_the_shared_path() {
+        use super::super::common::BatchEngine;
+        let decoded = super::super::decoder::DecodedAudio {
+            samples: (0..48_000)
+                .map(|i| ((i * 17 % 101) as f32 - 50.0) / 1_000_000.0)
+                .collect(),
+            sample_rate: 48_000,
+            channels: 1,
+            duration_seconds: 1.0,
+        };
+        let expected = decoded.to_whisper_format();
+        let baseline:Transcript=serde_json::from_value(serde_json::json!({"id":"quiet","meeting_id":"m1","transcript":"Quiet words","timestamp":"old","audio_start_time":0.0,"audio_end_time":1.0,"duration":1.0})).unwrap();
+        for engine in [BatchEngine::Parakeet, BatchEngine::FunAsr] {
+            let spans = recognition_speech_segments(
+                &decoded,
+                engine,
+                2000,
+                std::slice::from_ref(&baseline),
+                |_, _| true,
+            )
+            .unwrap();
+            assert_eq!(spans.len(), 1, "{engine:?}");
+            assert_eq!(
+                spans[0].samples, expected,
+                "{engine:?}: a shared source path must keep batch resampling"
+            );
+        }
     }
 
     #[test]
@@ -1371,7 +1458,7 @@ mod tests {
 
     fn fresh_segments() -> Vec<TranscriptSegment> {
         let result = timed("Alice. Bob.", &[" Alice.", " Bob."], &[1.25, 15.5]);
-        let rows = parakeet_rows(&result, 0.0, 25_000.0, None).unwrap();
+        let rows = parakeet_rows(&result, 0.0, 25_000.0, None, None).unwrap();
         super::super::common::create_transcript_segments(&rows)
     }
 

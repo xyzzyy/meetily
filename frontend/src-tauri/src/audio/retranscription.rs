@@ -2,7 +2,6 @@
 
 use super::common::{create_transcript_segments, write_transcripts_json};
 use super::constants::AUDIO_EXTENSIONS;
-use crate::audio::vad::get_speech_chunks_with_progress;
 use crate::config::{DEFAULT_PARAKEET_MODEL, DEFAULT_WHISPER_MODEL};
 use crate::parakeet_engine::ParakeetEngine;
 use crate::state::AppState;
@@ -44,18 +43,9 @@ impl Drop for RetranscriptionGuard {
     }
 }
 
-/// Whisper finds short speech boundaries, then groups nearby spans for model
-/// context. Other engines keep the established longer pause window.
-const VAD_REDEMPTION_TIME_MS: u32 = 2000;
-const WHISPER_VAD_REDEMPTION_TIME_MS: u32 = 500;
-
-fn vad_redemption_time(engine: super::common::BatchEngine) -> u32 {
-    if engine == super::common::BatchEngine::Whisper {
-        WHISPER_VAD_REDEMPTION_TIME_MS
-    } else {
-        VAD_REDEMPTION_TIME_MS
-    }
-}
+/// Detect short speech spans, then keep nearby phrases and pauses together.
+/// This is recording preparation, so all Enhance engines use the same rule.
+const ENHANCEMENT_VAD_REDEMPTION_TIME_MS: u32 = 500;
 
 /// Longest input sent to the engine in one piece (16 kHz samples).
 const MAX_SEGMENT_SAMPLES: usize = 25 * 16000;
@@ -315,7 +305,7 @@ async fn run_retranscription<R: Runtime>(
 
     // Speaker estimates describe output labels, not safe cuts in the audio.
     // Keep the same speech context with or without speaker assignment.
-    let redemption_time_ms = vad_redemption_time(batch_engine);
+    let redemption_time_ms = ENHANCEMENT_VAD_REDEMPTION_TIME_MS;
     let known_speech = original.clone();
     let speech_segments = tokio::task::spawn_blocking(move || {
         let on_progress = |vad_progress, segments_found| {
@@ -332,26 +322,13 @@ async fn run_retranscription<R: Runtime>(
             );
             !RETRANSCRIPTION_CANCELLED.load(Ordering::SeqCst)
         };
-        if batch_engine == super::common::BatchEngine::Whisper {
-            super::enhancement::whisper_recognition_inputs(
-                &decoded,
-                redemption_time_ms,
-                &known_speech,
-                on_progress,
-            )
-        } else {
-            get_speech_chunks_with_progress(
-                &decoded.to_whisper_format(),
-                redemption_time_ms,
-                on_progress,
-            )
-            .map(|segments| {
-                segments
-                    .into_iter()
-                    .map(super::enhancement::RecognitionInput::mixed)
-                    .collect()
-            })
-        }
+        super::enhancement::recognition_inputs(
+            &decoded,
+            batch_engine,
+            redemption_time_ms,
+            &known_speech,
+            on_progress,
+        )
     })
     .await
     .map_err(|e| anyhow!("VAD task panicked: {}", e))?
@@ -524,6 +501,7 @@ async fn run_retranscription<R: Runtime>(
                     segment.start_timestamp_ms,
                     segment.end_timestamp_ms - segment.start_timestamp_ms,
                     speaker_analysis.as_ref(),
+                    segment.source.as_deref(),
                 )?
             };
             (rows, 0.9f32)
@@ -1191,24 +1169,6 @@ mod tests {
     }
 
     #[test]
-    fn test_vad_redemption_time_constant() {
-        // Short Whisper spans are joined by speech_context after detection.
-        assert_eq!(
-            vad_redemption_time(super::super::common::BatchEngine::Whisper),
-            500
-        );
-        assert_eq!(
-            vad_redemption_time(super::super::common::BatchEngine::Parakeet),
-            2000
-        );
-        assert_eq!(
-            vad_redemption_time(super::super::common::BatchEngine::FunAsr),
-            2000
-        );
-        assert_eq!(MAX_SEGMENT_SAMPLES, 25 * 16000);
-    }
-
-    #[test]
     fn test_find_audio_file_common_candidates() {
         let dir = tempfile::tempdir().unwrap();
 
@@ -1328,6 +1288,7 @@ mod tests {
     }
     /// Local full-recording replay. Supply private audio and model paths in the
     /// environment; the test does not download models or package meeting audio.
+    /// MEETILY_BENCHMARK_PROVIDER selects whisper, parakeet, or funasr.
     /// MEETILY_BENCHMARK_BASELINE can supply saved live JSON for quiet-speech regions.
     #[tokio::test]
     #[ignore = "requires MEETILY_BENCHMARK_AUDIO, MEETILY_BENCHMARK_MODELS, and MEETILY_BENCHMARK_OUTPUT"]
@@ -1342,16 +1303,58 @@ mod tests {
         let output = PathBuf::from(
             std::env::var("MEETILY_BENCHMARK_OUTPUT").expect("set a new output path"),
         );
-        let model = std::env::var("MEETILY_BENCHMARK_MODEL").unwrap_or_else(|_| "large-v3".into());
+        let provider =
+            std::env::var("MEETILY_BENCHMARK_PROVIDER").unwrap_or_else(|_| "whisper".into());
+        assert!(
+            ["whisper", "parakeet", "funasr"].contains(&provider.as_str()),
+            "unknown benchmark provider"
+        );
+        let batch_engine = super::super::common::BatchEngine::from_provider(Some(&provider));
+        let model =
+            std::env::var("MEETILY_BENCHMARK_MODEL").unwrap_or_else(|_| match batch_engine {
+                super::super::common::BatchEngine::Whisper => "large-v3".into(),
+                super::super::common::BatchEngine::Parakeet => {
+                    crate::config::DEFAULT_PARAKEET_MODEL.into()
+                }
+                super::super::common::BatchEngine::FunAsr => {
+                    crate::config::DEFAULT_FUNASR_MODEL.into()
+                }
+            });
         let language = std::env::var("MEETILY_BENCHMARK_LANGUAGE")
             .ok()
             .filter(|s| s != "auto");
         let owned = tempfile::tempdir().unwrap();
-        let engine = WhisperEngine::new_with_models_dir(Some(owned.path().to_path_buf()))
-            .unwrap()
-            .with_shared_models_dir(Some(models));
-        engine.discover_models().await.unwrap();
-        engine.load_model(&model).await.unwrap();
+        let whisper = if batch_engine == super::super::common::BatchEngine::Whisper {
+            let engine = WhisperEngine::new_with_models_dir(Some(owned.path().to_path_buf()))
+                .unwrap()
+                .with_shared_models_dir(Some(models.clone()));
+            engine.discover_models().await.unwrap();
+            engine.load_model(&model).await.unwrap();
+            Some(engine)
+        } else {
+            None
+        };
+        let parakeet = if batch_engine == super::super::common::BatchEngine::Parakeet {
+            let engine = ParakeetEngine::new_with_models_dir(Some(owned.path().to_path_buf()))
+                .unwrap()
+                .with_shared_models_dir(Some(models.join("parakeet")));
+            engine.discover_models().await.unwrap();
+            engine.load_model(&model).await.unwrap();
+            Some(engine)
+        } else {
+            None
+        };
+        let funasr = if batch_engine == super::super::common::BatchEngine::FunAsr {
+            let engine = crate::funasr_engine::engine::FunAsrEngine::new(
+                owned.path().to_path_buf(),
+                Some(models),
+            )
+            .unwrap();
+            engine.load_selected_model(&model).await.unwrap();
+            Some(engine)
+        } else {
+            None
+        };
         let decoded = super::super::enhancement::decode_enhancement_audio(&audio).unwrap();
         let baseline:Vec<crate::database::models::Transcript>=std::env::var("MEETILY_BENCHMARK_BASELINE").ok().map(|path| {
             let source:serde_json::Value=serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
@@ -1361,9 +1364,10 @@ mod tests {
                     "audio_end_time":row["audio_end_time"],"duration":row["duration"]})).unwrap()
             }).collect()
         }).unwrap_or_default();
-        let contexts = super::super::enhancement::whisper_recognition_inputs(
+        let contexts = super::super::enhancement::recognition_inputs(
             &decoded,
-            vad_redemption_time(super::super::common::BatchEngine::Whisper),
+            batch_engine,
+            ENHANCEMENT_VAD_REDEMPTION_TIME_MS,
             &baseline,
             |_, _| true,
         )
@@ -1379,33 +1383,83 @@ mod tests {
                     })
             })
             .collect();
+        use sha2::Digest;
+        let recognition_inputs:Vec<_>=chunks.iter().map(|chunk|serde_json::json!({
+            "source":chunk.source,"start_ms":chunk.start_timestamp_ms,"end_ms":chunk.end_timestamp_ms,
+            "samples":chunk.samples.len(),"audio_sha256":format!("{:x}",sha2::Sha256::digest(bytemuck::cast_slice::<f32,u8>(&chunk.samples)))
+        })).collect();
         let mut rows = Vec::new();
         let mut sources = Vec::new();
         let live_settings = std::env::var("MEETILY_BENCHMARK_LIVE_SETTINGS").as_deref() == Ok("1");
         for chunk in chunks {
-            let (text, _, _) = if live_settings {
-                engine
-                    .transcribe_audio_with_confidence(chunk.samples.clone(), language.clone())
+            let decoded_rows = if let Some(engine) = parakeet.as_ref() {
+                let result = engine
+                    .transcribe_audio_timed(chunk.samples.clone())
                     .await
+                    .unwrap();
+                if result.text.trim().is_empty() {
+                    Vec::new()
+                } else {
+                    super::super::enhancement::parakeet_rows(
+                        &result,
+                        chunk.start_timestamp_ms,
+                        chunk.end_timestamp_ms - chunk.start_timestamp_ms,
+                        None,
+                        chunk.source.as_deref(),
+                    )
                     .unwrap()
+                }
             } else {
-                engine
-                    .transcribe_batch_audio_with_confidence(chunk.samples.clone(), language.clone())
-                    .await
-                    .unwrap()
+                let text = if let Some(engine) = funasr.as_ref() {
+                    engine
+                        .transcribe(
+                            chunk.samples.clone(),
+                            crate::funasr_engine::normalize_language(language.as_deref()).unwrap(),
+                        )
+                        .await
+                        .unwrap()
+                } else if live_settings {
+                    whisper
+                        .as_ref()
+                        .unwrap()
+                        .transcribe_audio_with_confidence(chunk.samples.clone(), language.clone())
+                        .await
+                        .unwrap()
+                        .0
+                } else {
+                    whisper
+                        .as_ref()
+                        .unwrap()
+                        .transcribe_batch_audio_with_confidence(
+                            chunk.samples.clone(),
+                            language.clone(),
+                        )
+                        .await
+                        .unwrap()
+                        .0
+                };
+                if text.trim().is_empty() {
+                    Vec::new()
+                } else {
+                    vec![(text, chunk.start_timestamp_ms, chunk.end_timestamp_ms)]
+                }
             };
-            if !text.trim().is_empty() {
-                rows.push((text, chunk.start_timestamp_ms, chunk.end_timestamp_ms));
-                sources.push(chunk.source);
-            }
+            sources.extend(std::iter::repeat_n(
+                chunk.source.clone(),
+                decoded_rows.len(),
+            ));
+            rows.extend(decoded_rows);
+        }
+        if let Some(engine) = funasr {
+            engine.unload_model().await;
         }
         let mut ordered: Vec<_> = rows.into_iter().zip(sources).collect();
         ordered.sort_by(|a, b| a.0 .1.total_cmp(&b.0 .1).then(a.1.cmp(&b.1)));
         let (rows, sources): (Vec<_>, Vec<_>) = ordered.into_iter().unzip();
         let segments = create_transcript_segments(&rows);
         assert!(!segments.is_empty(), "the replay must produce text");
-        let report = serde_json::json!({"provider":"whisper","model":model,"language":language,
-            "duration_seconds":decoded.duration_seconds,"source_sample_rate":decoded.sample_rate,"preprocessing":"live-compatible","live_settings":live_settings,"segments":segments,"sources":sources,"baseline":baseline});
+        let report = serde_json::json!({"provider":provider,"model":model,"language":language,
+            "duration_seconds":decoded.duration_seconds,"source_sample_rate":decoded.sample_rate,"preprocessing":"source-aware","live_settings":live_settings,"segments":segments,"sources":sources,"baseline":baseline,"recognition_inputs":recognition_inputs});
         let mut file = std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
