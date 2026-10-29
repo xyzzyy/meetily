@@ -237,6 +237,7 @@ async fn run_retranscription<R: Runtime>(
     // Determine which provider to use (default to whisper)
     let batch_engine = super::common::BatchEngine::from_provider(provider.as_deref());
     let use_parakeet = batch_engine == super::common::BatchEngine::Parakeet;
+    let use_nemotron = batch_engine == super::common::BatchEngine::Nemotron;
 
     info!(
         "Starting retranscription for meeting {} with language {:?}, model {:?}, provider {:?}",
@@ -314,7 +315,9 @@ async fn run_retranscription<R: Runtime>(
     let app_for_vad = app.clone();
     let meeting_id_for_vad = meeting_id.clone();
 
-    let redemption_time_ms = if assign_speakers {
+    // Nemotron rows come from aligned word times, and it needs sentence-length
+    // input: on short clips it drops phrases and guesses the language.
+    let redemption_time_ms = if assign_speakers && !use_nemotron {
         SPEAKER_VAD_REDEMPTION_TIME_MS
     } else {
         VAD_REDEMPTION_TIME_MS
@@ -415,21 +418,26 @@ async fn run_retranscription<R: Runtime>(
     let segment_provider = if batch_engine == super::common::BatchEngine::FunAsr {
         let engine = super::common::get_or_init_funasr(&app, model.as_deref(), language.as_deref()).await?;
         Some(Box::new(crate::audio::transcription::FunAsrProvider::new(engine)) as Box<dyn crate::audio::transcription::TranscriptionProvider>)
-    } else if batch_engine == super::common::BatchEngine::Nemotron {
-        Some(Box::new(crate::nemotron::configured_provider(&app, model.as_deref()).await.map_err(anyhow::Error::msg)?) as Box<dyn crate::audio::transcription::TranscriptionProvider>)
+    } else {
+        None
+    };
+    let nemotron_provider = if use_nemotron {
+        Some(crate::nemotron::configured_provider(&app, model.as_deref()).await.map_err(anyhow::Error::msg)?)
     } else {
         None
     };
 
-    // Keep input context for Parakeet, but use its token times for output rows.
-    // Whisper and FUN-ASR have no word timing on this path. When assigning
-    // speakers they get shorter, turn-aware input. Otherwise keep longer input.
-    let max_samples = if assign_speakers && !use_parakeet {
+    // Keep input context for Parakeet and Nemotron, but use their word times
+    // for output rows. Whisper and FUN-ASR have no word timing on this path.
+    // When assigning speakers they get shorter, turn-aware input. Otherwise
+    // keep longer input.
+    let word_timed = use_parakeet || use_nemotron;
+    let max_samples = if assign_speakers && !word_timed {
         SPEAKER_WHISPER_MAX_SEGMENT_SAMPLES
     } else {
         MAX_SEGMENT_SAMPLES
     };
-    let turns = if use_parakeet {
+    let turns = if word_timed {
         Vec::new()
     } else {
         speaker_analysis
@@ -488,7 +496,19 @@ async fn run_retranscription<R: Runtime>(
             continue;
         }
 
-        let (rows, confidence) = if let Some(provider) = segment_provider.as_ref() {
+        let (rows, confidence) = if let Some(provider) = nemotron_provider.as_ref() {
+            let words = provider
+                .transcribe_words(&segment.samples)
+                .await
+                .map_err(|e| anyhow!("Nemotron transcription failed on segment {i}: {e}"))?;
+            let words = words
+                .into_iter()
+                .map(|(text, start, end)| {
+                    (text, segment.start_timestamp_ms + start, segment.start_timestamp_ms + end)
+                })
+                .collect();
+            (super::enhancement::word_rows(words, speaker_analysis.as_ref()), 0.9f32)
+        } else if let Some(provider) = segment_provider.as_ref() {
             let result = provider
                 .transcribe(segment.samples.clone(), language.clone())
                 .await

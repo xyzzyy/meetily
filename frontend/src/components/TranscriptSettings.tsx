@@ -33,7 +33,7 @@ type LocalProvider = 'localWhisper' | 'parakeet' | 'funasr' | 'nemotron';
 const LOCAL_ENGINE_NOTES: Record<LocalProvider, string> = {
     localWhisper: 'Runs on this device and uses GPU acceleration when available. Larger models are more accurate but slower and need more disk space.',
     parakeet: 'Runs on this device and is fast enough for real-time transcription. Precise is larger and more accurate; Lightning and Compact are smaller and faster.',
-    nemotron: 'Runs on Apple silicon with a managed MLX runtime. The 4-bit model needs about 19.3 GB of disk space plus runtime files. Use a Mac with at least 32 GB of unified memory. First use can take several minutes.',
+    nemotron: 'Runs on Apple silicon with a managed MLX runtime. The 4-bit model and its word aligner need about 20.6 GB of disk space plus runtime files. Use a Mac with at least 32 GB of unified memory. First use can take several minutes.',
     funasr: 'Runs on this device on the CPU (no GPU acceleration yet). Supports auto-detect, English, Chinese and Japanese. Needs a one-time download of about 950 MB: a shared speech encoder plus the decoder you choose.',
 };
 

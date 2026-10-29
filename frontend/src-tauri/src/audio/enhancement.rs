@@ -1,4 +1,4 @@
-//! Timing and publication for Enhance. Model input chunks do not define Parakeet rows.
+//! Timing and publication for Enhance. Model input chunks do not define Parakeet or Nemotron rows.
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::{anyhow, Result};
@@ -71,9 +71,18 @@ pub(crate) fn parakeet_rows(
             "The transcription model returned invalid token times. The saved transcript was kept."
         )
     })?;
-    Ok(group_words(words, |start, end| {
+    Ok(word_rows(words, speakers))
+}
+
+/// Group timed words on the recording timeline into rows that end at speaker
+/// changes, pauses and sentence ends.
+pub(crate) fn word_rows(
+    words: Vec<(String, f64, f64)>,
+    speakers: Option<&EnhancementSpeakerAnalysis>,
+) -> Vec<(String, f64, f64)> {
+    group_words(words, |start, end| {
         speakers.and_then(|analysis| analysis.speaker_key(start / 1000.0, end / 1000.0))
-    }))
+    })
 }
 
 fn group_words(

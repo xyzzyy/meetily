@@ -46,3 +46,52 @@ pub const ARTIFACTS: &[(&str, u64, &str)] = &[
         "c4fb466fb2cd94746dbefc5f768ead8e5760a4ff15d89f55e92b7caf49b96aae",
     ),
 ];
+
+// Pinned Qwen3-ForcedAligner export. It adds word times to Nemotron transcripts.
+pub const ALIGNER_ARTIFACTS: &[(&str, u64, &str)] = &[
+    (
+        "chat_template.json",
+        1161,
+        "75a8cfca24f00de72d796fbfed6858fc9614ef3dabd8696684cc3bc03a9c58ff",
+    ),
+    (
+        "config.json",
+        6940,
+        "8dc126e1a4ac001acb02f3a9ca6277c8a20a25485fde293bc99eeab3aedc604d",
+    ),
+    (
+        "generation_config.json",
+        115,
+        "948d089b23bca1d214e768d59c4438365665f52ec6d33678f4062206b3fbbb8c",
+    ),
+    (
+        "merges.txt",
+        1671853,
+        "8831e4f1a044471340f7c0a83d7bd71306a5b867e95fd870f74d0c5308a904d5",
+    ),
+    (
+        "model.safetensors",
+        1271924386,
+        "be19ef8ac4326d032e7673342930b14c2df30bd68c1632493b0f563e30829f91",
+    ),
+    (
+        "model.safetensors.index.json",
+        79108,
+        "766eb50873855eeb4d95ab92def358cfd173bfc8c7aabd8635ababa1edf6db79",
+    ),
+    (
+        "preprocessor_config.json",
+        330,
+        "45e120a4eda2c20c5d7f2ea9354e63536bf35e27aa573fb7cdf78017b378770d",
+    ),
+    (
+        "tokenizer_config.json",
+        12666,
+        "3ab80063f8511deb9566e6ad438d17b7a6277fcffd52d92854112f19d36bd81c",
+    ),
+    (
+        "vocab.json",
+        2776833,
+        "ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910",
+    ),
+];

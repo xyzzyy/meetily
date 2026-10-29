@@ -18,11 +18,39 @@ use tokio::{
 };
 #[path = "nemotron_artifacts.rs"]
 mod artifacts;
-use artifacts::ARTIFACTS;
+use artifacts::{ALIGNER_ARTIFACTS, ARTIFACTS};
 
 pub const MODEL: &str = "nemotron-3.5-transcribe-30b-a4b-mlx-4bit";
-const REPO: &str = "nativ-community/Nemotron-3.5-Transcribe-30B-A4B-EA-4bit";
-const REVISION: &str = "c47153ca2ce4024d43e216b81e6db4f67b886545";
+/// A pinned Hugging Face export and the folder it is downloaded to.
+struct Snapshot {
+    repo: &'static str,
+    revision: &'static str,
+    dir: &'static str,
+    artifacts: &'static [(&'static str, u64, &'static str)],
+}
+/// Nemotron has no word times. The aligner adds them, so Enhance can send
+/// long audio and still split rows where the speaker changes.
+const SNAPSHOTS: [Snapshot; 2] = [
+    Snapshot {
+        repo: "nativ-community/Nemotron-3.5-Transcribe-30B-A4B-EA-4bit",
+        revision: "c47153ca2ce4024d43e216b81e6db4f67b886545",
+        dir: "model",
+        artifacts: ARTIFACTS,
+    },
+    Snapshot {
+        repo: "mlx-community/Qwen3-ForcedAligner-0.6B-8bit",
+        revision: "0e1a68e91d815300c7c9754b2a7639378b23db15",
+        dir: "aligner",
+        artifacts: ALIGNER_ARTIFACTS,
+    },
+];
+fn download_size() -> u64 {
+    SNAPSHOTS
+        .iter()
+        .flat_map(|snapshot| snapshot.artifacts)
+        .map(|(_, size, _)| size)
+        .sum()
+}
 const UV_URL: &str =
     "https://github.com/astral-sh/uv/releases/download/0.11.18/uv-aarch64-apple-darwin.tar.gz";
 const UV_SHA: &str = "1a7adf8dadae3b55853115d13a8bf564d219597ad13824b93b213706933863e5";
@@ -52,12 +80,14 @@ fn runtime_ready(path: &Path) -> bool {
 fn ready(path: &Path) -> bool {
     runtime_ready(path)
         && path.join("venv/bin/python").is_file()
-        && ARTIFACTS.iter().all(|(name, size, _)| {
-            path.join("model")
-                .join(name)
-                .metadata()
-                .map(|m| m.len() == *size)
-                .unwrap_or(false)
+        && SNAPSHOTS.iter().all(|snapshot| {
+            snapshot.artifacts.iter().all(|(name, size, _)| {
+                path.join(snapshot.dir)
+                    .join(name)
+                    .metadata()
+                    .map(|m| m.len() == *size)
+                    .unwrap_or(false)
+            })
         })
 }
 pub fn validate_install<R: Runtime>(app: &AppHandle<R>, model: &str) -> Result<(), String> {
@@ -89,7 +119,7 @@ pub async fn nemotron_get_available_models<R: Runtime>(
         json!("Missing")
     };
     Ok(vec![
-        json!({"name":MODEL, "display_name":"Nemotron 3.5 Transcribe · MLX 4-bit", "size_mb":ARTIFACTS.iter().map(|(_,s,_)|s).sum::<u64>() / 1_000_000,
+        json!({"name":MODEL, "display_name":"Nemotron 3.5 Transcribe · MLX 4-bit", "size_mb":download_size() / 1_000_000,
         "supported":supported(), "status":status}),
     ])
 }
@@ -168,9 +198,9 @@ fn remove_partial_downloads(model: &Path) {
         let _ = std::fs::remove_file(path);
     }
 }
-fn downloaded_bytes(model: &Path) -> u64 {
+fn downloaded_bytes(model: &Path, artifacts: &[(&str, u64, &str)]) -> u64 {
     let file_len = |path: &Path| path.metadata().map(|m| m.len()).unwrap_or(0);
-    let complete: u64 = ARTIFACTS
+    let complete: u64 = artifacts
         .iter()
         .map(|(name, _, _)| file_len(&model.join(name)))
         .sum();
@@ -189,18 +219,22 @@ fn last_log_line(path: &Path) -> String {
         .take(300)
         .collect()
 }
-/// Downloads the model files with huggingface_hub, which retries and resumes
+/// Downloads one snapshot with huggingface_hub, which retries and resumes
 /// within one run. A new run starts unfinished files again.
-async fn download_model(path: &Path, on_progress: impl Fn(u64)) -> Result<(), String> {
-    let model = path.join("model");
+async fn download_model(
+    path: &Path,
+    snapshot: &Snapshot,
+    on_progress: impl Fn(u64),
+) -> Result<(), String> {
+    let model = path.join(snapshot.dir);
     // A stopped run's partial files cannot be reused, so they only take space.
     remove_partial_downloads(&model);
     let log_path = path.join("download.log");
     let log = std::fs::File::create(&log_path).map_err(|e| e.to_string())?;
     let mut child = Command::new(path.join("venv/bin/python"))
-        .args(["-I", "-c", DOWNLOADER, REPO, REVISION])
+        .args(["-I", "-c", DOWNLOADER, snapshot.repo, snapshot.revision])
         .arg(&model)
-        .args(ARTIFACTS.iter().map(|(name, _, _)| name))
+        .args(snapshot.artifacts.iter().map(|(name, _, _)| name))
         .env("HF_HOME", path.join("huggingface"))
         .env("HF_HUB_DISABLE_TELEMETRY", "1")
         .env("HF_HUB_DISABLE_PROGRESS_BARS", "1")
@@ -221,7 +255,7 @@ async fn download_model(path: &Path, on_progress: impl Fn(u64)) -> Result<(), St
                     remove_partial_downloads(&model);
                     return Err("Download cancelled.".into());
                 }
-                on_progress(downloaded_bytes(&model));
+                on_progress(downloaded_bytes(&model, snapshot.artifacts));
             }
         }
     };
@@ -236,9 +270,13 @@ async fn download_model(path: &Path, on_progress: impl Fn(u64)) -> Result<(), St
 }
 /// Checks each model file against its pinned SHA-256 and removes a bad file
 /// so the next download fetches it again.
-async fn verify_model(model: &Path, on_progress: impl Fn(u64)) -> Result<(), String> {
+async fn verify_model(
+    model: &Path,
+    artifacts: &[(&str, u64, &str)],
+    on_progress: impl Fn(u64),
+) -> Result<(), String> {
     let mut checked = 0;
-    for (name, size, sha) in ARTIFACTS {
+    for (name, size, sha) in artifacts {
         let file = model.join(name);
         if digest(&file).await.map_err(|e| format!("{name}: {e}"))? != *sha {
             let _ = tokio::fs::remove_file(&file).await;
@@ -267,10 +305,12 @@ async fn run(command: &mut Command) -> Result<(), String> {
     Ok(())
 }
 async fn install<R: Runtime>(app: &AppHandle<R>, path: &Path) -> Result<(), String> {
-    tokio::fs::create_dir_all(path.join("model"))
-        .await
-        .map_err(|e| e.to_string())?;
-    let total = ARTIFACTS.iter().map(|(_, s, _)| s).sum::<u64>();
+    for snapshot in &SNAPSHOTS {
+        tokio::fs::create_dir_all(path.join(snapshot.dir))
+            .await
+            .map_err(|e| e.to_string())?;
+    }
+    let total = download_size();
     if !runtime_ready(path) {
         progress(app, "Downloading runtime installer", 0);
         download(UV_URL, &path.join("uv.tar.gz"), UV_SHA).await?;
@@ -336,14 +376,22 @@ async fn install<R: Runtime>(app: &AppHandle<R>, path: &Path) -> Result<(), Stri
     }
     let percent = |bytes: u64| (bytes * 100 / total.max(1)).min(99);
     progress(app, "Downloading model", 0);
-    download_model(path, |bytes| {
-        progress(app, "Downloading model", percent(bytes))
-    })
-    .await?;
-    verify_model(&path.join("model"), |bytes| {
-        progress(app, "Checking model files", percent(bytes))
-    })
-    .await?;
+    let mut done = 0;
+    for snapshot in &SNAPSHOTS {
+        download_model(path, snapshot, |bytes| {
+            progress(app, "Downloading model", percent(done + bytes))
+        })
+        .await?;
+        done += snapshot.artifacts.iter().map(|(_, s, _)| s).sum::<u64>();
+    }
+    let mut done = 0;
+    for snapshot in &SNAPSHOTS {
+        verify_model(&path.join(snapshot.dir), snapshot.artifacts, |bytes| {
+            progress(app, "Checking model files", percent(done + bytes))
+        })
+        .await?;
+        done += snapshot.artifacts.iter().map(|(_, s, _)| s).sum::<u64>();
+    }
     progress(app, "Download complete", 100);
     Ok(())
 }
@@ -431,9 +479,15 @@ impl Worker {
         }
         serde_json::from_str(&line).map_err(|e| e.to_string())
     }
-    async fn transcribe(&mut self, audio: &[f32]) -> Result<String, RequestError> {
+    /// Transcribes one request. With `align`, also returns word spans in
+    /// seconds from the start of `audio`.
+    async fn transcribe(
+        &mut self,
+        audio: &[f32],
+        align: bool,
+    ) -> Result<(String, Vec<(String, f64, f64)>), RequestError> {
         let bytes: Vec<u8> = audio.iter().flat_map(|v| v.to_le_bytes()).collect();
-        let request = json!({"audio":STANDARD.encode(bytes)}).to_string() + "\n";
+        let request = json!({"audio":STANDARD.encode(bytes), "align":align}).to_string() + "\n";
         self.input
             .write_all(request.as_bytes())
             .await
@@ -446,17 +500,25 @@ impl Worker {
         if let Some(error) = reply.get("error") {
             return Err(RequestError::Segment(format!("Nemotron: {error}")));
         }
-        reply
+        let text = reply
             .get("text")
             .and_then(Value::as_str)
             .map(str::to_string)
-            .ok_or_else(|| RequestError::Worker("Nemotron reply has no transcript.".into()))
+            .ok_or_else(|| RequestError::Worker("Nemotron reply has no transcript.".into()))?;
+        let words = if align {
+            serde_json::from_value(reply.get("words").cloned().unwrap_or(Value::Null))
+                .map_err(|_| RequestError::Worker("Nemotron reply has no word times.".into()))?
+        } else {
+            Vec::new()
+        };
+        Ok((text, words))
     }
     async fn spawn(path: &Path) -> Result<Self, String> {
         let log = std::fs::File::create(path.join("worker.log")).map_err(|e| e.to_string())?;
         let mut child = Command::new(path.join("venv/bin/python"))
             .args(["-u", "-c", WORKER])
             .arg(path.join("model"))
+            .arg(path.join("aligner"))
             .env_remove("PYTHONHOME")
             .env_remove("PYTHONPATH")
             .env("HF_HUB_OFFLINE", "1")
@@ -534,13 +596,14 @@ pub async fn configured_provider<R: Runtime>(
     let worker = Worker::spawn(&path).await?;
     Ok(NemotronProvider::new(path, Some(worker)))
 }
-#[async_trait]
-impl TranscriptionProvider for NemotronProvider {
-    async fn transcribe(
+impl NemotronProvider {
+    /// Transcribes audio in requests of at most 30 seconds. Each part is the
+    /// request's text, its word spans and its offset in seconds.
+    async fn requests(
         &self,
-        audio: Vec<f32>,
-        _language: Option<String>,
-    ) -> Result<TranscriptResult, TranscriptionError> {
+        audio: &[f32],
+        align: bool,
+    ) -> Result<Vec<(String, Vec<(String, f64, f64)>, f64)>, TranscriptionError> {
         if audio.len() < 1600 {
             return Err(TranscriptionError::AudioTooShort {
                 samples: audio.len(),
@@ -553,11 +616,11 @@ impl TranscriptionProvider for NemotronProvider {
             ));
         }
         let mut guard = self.worker.lock().await;
-        let mut text = Vec::new();
+        let mut parts = Vec::new();
         // The full model is offline. Each request is a complete audio segment.
-        for range in
-            crate::audio::transcription::funasr_provider::request_ranges(&audio, 30 * 16000)
+        for range in crate::audio::transcription::funasr_provider::request_ranges(audio, 30 * 16000)
         {
+            let offset = range.start as f64 / 16000.0;
             let piece = &audio[range];
             if piece.len() < 1600 {
                 return Err(TranscriptionError::EngineFailed(
@@ -574,10 +637,10 @@ impl TranscriptionProvider for NemotronProvider {
                         .map_err(TranscriptionError::EngineFailed)?
                 }
             };
-            match worker.transcribe(piece).await {
-                Ok(part) => {
+            match worker.transcribe(piece, align).await {
+                Ok((text, words)) => {
                     *guard = Some(worker);
-                    text.push(part);
+                    parts.push((text, words, offset));
                 }
                 Err(RequestError::Segment(error)) => {
                     *guard = Some(worker);
@@ -588,8 +651,57 @@ impl TranscriptionProvider for NemotronProvider {
                 }
             }
         }
+        Ok(parts)
+    }
+
+    /// Transcribes audio and returns words with start and end times in
+    /// milliseconds from the start of `audio`.
+    pub async fn transcribe_words(
+        &self,
+        audio: &[f32],
+    ) -> Result<Vec<(String, f64, f64)>, TranscriptionError> {
+        let duration_ms = audio.len() as f64 / 16.0;
+        let parts = self.requests(audio, true).await?;
+        Ok(words_on_timeline(parts, duration_ms))
+    }
+}
+
+/// Moves request word spans onto one timeline in milliseconds. Aligner times
+/// are estimates, so they are kept in order and inside the audio.
+fn words_on_timeline(
+    parts: Vec<(String, Vec<(String, f64, f64)>, f64)>,
+    duration_ms: f64,
+) -> Vec<(String, f64, f64)> {
+    let mut words = Vec::new();
+    let mut previous = 0.0;
+    for (_, part, offset) in parts {
+        for (text, start, end) in part {
+            if !start.is_finite() || !end.is_finite() {
+                continue;
+            }
+            let start = ((offset + start) * 1000.0).clamp(previous, duration_ms);
+            let end = ((offset + end) * 1000.0).clamp(start, duration_ms);
+            words.push((text, start, end));
+            previous = start;
+        }
+    }
+    words
+}
+
+#[async_trait]
+impl TranscriptionProvider for NemotronProvider {
+    async fn transcribe(
+        &self,
+        audio: Vec<f32>,
+        _language: Option<String>,
+    ) -> Result<TranscriptResult, TranscriptionError> {
+        let parts = self.requests(&audio, false).await?;
         Ok(TranscriptResult {
-            text: text.join(" "),
+            text: parts
+                .into_iter()
+                .map(|(text, _, _)| text)
+                .collect::<Vec<_>>()
+                .join(" "),
             confidence: None,
             is_partial: false,
         })
@@ -619,16 +731,30 @@ mod tests {
     fn incomplete_or_changed_model_files_are_not_ready() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join("venv/bin")).unwrap();
-        std::fs::create_dir_all(dir.path().join("model")).unwrap();
         std::fs::write(dir.path().join("venv/bin/python"), "").unwrap();
         std::fs::write(dir.path().join("runtime-ready"), RUNTIME_VERSION).unwrap();
         // Sparse test files check the catalog without downloading model weights.
-        for (name, size, _) in ARTIFACTS {
-            std::fs::File::create(dir.path().join("model").join(name))
-                .unwrap()
-                .set_len(*size)
-                .unwrap();
+        for snapshot in &SNAPSHOTS {
+            std::fs::create_dir_all(dir.path().join(snapshot.dir)).unwrap();
+            for (name, size, _) in snapshot.artifacts {
+                std::fs::File::create(dir.path().join(snapshot.dir).join(name))
+                    .unwrap()
+                    .set_len(*size)
+                    .unwrap();
+            }
         }
+        assert!(ready(dir.path()));
+        // An install from before the aligner was added is not ready.
+        std::fs::remove_file(dir.path().join("aligner/model.safetensors")).unwrap();
+        assert!(!ready(dir.path()));
+        let (_, size, _) = ALIGNER_ARTIFACTS
+            .iter()
+            .find(|(name, _, _)| *name == "model.safetensors")
+            .unwrap();
+        std::fs::File::create(dir.path().join("aligner/model.safetensors"))
+            .unwrap()
+            .set_len(*size)
+            .unwrap();
         assert!(ready(dir.path()));
         std::fs::write(dir.path().join("model/config.json"), "incomplete").unwrap();
         assert!(!ready(dir.path()));
@@ -654,12 +780,14 @@ exit 1
         )
         .unwrap();
         std::fs::set_permissions(&python, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let error = download_model(dir.path(), |_| {}).await.unwrap_err();
+        let error = download_model(dir.path(), &SNAPSHOTS[0], |_| {})
+            .await
+            .unwrap_err();
         assert!(error.contains("network is unreachable"), "{error}");
         assert!(partial_downloads(&dir.path().join("model")).is_empty());
         assert_eq!(
             std::fs::read_to_string(dir.path().join("venv/bin/args")).unwrap(),
-            format!("{REPO} {REVISION}\n")
+            format!("{} {}\n", SNAPSHOTS[0].repo, SNAPSHOTS[0].revision)
         );
     }
     #[tokio::test]
@@ -667,7 +795,9 @@ exit 1
         let dir = tempfile::tempdir().unwrap();
         let (name, _, _) = ARTIFACTS[0];
         std::fs::write(dir.path().join(name), "changed").unwrap();
-        let error = verify_model(dir.path(), |_| {}).await.unwrap_err();
+        let error = verify_model(dir.path(), ARTIFACTS, |_| {})
+            .await
+            .unwrap_err();
         assert!(error.contains("failed verification"), "{error}");
         assert!(!dir.path().join(name).exists());
     }
@@ -679,7 +809,7 @@ exit 1
         std::fs::write(dir.path().join(ARTIFACTS[0].0), [0; 10]).unwrap();
         std::fs::write(partial.join("shard.ab12.incomplete"), [0; 5]).unwrap();
         std::fs::write(partial.join("shard.metadata"), [0; 100]).unwrap();
-        assert_eq!(downloaded_bytes(dir.path()), 15);
+        assert_eq!(downloaded_bytes(dir.path(), ARTIFACTS), 15);
     }
     #[cfg(unix)]
     #[tokio::test]
@@ -731,6 +861,64 @@ done
         assert_eq!(spawns(), 2);
     }
     #[test]
+    fn word_times_move_onto_one_ordered_timeline() {
+        let parts = vec![
+            (
+                "Hello there.".into(),
+                vec![("Hello".into(), 0.5, 0.9), ("there.".into(), 0.4, 1.2)],
+                0.0,
+            ),
+            (
+                "Bye.".into(),
+                vec![("Bye.".into(), 1.0, 99.0), ("x".into(), f64::NAN, 1.0)],
+                30.0,
+            ),
+        ];
+        assert_eq!(
+            words_on_timeline(parts, 40_000.0),
+            vec![
+                ("Hello".into(), 500.0, 900.0),
+                ("there.".into(), 500.0, 1200.0),
+                ("Bye.".into(), 31_000.0, 40_000.0),
+            ]
+        );
+    }
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn word_requests_ask_the_worker_to_align_and_offset_each_request() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let python = dir.path().join("venv/bin/python");
+        std::fs::create_dir_all(python.parent().unwrap()).unwrap();
+        // Stands in for the helper: one aligned word per request, unless not asked.
+        std::fs::write(
+            &python,
+            r#"#!/bin/sh
+echo '{"ready":true}'
+while IFS= read -r line; do
+  case $line in
+    *'"align":true'*) echo '{"text":"Hi.","words":[["Hi.",0.25,0.5]]}' ;;
+    *) echo '{"text":"Hi."}' ;;
+  esac
+done
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&python, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let worker = Worker::spawn(dir.path()).await.unwrap();
+        let provider = NemotronProvider::new(dir.path().to_path_buf(), Some(worker));
+        // 45 seconds is sent as two requests.
+        let audio = vec![0.0; 45 * 16000];
+        let words = provider.transcribe_words(&audio).await.unwrap();
+        assert_eq!(words.len(), 2);
+        assert_eq!((words[0].1, words[0].2), (250.0, 500.0));
+        assert!(words[1].1 > 15_000.0, "{words:?}");
+        assert_eq!(
+            provider.transcribe(audio, None).await.unwrap().text,
+            "Hi. Hi."
+        );
+    }
+    #[test]
     fn catalog_has_pinned_hashes_and_complete_shards() {
         assert_eq!(
             ARTIFACTS
@@ -739,7 +927,10 @@ done
                 .count(),
             4
         );
-        for (_, size, sha) in ARTIFACTS {
+        assert!(ALIGNER_ARTIFACTS
+            .iter()
+            .any(|(n, _, _)| *n == "model.safetensors"));
+        for (_, size, sha) in ARTIFACTS.iter().chain(ALIGNER_ARTIFACTS) {
             assert!(*size > 0);
             assert_eq!(sha.len(), 64);
             assert!(sha.bytes().all(|b| b.is_ascii_hexdigit()));

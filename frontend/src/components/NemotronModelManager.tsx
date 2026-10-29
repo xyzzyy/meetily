@@ -67,7 +67,7 @@ export function NemotronModelManager({ selectedModel, onModelSelect, autoSave = 
     {model?.supported && <TranscriptionModelCard
       displayName={model.display_name} selected={selectedModel === model.name}
       saving={savingModel === model.name} selectionLocked={!!savingModel}
-      details={['19.3 GB model download', 'Apple silicon · 32 GB memory recommended']}
+      details={['20.6 GB model download', 'Apple silicon · 32 GB memory recommended']}
       status={progress ? { kind: 'downloading', progress: progress.percent, label: progress.phase, cancelling } : modelCardStatus(model.status)}
       onSelect={() => selectModel(model.name)} onDownload={download}
       onCancel={async () => { setCancelling(true); await invoke('nemotron_cancel_download'); }}
