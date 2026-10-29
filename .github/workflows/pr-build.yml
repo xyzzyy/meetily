@@ -265,7 +265,10 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: macos-app-launch-results
-          path: ${{ runner.temp }}/meetily-launch/Launch.xcresult
+          path: |
+            ${{ runner.temp }}/meetily-launch/Launch.xcresult
+            ${{ runner.temp }}/meetily-launch/*.log
+            ${{ runner.temp }}/meetily-launch/*.sample.txt
           if-no-files-found: ignore
           retention-days: 3
 
