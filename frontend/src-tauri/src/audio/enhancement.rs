@@ -296,12 +296,13 @@ pub(crate) fn recognition_inputs(
     known_speech: &[Transcript],
     mut progress: impl FnMut(u32, usize) -> bool,
 ) -> Result<Vec<RecognitionInput>> {
+    let policy = engine.enhancement_input_policy();
     if audio.tracks.is_empty() {
-        return Ok(recognition_speech_segments(
+        return Ok(recognition_speech_segments_with_context(
             &audio.mixed,
-            engine,
             pause_ms,
             known_speech,
+            policy.context_target_ms,
             progress,
         )?
         .into_iter()
@@ -310,17 +311,22 @@ pub(crate) fn recognition_inputs(
     }
     let mut inputs = Vec::new();
     for (index, (source, track)) in audio.tracks.iter().enumerate() {
-        let spans = recognition_speech_segments(track, engine, pause_ms, &[], |percent, count| {
+        let spans = recognition_speech_segments(track, pause_ms, &[], |percent, count| {
             progress(
                 (index as u32 * 100 + percent) / audio.tracks.len() as u32,
                 count,
             )
         })?;
         let other = &audio.tracks[1 - index].1;
+        // Pickup detection uses the same short analysis windows for every
+        // engine. The recognizer's context size must not change that evidence.
+        let retained: Vec<_> = spans
+            .into_iter()
+            .filter(|segment| !weak_cross_track_pickup(segment, other))
+            .collect();
         inputs.extend(
-            spans
+            speech_context_with_target(&retained, &track.samples, policy.context_target_ms)
                 .into_iter()
-                .filter(|segment| !weak_cross_track_pickup(segment, other))
                 .map(|segment| RecognitionInput {
                     segment,
                     source: Some(source.clone()),
@@ -358,7 +364,7 @@ pub(crate) fn recognition_inputs(
         }
     }
     inputs.extend(
-        speech_context(&missed, &mixed)
+        speech_context_with_target(&missed, &mixed, policy.context_target_ms)
             .into_iter()
             .map(RecognitionInput::mixed),
     );
@@ -370,53 +376,31 @@ pub(crate) fn recognition_inputs(
     Ok(inputs)
 }
 
-/// Keep each engine's audio conversion policy. Whisper reuses live conversion;
-/// other engines retain the sinc conversion used by batch processing. Keep the
-/// full waveform so joined spans and recovered quiet speech retain pauses.
+/// Use the full-quality batch conversion for every engine. Capture-rate audio
+/// is resampled once; retained 16 kHz source tracks need no extra conversion.
 pub(crate) fn recognition_speech_segments(
     decoded: &super::decoder::DecodedAudio,
-    engine: super::common::BatchEngine,
     pause_ms: u32,
     known_speech: &[Transcript],
+    progress: impl FnMut(u32, usize) -> bool,
+) -> Result<Vec<super::vad::SpeechSegment>> {
+    recognition_speech_segments_with_context(decoded, pause_ms, known_speech, 8_000.0, progress)
+}
+
+fn recognition_speech_segments_with_context(
+    decoded: &super::decoder::DecodedAudio,
+    pause_ms: u32,
+    known_speech: &[Transcript],
+    context_target_ms: f64,
     mut progress: impl FnMut(u32, usize) -> bool,
 ) -> Result<Vec<super::vad::SpeechSegment>> {
-    let converted_input;
-    let decoded = if engine == super::common::BatchEngine::Whisper {
-        decoded
-    } else {
-        converted_input = super::decoder::DecodedAudio {
-            samples: decoded.to_whisper_format(),
-            sample_rate: 16000,
-            channels: 1,
-            duration_seconds: decoded.duration_seconds,
-        };
-        &converted_input
-    };
-    let mut mono = if decoded.channels > 1 {
-        super::audio_processing::audio_to_mono(&decoded.samples, decoded.channels)
-    } else {
-        decoded.samples.clone()
-    };
-    // The live mixer bounds samples before VAD. Decoded float audio can
-    // overshoot slightly or contain invalid values, so use the same bounds.
-    for sample in &mut mono {
-        *sample = if sample.is_finite() {
-            sample.clamp(-1.0, 1.0)
-        } else {
-            0.0
-        };
-    }
-    let mut processor = super::vad::ContinuousVadProcessor::new(decoded.sample_rate, pause_ms)?;
-    let frame = (decoded.sample_rate as usize * super::constants::MIXING_WINDOW_MS / 1000).max(1);
-    let count = mono.len().div_ceil(frame).max(1);
-    let mut converted = Vec::new();
+    let converted = decoded.to_whisper_format();
+    let mut processor = super::vad::ContinuousVadProcessor::new(16_000, pause_ms)?;
+    let frame = 16_000 * super::constants::MIXING_WINDOW_MS / 1000;
+    let count = converted.len().div_ceil(frame).max(1);
     let mut spans = Vec::new();
-    for (index, window) in mono.chunks(frame).enumerate() {
-        spans.extend(
-            processor.process_audio_with_observer(window, |samples| {
-                converted.extend_from_slice(samples)
-            })?,
-        );
+    for (index, window) in converted.chunks(frame).enumerate() {
+        spans.extend(processor.process_audio(window)?);
         if (index % 100 == 0 || index + 1 == count)
             && !progress(((index + 1) * 100 / count) as u32, spans.len())
         {
@@ -471,8 +455,15 @@ pub(crate) fn recognition_speech_segments(
         }
         distinct.push(span);
     }
-    Ok(speech_context(&distinct, &converted))
+    Ok(speech_context_with_target(
+        &distinct,
+        &converted,
+        context_target_ms,
+    ))
 }
+
+/// Longest pause that recognition context joins across.
+pub(crate) const CONTEXT_MAX_GAP_MS: f64 = 4_000.0;
 
 /// Give short recognition inputs nearby speech context. Keep the original audio
 /// between spans, including pauses; do not concatenate isolated speech bursts.
@@ -480,13 +471,19 @@ pub(crate) fn speech_context(
     segments: &[super::vad::SpeechSegment],
     audio: &[f32],
 ) -> Vec<super::vad::SpeechSegment> {
-    const MIN_CONTEXT_MS: f64 = 8_000.0;
-    const MAX_GAP_MS: f64 = 4_000.0;
+    speech_context_with_target(segments, audio, 8_000.0)
+}
+
+fn speech_context_with_target(
+    segments: &[super::vad::SpeechSegment],
+    audio: &[f32],
+    context_target_ms: f64,
+) -> Vec<super::vad::SpeechSegment> {
     let mut grouped: Vec<super::vad::SpeechSegment> = Vec::new();
     for segment in segments {
         if let Some(previous) = grouped.last_mut() {
-            if previous.end_timestamp_ms - previous.start_timestamp_ms < MIN_CONTEXT_MS
-                && segment.start_timestamp_ms - previous.end_timestamp_ms <= MAX_GAP_MS
+            if previous.end_timestamp_ms - previous.start_timestamp_ms < context_target_ms
+                && segment.start_timestamp_ms - previous.end_timestamp_ms <= CONTEXT_MAX_GAP_MS
             {
                 let start = (previous.start_timestamp_ms.max(0.0) * 16.0).round() as usize;
                 let end = (segment.end_timestamp_ms.max(0.0) * 16.0).round() as usize;
@@ -515,7 +512,14 @@ pub(crate) fn input_chunks(
     }
     let mut chunks = Vec::new();
     let mut cursor = segment.start_timestamp_ms;
-    for mut chunk in super::common::split_segment_at_silence(segment, max_samples) {
+    if max_samples == 0 {
+        return Vec::new();
+    }
+    let split_target = max_samples
+        .saturating_sub(4 * 16_000)
+        .max(max_samples / 2)
+        .max(1);
+    for mut chunk in super::common::split_segment_at_silence(segment, split_target) {
         if chunk.start_timestamp_ms < cursor {
             let trim = ((cursor - chunk.start_timestamp_ms)
                 / (chunk.end_timestamp_ms - chunk.start_timestamp_ms)
@@ -525,8 +529,18 @@ pub(crate) fn input_chunks(
             chunk.start_timestamp_ms = cursor;
         }
         cursor = chunk.end_timestamp_ms;
-        if !chunk.samples.is_empty() {
-            chunks.push(chunk);
+        // The search target is soft; the backend's input limit is strict.
+        // Splitting the final slice also covers small future backend budgets.
+        let ms_per_sample =
+            (chunk.end_timestamp_ms - chunk.start_timestamp_ms) / chunk.samples.len().max(1) as f64;
+        for (index, samples) in chunk.samples.chunks(max_samples).enumerate() {
+            let start = chunk.start_timestamp_ms + (index * max_samples) as f64 * ms_per_sample;
+            chunks.push(super::vad::SpeechSegment {
+                samples: samples.to_vec(),
+                start_timestamp_ms: start,
+                end_timestamp_ms: start + samples.len() as f64 * ms_per_sample,
+                confidence: chunk.confidence,
+            });
         }
     }
     chunks
@@ -1129,31 +1143,20 @@ mod tests {
     }
 
     #[test]
-    fn saved_whisper_input_bounds_invalid_float_samples_before_vad() {
+    fn recognition_input_bounds_invalid_float_samples_before_vad() {
         let decoded = super::super::decoder::DecodedAudio {
             samples: vec![f32::NAN, f32::INFINITY, -2.0, 2.0, 0.0].repeat(1000),
             sample_rate: 48000,
             channels: 1,
             duration_seconds: 5000.0 / 48000.0,
         };
-        assert!(recognition_speech_segments(
-            &decoded,
-            super::super::common::BatchEngine::Whisper,
-            500,
-            &[],
-            |_, _| true
-        )
-        .is_ok());
-        assert!(recognition_speech_segments(
-            &decoded,
-            super::super::common::BatchEngine::Whisper,
-            500,
-            &[],
-            |_, _| false
-        )
-        .unwrap_err()
-        .to_string()
-        .contains("cancelled"));
+        assert!(recognition_speech_segments(&decoded, 500, &[], |_, _| true).is_ok());
+        assert!(
+            recognition_speech_segments(&decoded, 500, &[], |_, _| false)
+                .unwrap_err()
+                .to_string()
+                .contains("cancelled")
+        );
     }
 
     #[test]
@@ -1165,14 +1168,7 @@ mod tests {
             duration_seconds: 10.0,
         };
         let baseline:Transcript=serde_json::from_value(serde_json::json!({"id":"old","meeting_id":"m1","transcript":"Quiet speech","timestamp":"old","audio_start_time":4.0,"audio_end_time":5.0,"duration":1.0})).unwrap();
-        let chunks = recognition_speech_segments(
-            &decoded,
-            super::super::common::BatchEngine::Whisper,
-            500,
-            &[baseline],
-            |_, _| true,
-        )
-        .unwrap();
+        let chunks = recognition_speech_segments(&decoded, 500, &[baseline], |_, _| true).unwrap();
         assert_eq!(chunks.len(), 1);
         assert!(chunks[0].start_timestamp_ms <= 4000.0 && chunks[0].end_timestamp_ms >= 5000.0);
         assert_eq!(
@@ -1272,7 +1268,7 @@ mod tests {
     }
 
     #[test]
-    fn non_whisper_engines_keep_sinc_audio_conversion_in_the_shared_path() {
+    fn all_engines_use_full_quality_conversion_in_the_shared_path() {
         use super::super::common::BatchEngine;
         let decoded = super::super::decoder::DecodedAudio {
             samples: (0..48_000)
@@ -1284,11 +1280,19 @@ mod tests {
         };
         let expected = decoded.to_whisper_format();
         let baseline:Transcript=serde_json::from_value(serde_json::json!({"id":"quiet","meeting_id":"m1","transcript":"Quiet words","timestamp":"old","audio_start_time":0.0,"audio_end_time":1.0,"duration":1.0})).unwrap();
-        for engine in [BatchEngine::Parakeet, BatchEngine::FunAsr] {
-            let spans = recognition_speech_segments(
-                &decoded,
+        let audio = EnhancementAudio {
+            mixed: decoded,
+            tracks: Vec::new(),
+        };
+        for engine in [
+            BatchEngine::Whisper,
+            BatchEngine::Parakeet,
+            BatchEngine::FunAsr,
+        ] {
+            let spans = recognition_inputs(
+                &audio,
                 engine,
-                2000,
+                500,
                 std::slice::from_ref(&baseline),
                 |_, _| true,
             )
@@ -1378,6 +1382,84 @@ mod tests {
             chunks.last().unwrap().end_timestamp_ms,
             audio.end_timestamp_ms
         );
+    }
+
+    #[test]
+    fn backend_budgets_bound_input_without_losing_audio_or_imposing_one_ceiling() {
+        use super::super::common::BatchEngine;
+        let mut audio = speech_segment(0.0, 100_000.0, 100 * 16_000);
+        audio.samples = (0..100 * 16_000)
+            .map(|i| 0.1 + (i % 97) as f32 / 10_000.0)
+            .collect();
+        for engine in [
+            BatchEngine::Whisper,
+            BatchEngine::Parakeet,
+            BatchEngine::FunAsr,
+        ] {
+            let policy = engine.enhancement_input_policy();
+            let chunks = input_chunks(&audio, policy.max_input_samples);
+            let joined: Vec<f32> = chunks
+                .iter()
+                .flat_map(|chunk| chunk.samples.iter().copied())
+                .collect();
+            assert_eq!(
+                joined, audio.samples,
+                "{engine:?}: no input samples may be lost or repeated"
+            );
+            assert!(chunks
+                .iter()
+                .all(|chunk| chunk.samples.len() <= policy.max_input_samples));
+            for pair in chunks.windows(2) {
+                assert_eq!(pair[0].end_timestamp_ms, pair[1].start_timestamp_ms);
+            }
+            if engine == BatchEngine::Parakeet {
+                assert!(
+                    chunks.iter().any(|chunk| chunk.samples.len() > 30 * 16_000),
+                    "TDT must have room beyond a Whisper-sized window"
+                );
+            } else {
+                assert!(
+                    chunks
+                        .iter()
+                        .all(|chunk| chunk.samples.len() <= 30 * 16_000),
+                    "the 30-second backends must not receive an oversized request"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn model_context_can_expand_without_changing_the_analysis_windows_or_audio() {
+        use super::super::common::BatchEngine;
+        let audio: Vec<f32> = (0..30 * 16_000).map(|i| i as f32 / 1_000_000.0).collect();
+        let spans: Vec<_> = (0..5)
+            .map(|i| {
+                let start = i * 6 * 16_000;
+                let end = start + 5 * 16_000;
+                super::super::vad::SpeechSegment {
+                    samples: audio[start..end].to_vec(),
+                    start_timestamp_ms: start as f64 / 16.0,
+                    end_timestamp_ms: end as f64 / 16.0,
+                    confidence: 0.9,
+                }
+            })
+            .collect();
+        let analysis = speech_context(&spans, &audio);
+        let extended = speech_context_with_target(
+            &analysis,
+            &audio,
+            BatchEngine::Parakeet
+                .enhancement_input_policy()
+                .context_target_ms,
+        );
+        assert!(extended.len() < analysis.len());
+        assert_eq!(
+            extended[0].samples,
+            audio[..29 * 16_000],
+            "retain real pauses and the original waveform"
+        );
+        assert_eq!(extended[0].start_timestamp_ms, 0.0);
+        assert_eq!(extended[0].end_timestamp_ms, 29_000.0);
     }
 
     #[test]
@@ -1968,6 +2050,46 @@ mod tests {
             id,
             "a rejected replacement must not erase an earlier saved result"
         );
+    }
+
+    #[tokio::test]
+    async fn a_pending_retry_is_not_hidden_by_an_earlier_applied_review() {
+        let (_dir, core, feature, original) = publication_fixture().await;
+        let first = staged_review(&core, &feature, &original).await;
+        let candidate = super::super::enhancement_review::load(&feature, "m1", &first)
+            .await
+            .unwrap();
+        publish(
+            &core,
+            &feature,
+            "m1",
+            &original,
+            &candidate.segments,
+            None,
+            &AtomicBool::new(false),
+        )
+        .await
+        .unwrap();
+        let once = crate::diarization::finalize::load_transcripts(&core, "m1")
+            .await
+            .unwrap();
+        // The automatic apply of this second run failed, so it stays pending.
+        let second = staged_review(&core, &feature, &once).await;
+        let shown = super::super::enhancement_review::latest(&feature, "m1")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(shown.id, second);
+        assert!(!shown.applied);
+        super::super::enhancement_review::discard(&feature, "m1", &second)
+            .await
+            .unwrap();
+        let shown = super::super::enhancement_review::latest(&feature, "m1")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(shown.id, first, "the earlier result can still be undone");
+        assert!(shown.applied);
     }
 
     #[tokio::test]

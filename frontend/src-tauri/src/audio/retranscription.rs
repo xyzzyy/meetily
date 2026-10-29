@@ -47,9 +47,6 @@ impl Drop for RetranscriptionGuard {
 /// This is recording preparation, so all Enhance engines use the same rule.
 const ENHANCEMENT_VAD_REDEMPTION_TIME_MS: u32 = 500;
 
-/// Longest input sent to the engine in one piece (16 kHz samples).
-const MAX_SEGMENT_SAMPLES: usize = 25 * 16000;
-
 /// Progress update emitted during retranscription
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RetranscriptionProgress {
@@ -414,12 +411,15 @@ async fn run_retranscription<R: Runtime>(
     let mut processable_segments = Vec::new();
     for segment in &speech_segments {
         processable_segments.extend(
-            super::enhancement::input_chunks(segment, MAX_SEGMENT_SAMPLES)
-                .into_iter()
-                .map(|chunk| super::enhancement::RecognitionInput {
-                    segment: chunk,
-                    source: segment.source.clone(),
-                }),
+            super::enhancement::input_chunks(
+                segment,
+                batch_engine.enhancement_input_policy().max_input_samples,
+            )
+            .into_iter()
+            .map(|chunk| super::enhancement::RecognitionInput {
+                segment: chunk,
+                source: segment.source.clone(),
+            }),
         );
     }
 
@@ -1375,12 +1375,15 @@ mod tests {
         let chunks: Vec<_> = contexts
             .iter()
             .flat_map(|s| {
-                super::super::enhancement::input_chunks(s, MAX_SEGMENT_SAMPLES)
-                    .into_iter()
-                    .map(|segment| super::super::enhancement::RecognitionInput {
-                        segment,
-                        source: s.source.clone(),
-                    })
+                super::super::enhancement::input_chunks(
+                    s,
+                    batch_engine.enhancement_input_policy().max_input_samples,
+                )
+                .into_iter()
+                .map(|segment| super::super::enhancement::RecognitionInput {
+                    segment,
+                    source: s.source.clone(),
+                })
             })
             .collect();
         use sha2::Digest;
@@ -1459,7 +1462,7 @@ mod tests {
         let segments = create_transcript_segments(&rows);
         assert!(!segments.is_empty(), "the replay must produce text");
         let report = serde_json::json!({"provider":provider,"model":model,"language":language,
-            "duration_seconds":decoded.duration_seconds,"source_sample_rate":decoded.sample_rate,"preprocessing":"source-aware","live_settings":live_settings,"segments":segments,"sources":sources,"baseline":baseline,"recognition_inputs":recognition_inputs});
+            "duration_seconds":decoded.duration_seconds,"source_sample_rate":decoded.sample_rate,"preprocessing":"source-aware","input_policy":batch_engine.enhancement_input_policy(),"live_settings":live_settings,"segments":segments,"sources":sources,"baseline":baseline,"recognition_inputs":recognition_inputs});
         let mut file = std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)

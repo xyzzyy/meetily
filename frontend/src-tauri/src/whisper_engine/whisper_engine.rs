@@ -647,7 +647,8 @@ impl WhisperEngine {
         // Previous value was too aggressive and rejected valid quiet speech
         // 0.55 is balanced - prevents hallucinations while preserving quiet speech
         params.set_no_speech_thold(0.55);
-        params.set_max_len(200);
+        // Batch decoding must not inherit the live display's character limit.
+        params.set_max_len(if batch { 0 } else { 200 });
         params.set_single_segment(false);
 
         configure(&mut params);

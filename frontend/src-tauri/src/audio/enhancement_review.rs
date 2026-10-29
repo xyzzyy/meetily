@@ -189,18 +189,20 @@ pub(crate) async fn pending(
         .transpose()
 }
 
+/// A pending review is always newer than every applied one: staging replaces
+/// any earlier pending review, and applying one leaves none pending. Show it
+/// first so a failed automatic apply can still be retried or discarded.
 pub(crate) async fn latest(
     feature: &SqlitePool,
     meeting_id: &str,
 ) -> Result<Option<ReviewPreview>> {
+    if let Some(review) = pending(feature, meeting_id).await? {
+        return Ok(Some(review));
+    }
     let row: Option<(String,String)> = sqlx::query_as("SELECT id,payload FROM enhancement_reviews WHERE meeting_id=? AND state='applied' ORDER BY rowid DESC LIMIT 1")
         .bind(meeting_id).fetch_optional(feature).await?;
-    match row {
-        Some((id, payload)) => Ok(Some(
-            serde_json::from_str::<Proposal>(&payload)?.preview(id, true),
-        )),
-        None => pending(feature, meeting_id).await,
-    }
+    row.map(|(id, payload)| Ok(serde_json::from_str::<Proposal>(&payload)?.preview(id, true)))
+        .transpose()
 }
 
 pub(crate) async fn load_applied(
