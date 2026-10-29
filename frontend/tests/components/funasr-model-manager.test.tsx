@@ -55,8 +55,8 @@ afterEach(async () => {
   if (renderer) await act(async () => renderer!.unmount());
   renderer = undefined;
 });
-async function show() {
-  await act(async () => { renderer = create(<FunAsrModelManager selectedModel="previous" onModelSelect={selected} autoSave />); });
+async function show(selectedModel = "previous") {
+  await act(async () => { renderer = create(<FunAsrModelManager selectedModel={selectedModel} onModelSelect={selected} autoSave />); });
 }
 function selectButton() {
   return renderer!.root.findAllByType('button').find(button => button.props.className?.includes('min-w-0'))!;
@@ -265,15 +265,31 @@ for (const encoderShared of [false, true]) {
     });
   }
 }
-test('Branch partial downloads can be cleaned up while complete shared models stay usable', async () => {
-  available = [{ ...model, encoder_is_shared: true, decoder_is_shared: true, has_partial_download: true }];
-  await show();
+for (const selectedModel of ['previous', model.name]) {
+  for (const encoderShared of [false, true]) {
+    test(`Branch partial cleanup preserves a ready shared model (selected=${selectedModel}, encoderShared=${encoderShared})`, async () => {
+      available = [{ ...model, encoder_is_shared: encoderShared, decoder_is_shared: true, has_partial_download: true }];
+      await show(selectedModel);
+      const remove = renderer!.root.findAllByType('button').find(button => button.props['aria-label'] === 'Delete Nano Q4');
+      expect(remove).toBeDefined();
+      await act(async () => { await remove!.props.onClick(); });
+      expect(confirm.mock.calls[0]?.[0]).toContain('partial');
+      expect(invoke).toHaveBeenCalledWith('funasr_delete_model', { modelName: model.name, partialOnly: true });
+      expect(errorToast).not.toHaveBeenCalled();
+      expect(selectButton().props.disabled).toBe(false);
+      expect(selected).not.toHaveBeenCalled();
+    });
+  }
+}
+
+test('partial cleanup does not allow deletion of a selected Branch model', async () => {
+  available = [{ ...model, encoder_is_shared: false, decoder_is_shared: false, has_partial_download: true }];
+  await show(model.name);
   const remove = renderer!.root.findAllByType('button').find(button => button.props['aria-label'] === 'Delete Nano Q4');
-  expect(remove).toBeDefined();
   await act(async () => { await remove!.props.onClick(); });
-  expect(confirm.mock.calls[0]?.[0]).toContain('Delete the Branch files');
-  expect(invoke).toHaveBeenCalledWith('funasr_delete_model', { modelName: model.name });
-  expect(selectButton().props.disabled).toBe(false);
+  expect(errorToast).toHaveBeenCalledWith('Select another model before deleting this one');
+  expect(confirm).not.toHaveBeenCalled();
+  expect(invoke.mock.calls.some(([command]) => command === 'funasr_delete_model')).toBe(false);
 });
 
 for (const encoderShared of [false, true]) {

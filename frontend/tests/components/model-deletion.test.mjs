@@ -186,3 +186,13 @@ for (const state of ['available', 'corrupted']) {
     assert.ok(owned.some(node => node.props.title === 'Delete summary' || node.props.children?.includes?.('Delete')));
   });
 }
+
+for (const state of ['error', 'not_downloaded']) {
+  test(`summary storage remains clear in ${state} state`, () => {
+    const shared = manager(cases[0], { model: { is_shared: true, status: { type: state } } }).view();
+    assert.ok(shared.some(node => node.props.children === 'Shared from official Meetily. Read-only in Branch.'));
+    const owned = manager(cases[0], { model: { is_shared: false, status: { type: state } } }).view();
+    assert.ok(owned.some(node => node.props.children === 'Downloads are saved in Meetily Branch.'));
+    assert.ok(!owned.some(node => node.props.children === 'Saved in Meetily Branch.'));
+  });
+}

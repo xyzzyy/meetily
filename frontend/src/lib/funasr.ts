@@ -68,8 +68,8 @@ export class FunAsrAPI {
     return invoke('funasr_cancel_download', { modelName });
   }
 
-  static deleteModel(modelName: string): Promise<string> {
-    return invoke('funasr_delete_model', { modelName });
+  static deleteModel(modelName: string, partialOnly = false): Promise<string> {
+    return invoke('funasr_delete_model', { modelName, ...(partialOnly ? { partialOnly: true } : {}) });
   }
 
   static loadModel(modelName: string): Promise<void> {

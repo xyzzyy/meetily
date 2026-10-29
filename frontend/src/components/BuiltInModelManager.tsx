@@ -455,9 +455,10 @@ export function BuiltInModelManager({
                 {model.description && (
                   <p className="mb-1">{model.description}</p>
                 )}
-                {(isAvailable || isCorrupted) && model.is_shared !== undefined && (
+                {!modelIsDownloading && model.is_shared !== undefined && (
                   <p className="mb-1 text-xs text-gray-500 dark:text-ink-400">
-                    {model.is_shared ? 'Shared from official Meetily. Read-only in Branch.' : 'Saved in Meetily Branch.'}
+                    {model.is_shared ? 'Shared from official Meetily. Read-only in Branch.'
+                      : isAvailable || isCorrupted ? 'Saved in Meetily Branch.' : 'Downloads are saved in Meetily Branch.'}
                   </p>
                 )}
                 {(isError || isCorrupted) && (
