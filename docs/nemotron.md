@@ -32,3 +32,5 @@ Meetily starts `nemo-speech serve` on a free loopback port with a random API key
 - Enhance with speaker labels on (the app's speaker setting) sends the whole recording, up to one hour per request, and uses the model's own speakers. Their turns go through Meetily's speaker matching, so remembered voices are still named. Rows end where the speaker changes. Speaker numbers start again in each hour of a longer recording.
 
 The server log is `models/nemotron/server.log`.
+
+The runtime can report a successful alignment but return no word times for a nonempty transcript. Meetily checks that the timed words retain all returned text. It retries a failed long section in pieces of up to one minute. If a shorter section still has incomplete times, Enhance reports an error and keeps the saved transcript.

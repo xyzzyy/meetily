@@ -40,6 +40,7 @@ const STALL_TIMEOUT: Duration = Duration::from_secs(30);
 /// Nemotron drops punctuation and casing on long requests: a 13.6 minute
 /// meeting came back with none, while 5 minute pieces kept them throughout.
 const MAX_TEXT_SAMPLES: usize = 300 * 16000;
+const RETRY_TEXT_SAMPLES: usize = 60 * 16000;
 /// Speaker turns cover up to one hour per request, the server's limit, so
 /// speaker numbers stay the same across a meeting.
 const MAX_SPEAKER_SAMPLES: usize = 3600 * 16000;
@@ -474,6 +475,37 @@ fn parse_reply(body: &Value) -> Result<Reply, String> {
         turns: Vec::new(),
     })
 }
+
+fn parse_word_reply(body: &Value) -> Result<Reply, String> {
+    let reply = parse_reply(body)?;
+    let timed_text = reply
+        .words
+        .iter()
+        .map(|word| word.text.as_str())
+        .collect::<Vec<_>>()
+        .join(" ");
+    // Silence is returned without a decoder run. Generated tokens with no
+    // retained text are a failed decode, not evidence that this clip was silent.
+    let empty_decode = reply.text.is_empty()
+        && body
+            .pointer("/usage/completion_tokens")
+            .and_then(Value::as_u64)
+            .unwrap_or(0)
+            > 0;
+    if empty_decode
+        || reply
+            .text
+            .split_whitespace()
+            .ne(timed_text.split_whitespace())
+        || reply
+            .words
+            .iter()
+            .any(|word| !word.start.is_finite() || !word.end.is_finite() || word.end <= word.start)
+    {
+        return Err("Nemotron did not return valid times for the complete transcript. The saved transcript was kept.".into());
+    }
+    Ok(reply)
+}
 /// Speaker turns from `/v1/audio/diarizations`.
 fn parse_turns(body: &Value) -> Result<Vec<Turn>, String> {
     let segments = body
@@ -504,6 +536,8 @@ enum Job {
 enum RequestError {
     /// The server rejected this audio and is still running.
     Segment(String),
+    /// Text and word times disagree, or a decode produced no usable text.
+    Alignment(String),
     /// The server stopped or cannot be reached. It must be replaced.
     Server(String),
 }
@@ -663,7 +697,11 @@ impl Server {
                 })
                 .map_err(RequestError::Segment);
         }
-        parse_reply(&reply).map_err(RequestError::Segment)
+        if job == Job::Words {
+            parse_word_reply(&reply).map_err(RequestError::Alignment)
+        } else {
+            parse_reply(&reply).map_err(RequestError::Segment)
+        }
     }
 }
 
@@ -763,9 +801,9 @@ impl NemotronProvider {
         }
         let mut guard = self.server.lock().await;
         let mut parts = Vec::new();
-        for range in
-            crate::audio::transcription::funasr_provider::request_ranges(audio, max_samples)
-        {
+        let mut pending: std::collections::VecDeque<_> =
+            crate::audio::transcription::funasr_provider::request_ranges(audio, max_samples).into();
+        while let Some(range) = pending.pop_front() {
             let offset = range.start as f64 / 16000.0;
             // Taken out so a failed or cancelled request drops, and stops, its server.
             let mut server = match guard.take() {
@@ -777,7 +815,7 @@ impl NemotronProvider {
                         .map_err(TranscriptionError::EngineFailed)?
                 }
             };
-            let piece = &audio[range];
+            let piece = &audio[range.clone()];
             let result = match cancel {
                 Some(flag) => tokio::select! {
                     result = server.request(piece, job) => result,
@@ -793,6 +831,16 @@ impl NemotronProvider {
                 Err(RequestError::Segment(error)) => {
                     *guard = Some(server);
                     return Err(TranscriptionError::EngineFailed(error));
+                }
+                Err(RequestError::Alignment(error)) => {
+                    *guard = Some(server);
+                    if piece.len() <= RETRY_TEXT_SAMPLES {
+                        return Err(TranscriptionError::EngineFailed(error));
+                    }
+                    log::warn!("Nemotron returned incomplete word times; retrying this clip in shorter parts");
+                    for retry in crate::audio::transcription::funasr_provider::request_ranges(piece, RETRY_TEXT_SAMPLES).into_iter().rev() {
+                        pending.push_front(range.start + retry.start..range.start + retry.end);
+                    }
                 }
                 Err(RequestError::Server(error)) => {
                     return Err(TranscriptionError::EngineFailed(error));
@@ -1109,6 +1157,37 @@ mod tests {
     }
 
     #[test]
+    fn incomplete_word_times_cannot_silently_drop_transcript_text() {
+        let mut body = json!({
+            "choices": [{"message": {"content": "Keep every word."}}],
+            "transcription": {"words": [
+                {"word": "Keep", "start": 0.1, "end": 0.3}
+            ]}
+        });
+        assert!(parse_word_reply(&body)
+            .unwrap_err()
+            .contains("saved transcript was kept"));
+        body["transcription"]["words"] = json!([]);
+        assert!(parse_word_reply(&body).is_err());
+        body["transcription"]["words"] = json!([
+            {"word": "Keep", "start": 0.1, "end": 0.3},
+            {"word": "every", "start": 0.3, "end": 0.5},
+            {"word": "word.", "start": 0.5, "end": 0.7}
+        ]);
+        assert!(parse_word_reply(&body).is_ok());
+        body["transcription"]["words"][1]["end"] = json!(0.2);
+        assert!(parse_word_reply(&body).is_err());
+    }
+
+    #[test]
+    fn failed_empty_decode_is_not_treated_as_silence() {
+        let mut body = json!({"choices": [{"message": {"content": ""}}]});
+        assert!(parse_word_reply(&body).is_ok());
+        body["usage"] = json!({"completion_tokens": 2000});
+        assert!(parse_word_reply(&body).is_err());
+    }
+
+    #[test]
     fn speaker_replies_give_turns() {
         let body = json!({"segments": [
             {"start": 8.08, "end": 9.32, "speaker": 1},
@@ -1243,6 +1322,15 @@ mod tests {
         let short = provider.transcribe(samples[..16000 * 20].to_vec(), None).await.unwrap();
         println!("live-style 20 s: {}", short.text);
         assert!(!short.text.is_empty());
+        assert!(meeting.words.first().unwrap().1 < 20_000.0, "the opening speech was dropped");
+        let tail = provider.transcribe(samples[samples.len() - 16000 * 20..].to_vec(), None).await.unwrap();
+        if !tail.text.is_empty() {
+            assert!(meeting.words.last().unwrap().2 > samples.len() as f64 / 16.0 - 20_000.0,
+                "the closing speech was dropped");
+        }
+        if let Ok(path) = std::env::var("NEMOTRON_TEST_TRANSCRIPT") {
+            std::fs::write(path, json!({"text": text, "words": meeting.words, "turns": meeting.turns}).to_string()).unwrap();
+        }
     }
 
     #[test]
