@@ -35,7 +35,11 @@ mock.module('@tauri-apps/api/event', () => ({ ...originalEvents, listen: async (
 mock.module('next/navigation', () => ({ ...originalNavigation, useRouter: () => ({ push() {} }) }));
 mock.module('../../src/lib/analytics', () => ({ default: { track: async () => {}, trackError: async () => {} } }));
 mock.module('sonner', () => ({ toast: Object.fromEntries(['loading', 'success', 'error', 'info'].map(kind => [kind,
-  (text: string, options: unknown) => notices.push({ kind, text, options })])) }));
+  (text: string, options: any) => {
+    notices.push({ kind, text, options });
+    // Exercise Sonner's actual merge of updates that reuse the progress toast ID.
+    return (originalToast.toast[kind as 'loading'] as any)(text, options);
+  }])) }));
 const { TranscriptEnhancementProvider, useTranscriptEnhancement, useEnhancementCompletion } = await import('../../src/contexts/TranscriptEnhancementContext');
 let current: ReturnType<typeof useTranscriptEnhancement>;
 let pageMeeting: string | null;
@@ -127,3 +131,26 @@ test('late listener registration is removed after provider unmount', async () =>
   await act(async () => releaseRegistration!());
   expect(removals).toBe(1);
 });
+
+for (const outcome of ['success', 'failure', 'cancelled']) {
+  test(`${outcome} replaces progress with a finite notice and result text`, async () => {
+    await render(); await act(async () => current.start(request));
+    await act(async () => progress({ payload: {
+      meeting_id: request.meetingId, stage: 'transcribing', progress_percentage: 50, message: 'Transcribing current audio...',
+    } }));
+    const notice = () => originalToast.toast.getHistory().find(toast => toast.id === 'transcript-enhancement')!;
+    expect(notice().duration).toBe(Infinity);
+    expect(notice().description).toBe('Transcribing current audio...');
+    if (outcome === 'cancelled') await act(async () => current.cancel());
+    await act(async () => {
+      if (outcome === 'success') work.resolve({ segments_count: 4, duration_seconds: 10 });
+      else work.reject(new Error(outcome === 'cancelled' ? 'cancelled' : 'Provider failed'));
+      await work.promise.catch(() => {});
+    });
+    expect(Number.isFinite(notice().duration)).toBe(true);
+    expect(notice().duration).toBeGreaterThan(0);
+    expect(notice().description).not.toBe('Transcribing current audio...');
+    expect(notice().cancel).toBeUndefined();
+    expect(notice().type).toBe(outcome === 'success' ? 'success' : outcome === 'failure' ? 'error' : 'info');
+  });
+}

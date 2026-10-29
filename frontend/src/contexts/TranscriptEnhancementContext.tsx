@@ -86,6 +86,10 @@ export function TranscriptEnhancementProvider({ children }: { children: React.Re
     if (active.current) throw new Error('Another meeting is being enhanced. Wait for it to finish.');
     const current: Job = { request, token: {}, cancelling: false, progress: null };
     active.current = current; setJob(current); showProgress(current);
+    const resultNotice = {
+      id: toastId, duration: 6000, cancel: undefined,
+      action: { label: 'View meeting', onClick: () => routerRef.current.push(`/meeting-details?id=${encodeURIComponent(request.meetingId)}`) },
+    };
     void Analytics.track('enhance_transcript_started', {
       language: request.language || 'auto', model_provider: request.provider, model_name: request.model,
     }).catch(error => console.warn('Could not track enhancement:', error));
@@ -95,7 +99,9 @@ export function TranscriptEnhancementProvider({ children }: { children: React.Re
         if (!mounted.current || active.current?.token !== current.token) return;
         active.current = null; setJob(null);
         setCompletion({ meetingId: request.meetingId, token: current.token });
-        toast.success(`Enhancement complete. ${result.segments_count} segments created.`, { id: toastId, cancel: undefined, action: { label: 'View meeting', onClick: () => routerRef.current.push(`/meeting-details?id=${encodeURIComponent(request.meetingId)}`) } });
+        toast.success(`Enhancement complete. ${result.segments_count} segments created.`, {
+          ...resultNotice, description: 'The enhanced transcript is ready.',
+        });
         void Analytics.track('enhance_transcript_completed', {
           success: 'true', segments_count: String(result.segments_count), duration_seconds: String(result.duration_seconds),
         }).catch(() => {});
@@ -103,8 +109,10 @@ export function TranscriptEnhancementProvider({ children }: { children: React.Re
         if (!mounted.current || active.current?.token !== current.token) return;
         const cancelled = active.current.cancelling;
         active.current = null; setJob(null);
-        if (cancelled) toast.info('Enhancement cancelled', { id: toastId });
-        else toast.error('Enhancement failed', { id: toastId, cancel: undefined, description: String(error), action: { label: 'View meeting', onClick: () => routerRef.current.push(`/meeting-details?id=${encodeURIComponent(request.meetingId)}`) } });
+        if (cancelled) toast.info('Enhancement cancelled', {
+          ...resultNotice, description: 'The saved transcript was kept.',
+        });
+        else toast.error('Enhancement failed', { ...resultNotice, description: String(error) });
         void Analytics.trackError('enhance_transcript_failed', String(error)).catch(() => {});
       }
     })();

@@ -295,3 +295,26 @@ test('enhancement runs while the user closes its dialog and visits another meeti
   await expect(page.getByText('Enhanced transcript after background work.', { exact: true })).toBeVisible();
   expect(errors).toEqual([]);
 });
+
+test('an enhancement dialog reopened after navigation is ready for another job when work finishes', async ({ page }) => {
+  const errors = await openMeeting(page, { enhancement: true });
+  const enhance = page.getByTitle('Retranscribe to enhance your recorded audio');
+  await enhance.click();
+  await page.getByRole('button', { name: 'Start enhancement', exact: true }).click();
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+  await page.locator('.fixed.top-0.left-0.h-screen > button').click();
+  await page.getByText('Other planning meeting', { exact: true }).click();
+  await expect(page).toHaveURL(/id=other-meeting/);
+  await page.locator('.fixed.top-0.left-0.h-screen').getByText('Saved planning meeting', { exact: true }).click();
+  await expect(page).toHaveURL(/id=saved-meeting/);
+  await enhance.click();
+  await expect(page.getByRole('button', { name: 'Run in background' })).toBeVisible();
+  await page.evaluate(() => (window as any).__ENHANCEMENT_TEST__.finish());
+  await expect(page.getByRole('button', { name: 'Start enhancement', exact: true })).toBeEnabled();
+  await expect(page.getByText('The saved model (large-v3) is not available.', { exact: false })).toHaveCount(0);
+  const resultNotice = page.getByText('Enhancement complete. 1 segments created.', { exact: true });
+  await expect(resultNotice).toBeVisible();
+  await page.mouse.move(0, 0);
+  await expect(resultNotice).toHaveCount(0, { timeout: 10000 });
+  expect(errors).toEqual([]);
+});

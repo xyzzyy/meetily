@@ -96,7 +96,7 @@ export function RetranscribeDialog({
     const wasOpen = prevOpenRef.current;
     prevOpenRef.current = open;
 
-    if (open && !wasOpen && !isProcessing) {
+    if (open && !wasOpen) {
       resetSelection();
       setError(null);
       setSelectedLang(selectedLanguage || 'auto');
@@ -104,7 +104,7 @@ export function RetranscribeDialog({
       // Fetch available models using centralized hook
       fetchModels();
     }
-  }, [open, selectedLanguage, transcriptModelConfig, fetchModels]);
+  }, [open, selectedLanguage, transcriptModelConfig, fetchModels, resetSelection]);
 
   // Default to the app-wide speaker labels setting, including when it finishes
   // loading after the dialog is already open.
