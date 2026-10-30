@@ -110,6 +110,16 @@ const PARAKEET_V3_ARTIFACTS: &[ArtifactSpec] = &[
     ArtifactSpec { filename: "vocab.txt", exact_bytes: 93_939 },
 ];
 
+// Full-precision weights. ONNX Runtime loads the encoder's external weight
+// file from the same directory.
+const PARAKEET_V3_FP32_ARTIFACTS: &[ArtifactSpec] = &[
+    ArtifactSpec { filename: "encoder-model.onnx", exact_bytes: 41_770_866 },
+    ArtifactSpec { filename: "encoder-model.onnx.data", exact_bytes: 2_435_420_160 },
+    ArtifactSpec { filename: "decoder_joint-model.onnx", exact_bytes: 72_520_893 },
+    ArtifactSpec { filename: "nemo128.onnx", exact_bytes: 139_764 },
+    ArtifactSpec { filename: "vocab.txt", exact_bytes: 93_939 },
+];
+
 const PARAKEET_V2_ARTIFACTS: &[ArtifactSpec] = &[
     ArtifactSpec { filename: "encoder-model.int8.onnx", exact_bytes: 652_184_014 },
     ArtifactSpec { filename: "decoder_joint-model.int8.onnx", exact_bytes: 8_998_286 },
@@ -126,6 +136,15 @@ const PARAKEET_MODEL_SPECS: &[ModelSpec] = &[
         description: "Real time on M4 Max, latest version with int8 quantization",
         source_base_url: "https://meetily.towardsgeneralintelligence.com/models/parakeet-tdt-0.6b-v3-onnx",
         artifacts: PARAKEET_V3_ARTIFACTS,
+    },
+    ModelSpec {
+        name: "parakeet-tdt-0.6b-v3-fp32",
+        size_mb: 2550,
+        quantization: QuantizationType::FP32,
+        speed: "Fast (v3)",
+        description: "Full precision; steadier and more accurate than int8 on recorded calls, about 4x the download",
+        source_base_url: "https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx/resolve/8f23f0c03c8761650bdb5b40aaf3e40d2c15f1ce",
+        artifacts: PARAKEET_V3_FP32_ARTIFACTS,
     },
     ModelSpec {
         name: "parakeet-tdt-0.6b-v2-int8",
@@ -1281,6 +1300,26 @@ mod tests {
         source_base_url: "",
         artifacts: SMALL_ARTIFACTS,
     }];
+
+    #[test]
+    fn full_precision_v3_is_offered_from_a_pinned_revision() {
+        let spec = find_model_spec("parakeet-tdt-0.6b-v3-fp32").expect("fp32 model is offered");
+        assert_eq!(spec.quantization, QuantizationType::FP32);
+        let files: Vec<_> = spec.artifacts.iter().map(|artifact| artifact.filename).collect();
+        // ParakeetModel loads these names when the model is not quantized.
+        for name in [
+            "encoder-model.onnx",
+            "encoder-model.onnx.data",
+            "decoder_joint-model.onnx",
+            "nemo128.onnx",
+            "vocab.txt",
+        ] {
+            assert!(files.contains(&name), "{name} must be downloaded");
+        }
+        let revision = spec.source_base_url.rsplit('/').next().unwrap();
+        assert!(revision.len() == 40 && revision.chars().all(|c| c.is_ascii_hexdigit()));
+        assert_eq!(spec.size_mb as u64, spec.exact_bytes().div_ceil(1_000_000));
+    }
 
     #[tokio::test]
     async fn shared_model_discovery_prefers_owned_and_protects_shared_deletion() {
