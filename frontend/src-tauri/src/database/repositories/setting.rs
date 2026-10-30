@@ -135,8 +135,8 @@ impl SettingsRepository {
             "SELECT {} FROM settings WHERE id = '1' LIMIT 1",
             api_key_column
         );
-        let api_key = sqlx::query_scalar(&query).fetch_optional(pool).await?;
-        Ok(api_key)
+        let api_key: Option<Option<String>> = sqlx::query_scalar(&query).fetch_optional(pool).await?;
+        Ok(api_key.flatten())
     }
 
     pub async fn get_transcript_config(
@@ -241,14 +241,6 @@ impl SettingsRepository {
         pool: &SqlitePool,
         provider: &str,
     ) -> std::result::Result<(), sqlx::Error> {
-        // Custom OpenAI uses JSON config - clear the entire config
-        if provider == "custom-openai" {
-            sqlx::query("UPDATE settings SET customOpenAIConfig = NULL WHERE id = '1'")
-                .execute(pool)
-                .await?;
-            return Ok(());
-        }
-
         let api_key_column = match provider {
             "openai" => "openaiApiKey",
             "ollama" => "ollamaApiKey",
@@ -414,5 +406,113 @@ mod transcript_settings_tests {
                 .unwrap(),
             Some("secret".to_string())
         );
+    }
+
+    #[tokio::test]
+    async fn summary_key_removal_preserves_other_settings_and_transcription_keys() {
+        let pool = test_pool().await;
+        SettingsRepository::save_model_config(&pool, "openai", "selected-model", "large-v3", None)
+            .await
+            .unwrap();
+        let providers = ["openai", "claude", "groq", "openrouter"];
+        for provider in providers {
+            SettingsRepository::save_api_key(&pool, provider, &format!("{provider}-test-key"))
+                .await
+                .unwrap();
+        }
+        SettingsRepository::save_transcript_config(&pool, "openai", "transcript-model")
+            .await
+            .unwrap();
+        SettingsRepository::save_transcript_api_key(&pool, "openai", "transcript-test-key")
+            .await
+            .unwrap();
+
+        for (index, provider) in providers.iter().enumerate() {
+            SettingsRepository::delete_api_key(&pool, provider)
+                .await
+                .unwrap();
+            assert_eq!(
+                SettingsRepository::get_api_key(&pool, provider)
+                    .await
+                    .unwrap(),
+                None
+            );
+            for remaining in &providers[index + 1..] {
+                assert_eq!(
+                    SettingsRepository::get_api_key(&pool, remaining)
+                        .await
+                        .unwrap(),
+                    Some(format!("{remaining}-test-key"))
+                );
+            }
+        }
+        let config = SettingsRepository::get_model_config(&pool)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(config.provider, "openai");
+        assert_eq!(config.model, "selected-model");
+        assert_eq!(
+            SettingsRepository::get_transcript_api_key(&pool, "openai")
+                .await
+                .unwrap(),
+            Some("transcript-test-key".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn summary_key_lookup_distinguishes_missing_null_and_empty_values() {
+        let pool = test_pool().await;
+        assert_eq!(
+            SettingsRepository::get_api_key(&pool, "openai")
+                .await
+                .unwrap(),
+            None
+        );
+        SettingsRepository::save_model_config(&pool, "openai", "selected-model", "large-v3", None)
+            .await
+            .unwrap();
+        assert_eq!(
+            SettingsRepository::get_api_key(&pool, "openai")
+                .await
+                .unwrap(),
+            None
+        );
+        SettingsRepository::save_api_key(&pool, "openai", "")
+            .await
+            .unwrap();
+        assert_eq!(
+            SettingsRepository::get_api_key(&pool, "openai")
+                .await
+                .unwrap(),
+            Some(String::new())
+        );
+    }
+
+    #[tokio::test]
+    async fn unsupported_provider_does_not_delete_custom_endpoint_settings() {
+        let pool = test_pool().await;
+        SettingsRepository::save_model_config(&pool, "openai", "selected-model", "large-v3", None)
+            .await
+            .unwrap();
+        let custom = r#"{"endpoint":"http://localhost","apiKey":"test-key","model":"model"}"#;
+        sqlx::query("UPDATE settings SET customOpenAIConfig = $1 WHERE id = '1'")
+            .bind(custom)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        assert!(SettingsRepository::delete_api_key(&pool, "custom-openai")
+            .await
+            .is_err());
+        assert!(SettingsRepository::delete_api_key(&pool, "unknown")
+            .await
+            .is_err());
+        let saved: String =
+            sqlx::query_scalar("SELECT customOpenAIConfig FROM settings WHERE id = '1'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(saved, custom);
     }
 }
