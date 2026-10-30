@@ -23,14 +23,21 @@ export function LanguagePickerPopover({
   const [query, setQuery] = useState("");
   const containerRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+  const returnFocusRef = useRef(true);
 
   useEffect(() => {
+    const opener = document.activeElement as HTMLElement | null;
+    const container = containerRef.current;
     inputRef.current?.focus();
+    return () => {
+      if (returnFocusRef.current && opener?.isConnected && !opener.matches(':disabled, [aria-disabled="true"]')
+        && (document.activeElement === document.body || container?.contains(document.activeElement))) opener.focus();
+    };
   }, []);
 
   useEffect(() => {
     const onDocClick = (e: MouseEvent) => {
-      if (!containerRef.current?.contains(e.target as Node)) onClose();
+      if (!containerRef.current?.contains(e.target as Node)) { returnFocusRef.current = false; onClose(); }
     };
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") onClose();
@@ -82,6 +89,11 @@ export function LanguagePickerPopover({
     <div
       ref={containerRef}
       className="w-72 rounded-lg bg-white dark:bg-ink-900 border border-gray-200 dark:border-ink-800 shadow-lg overflow-hidden"
+      onBlurCapture={event => {
+        if (event.relatedTarget && !event.currentTarget.contains(event.relatedTarget as Node)) {
+          returnFocusRef.current = false; onClose();
+        }
+      }}
       role="dialog"
       aria-label="Pick summary language"
     >
@@ -92,6 +104,7 @@ export function LanguagePickerPopover({
           type="text"
           value={query}
           onChange={(e) => setQuery(e.target.value)}
+          aria-label="Search summary languages"
           placeholder="Search language..."
           className="flex-1 text-sm text-gray-900 dark:text-ink-100 bg-transparent border-none outline-none placeholder-gray-400"
         />

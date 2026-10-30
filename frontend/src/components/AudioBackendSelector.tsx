@@ -97,6 +97,10 @@ export function AudioBackendSelector({
         <div className="relative">
           <button
             type="button"
+            aria-label="About audio capture methods"
+            onFocus={() => setShowTooltip(true)}
+            onBlur={() => setShowTooltip(false)}
+            onKeyDown={event => { if (event.key === 'Escape') setShowTooltip(false); }}
             onMouseEnter={() => setShowTooltip(true)}
             onMouseLeave={() => setShowTooltip(false)}
             className="text-gray-400 hover:text-gray-600 dark:hover:text-ink-300 transition-colors"

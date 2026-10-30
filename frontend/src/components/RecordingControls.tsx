@@ -347,7 +347,7 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
             <>
               {showPlayback ? (
                 <>
-                  <button
+                  <button type="button" aria-label="Start recording"
                     onClick={handleStartRecording}
                     className="w-10 h-10 flex items-center justify-center bg-red-500 rounded-full text-white hover:bg-red-600 transition-colors"
                   >
@@ -373,7 +373,7 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
                     </div>
                   </div>
 
-                  <button
+                  <button type="button" aria-label="Play recording"
                     className="w-10 h-10 flex items-center justify-center bg-gray-300 dark:bg-ink-700 rounded-full text-white cursor-not-allowed"
                     disabled
                   >

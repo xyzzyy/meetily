@@ -54,7 +54,7 @@ interface SummaryPanelProps {
   onTemplateSelect: (templateId: string, templateName: string) => void;
   isModelConfigLoading?: boolean;
   onOpenModelSettings?: (openFn: () => void) => void;
-  onTranscriptRefClick?: (startTime: number, endTime: number) => void;
+  onTranscriptRefClick?: (startTime: number, endTime: number, fromKeyboard?: boolean) => void;
 }
 
 export function SummaryPanel({

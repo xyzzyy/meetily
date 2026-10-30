@@ -1,4 +1,4 @@
-import React, { useContext, useState, useEffect } from 'react';
+import React, { useContext, useState, useEffect, useRef } from 'react';
 import { Switch } from '@/components/ui/switch';
 import { Button } from '@/components/ui/button';
 import { Info, Loader2, Copy, Check } from 'lucide-react';
@@ -16,6 +16,7 @@ export default function AnalyticsConsentSwitch() {
   const [showModal, setShowModal] = useState(false);
   const [userId, setUserId] = useState<string>('');
   const [isCopied, setIsCopied] = useState(false);
+  const settingsRef = useRef<HTMLDivElement>(null);
 
   // Note: Store loading is handled by AnalyticsProvider to avoid race conditions
 
@@ -155,7 +156,8 @@ export default function AnalyticsConsentSwitch() {
 
   return (
     <>
-      <div className="space-y-4">
+      <div ref={settingsRef} role="group" aria-label="Usage analytics settings" tabIndex={-1}
+        className="space-y-4 rounded focus-visible:outline focus-visible:outline-2 focus-visible:outline-blue-500">
         <div>
           <h3 className="text-base font-semibold text-gray-800 dark:text-ink-100 mb-2">Usage Analytics</h3>
           <p className="text-sm text-gray-600 dark:text-ink-300 mb-4">
@@ -175,6 +177,7 @@ export default function AnalyticsConsentSwitch() {
               <Loader2 className="w-4 h-4 animate-spin text-gray-500 dark:text-ink-400" />
             )}
             <Switch
+              aria-label="Enable analytics"
               checked={isAnalyticsOptedIn}
               onCheckedChange={handleToggle}
               disabled={isProcessing}
@@ -238,6 +241,7 @@ export default function AnalyticsConsentSwitch() {
 
       {/* 2-Step Opt-Out Modal */}
       <AnalyticsDataModal
+        returnFocusRef={settingsRef}
         isOpen={showModal}
         onClose={handleCancelDisable}
         onConfirmDisable={handleConfirmDisable}

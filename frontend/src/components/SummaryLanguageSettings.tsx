@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { Globe, Pin } from 'lucide-react';
 import { Popover, PopoverTrigger, PopoverContent } from '@/components/ui/popover';
 import { LanguagePickerPopover } from '@/components/LanguagePickerPopover';
@@ -10,6 +10,8 @@ import { labelForCode } from '@/lib/summary-languages';
 export function SummaryLanguageSettings() {
   const { recents, pinned, addRecent, removeRecent, setPinned } = useRecentLanguages();
   const [pickerOpen, setPickerOpen] = useState(false);
+  const languageButtons = useRef(new Map<string, HTMLButtonElement>());
+  const focusLanguage = useRef<string | null>(null);
 
   const togglePin = (code: string) => {
     setPinned(pinned === code ? null : code);
@@ -39,6 +41,7 @@ export function SummaryLanguageSettings() {
               }`}
             >
               <button
+                ref={button => { if (button) languageButtons.current.set(code, button); else languageButtons.current.delete(code); }}
                 type="button"
                 aria-label={isPinned ? `Unpin ${labelForCode(code)} as default` : `Pin ${labelForCode(code)} as default`}
                 aria-pressed={isPinned}
@@ -77,12 +80,17 @@ export function SummaryLanguageSettings() {
               ＋ Add language
             </button>
           </PopoverTrigger>
-          <PopoverContent align="start" className="w-auto p-0 border-0 shadow-none bg-transparent">
+          <PopoverContent align="start" className="w-auto p-0 border-0 shadow-none bg-transparent"
+            onCloseAutoFocus={event => {
+              const button = focusLanguage.current ? languageButtons.current.get(focusLanguage.current) : null;
+              focusLanguage.current = null;
+              if (button?.isConnected) { event.preventDefault(); button.focus(); }
+            }}>
             <LanguagePickerPopover
               mode="settings"
               value={null}
               onChange={(code) => {
-                if (code) addRecent(code);
+                if (code) { focusLanguage.current = code; addRecent(code); }
                 setPickerOpen(false);
               }}
               onClose={() => setPickerOpen(false)}

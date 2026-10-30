@@ -81,47 +81,41 @@ export const FormInputItem = ({
           >
             <div className={formStyle}>
               <FormLabel className={formLabelStyle}>{label}</FormLabel>
-              <FormControl className={formControlStyle}>
+              <div className={formControlStyle}>
                 {type === 'password' ? (
                   <div className="relative">
-                    <Input
+                    <FormControl><Input
                       type={showPassword ? 'text' : 'password'}
                       placeholder={placeholder}
                       {...field}
                       accept={accept}
                       className={inputStyle}
-                    />
+                    /></FormControl>
                     <div className="absolute inset-y-0 right-0 pr-3 flex items-center text-gray-400 cursor-pointer">
-                      {showPassword ? (
-                        <EyeOff
-                          className="h-6 w-6"
-                          onClick={togglePasswordVisibility}
-                        />
-                      ) : (
-                        <Eye
-                          className="h-6 w-6"
-                          onClick={togglePasswordVisibility}
-                        />
-                      )}
+                      <button type="button" disabled={disabled} onClick={togglePasswordVisibility}
+                        aria-label={showPassword ? 'Hide password' : 'Show password'} aria-pressed={!!showPassword}
+                        className="rounded focus-visible:outline focus-visible:outline-2 focus-visible:outline-blue-500">
+                        {showPassword ? <EyeOff className="h-6 w-6" aria-hidden="true" /> : <Eye className="h-6 w-6" aria-hidden="true" />}
+                      </button>
                     </div>
                   </div>
                 ) : type === 'textarea' ? (
-                  <Textarea
+                  <FormControl><Textarea
                     placeholder={placeholder}
                     {...field}
                     className={inputStyle}
                     rows={4}
-                  />
+                  /></FormControl>
                 ) : (
-                  <Input
+                  <FormControl><Input
                     placeholder={placeholder}
                     {...field}
                     type={type}
                     accept={accept}
                     className={inputStyle}
-                  />
+                  /></FormControl>
                 )}
-              </FormControl>
+              </div>
             </div>
             <FormMessage className={formMessageStyle} />
           </FormItem>

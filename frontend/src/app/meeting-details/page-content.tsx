@@ -63,8 +63,20 @@ export default function PageContent({
   const [scrollToTime, setScrollToTime] = useState<number | undefined>(undefined);
   const [scrollToKey, setScrollToKey] = useState(0);
 
+  const meetingViewRef = useRef<HTMLDivElement>(null);
+  const focusTranscriptRef = useRef(false);
+  useEffect(() => {
+    if (!focusTranscriptRef.current) return;
+    focusTranscriptRef.current = false;
+    const frame = requestAnimationFrame(() => {
+      meetingViewRef.current?.querySelector<HTMLElement>('[data-transcript-scroll-container]')?.focus({ preventScroll: true });
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [scrollToKey, meeting.id]);
+
   // Transcript reference clicked in the summary: show the transcript tab and jump to the cited time
-  const handleTranscriptRefClick = useCallback((startTime: number, _endTime: number) => {
+  const handleTranscriptRefClick = useCallback((startTime: number, _endTime: number, fromKeyboard = false) => {
+    focusTranscriptRef.current = fromKeyboard;
     manuallySelectedTabMeetingIdsRef.current.add(meeting.id);
     setScrollToTime(startTime);
     setScrollToKey(k => k + 1);
@@ -197,6 +209,7 @@ export default function PageContent({
 
   return (
     <motion.div
+      ref={meetingViewRef}
       initial={{ opacity: 0, y: 20 }}
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.3, ease: 'easeOut' }}

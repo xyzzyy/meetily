@@ -295,7 +295,7 @@ export function DeviceSelection({ selectedDevices, onDeviceChange, disabled = fa
           {/* > */}
           {/*   {isMonitoring ? 'Stop Test' : 'Test Mic'} */}
           {/* </button> */}
-          <button
+          <button type="button" aria-label="Refresh audio devices"
             onClick={handleRefresh}
             disabled={refreshing || disabled}
             className="h-8 w-8 p-0 inline-flex items-center justify-center rounded-md text-sm font-medium transition-colors hover:bg-gray-100 dark:hover:bg-ink-800 disabled:pointer-events-none disabled:opacity-50"

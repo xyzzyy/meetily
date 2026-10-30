@@ -203,6 +203,7 @@ export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelCo
                                         type="button"
                                         variant="ghost"
                                         size="icon"
+                                        aria-label={isApiKeyLocked ? 'Unlock API key' : 'Lock API key'} aria-pressed={isApiKeyLocked}
                                         onClick={() => setIsApiKeyLocked(!isApiKeyLocked)}
                                         className={`transition-colors duration-200 ${isLockButtonVibrating ? 'animate-vibrate text-red-500 dark:text-red-400' : ''
                                             }`}
@@ -214,6 +215,7 @@ export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelCo
                                         type="button"
                                         variant="ghost"
                                         size="icon"
+                                        aria-label={showApiKey ? 'Hide API key' : 'Show API key'} aria-pressed={showApiKey}
                                         onClick={() => setShowApiKey(!showApiKey)}
                                     >
                                         {showApiKey ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}

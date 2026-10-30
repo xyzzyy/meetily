@@ -435,6 +435,12 @@ export function BuiltInModelManager({
                       </Button>
                     </>
                   )}
+                  {isAvailable && !modelIsDownloading && (
+                    <Button variant="outline" size="sm" aria-pressed={selectedModel === model.name}
+                      onClick={event => { event.stopPropagation(); onModelSelect(model.name); }}>
+                      Use {model.display_name || model.name}
+                    </Button>
+                  )}
                   {/* Available - Show small trash icon */}
                   {isAvailable && !modelIsDownloading && (
                     <button

@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback, useRef, forwardRef, useImperativeHandle } from 'react';
+import { useState, useEffect, useCallback, useRef, forwardRef, useImperativeHandle, useId } from 'react';
 import dynamic from 'next/dynamic';
 import { Summary, SummaryDataResponse, SummaryFormat, BlockNoteBlock } from '@/types';
 import { AISummary } from './index';
@@ -29,7 +29,7 @@ interface BlockNoteSummaryViewProps {
   };
   onDirtyChange?: (isDirty: boolean) => void;
   /** Called when a transcript reference is clicked */
-  onTranscriptRefClick?: (startTime: number, endTime: number) => void;
+  onTranscriptRefClick?: (startTime: number, endTime: number, fromKeyboard?: boolean) => void;
 }
 
 export interface BlockNoteSummaryViewRef {
@@ -87,6 +87,7 @@ export const BlockNoteSummaryView = forwardRef<BlockNoteSummaryViewRef, BlockNot
   const [isSaving, setIsSaving] = useState(false);
   const isContentLoaded = useRef(false);
   const containerRef = useRef<HTMLDivElement>(null);
+  const shortcutHelpId = useId();
 
   // Create BlockNote editor for markdown parsing with transcript reference decoration extension
   const editor = useCreateBlockNote({
@@ -147,6 +148,22 @@ export const BlockNoteSummaryView = forwardRef<BlockNoteSummaryViewRef, BlockNot
     if (!ref) return;
     e.preventDefault();
     onTranscriptRefClick?.(ref.startTime, ref.endTime);
+  }, [onTranscriptRefClick, resolveTranscriptRef]);
+
+  // Use the caret, not the event target: BlockNote receives keys on its editor root.
+  const handleReferenceShortcut = useCallback((event: React.KeyboardEvent<HTMLDivElement>) => {
+    if (event.key !== 'Enter' || !event.altKey || event.ctrlKey || event.metaKey || event.shiftKey
+        || event.nativeEvent.isComposing || !onTranscriptRefClick) return;
+    const selection = window.getSelection();
+    const anchor = selection?.anchorNode;
+    if (!selection?.isCollapsed || !anchor || !containerRef.current?.contains(anchor)) return;
+    const element = anchor.nodeType === Node.ELEMENT_NODE ? anchor as Element : anchor.parentElement;
+    if (!element) return;
+    const reference = resolveTranscriptRef(element);
+    if (!reference) return;
+    event.preventDefault();
+    event.stopPropagation();
+    onTranscriptRefClick(reference.startTime, reference.endTime, true);
   }, [onTranscriptRefClick, resolveTranscriptRef]);
 
   const handleEditorChange = useCallback((blocks: Block[]) => {
@@ -267,7 +284,12 @@ export const BlockNoteSummaryView = forwardRef<BlockNoteSummaryViewRef, BlockNot
   if (format === 'blocknote') {
     console.log('🎨 Rendering BLOCKNOTE format (direct)');
     return (
-      <div ref={containerRef} onClick={handleContainerClick} className="flex flex-col w-full">
+      <div ref={containerRef} onClick={handleContainerClick} onKeyDownCapture={handleReferenceShortcut}
+        role="group" aria-label="Meeting summary editor" aria-describedby={onTranscriptRefClick ? shortcutHelpId : undefined}
+        aria-keyshortcuts={onTranscriptRefClick ? 'Alt+Enter' : undefined} className="flex flex-col w-full">
+        {onTranscriptRefClick && <p id={shortcutHelpId} className="px-4 py-1 text-xs text-muted-foreground">
+          Put the caret in a timestamp reference and press Alt+Enter to open the transcript.
+        </p>}
         <div className="w-full">
           <Editor
             initialContent={data.summary_json}
@@ -286,7 +308,12 @@ export const BlockNoteSummaryView = forwardRef<BlockNoteSummaryViewRef, BlockNot
   if (format === 'markdown') {
     console.log('🎨 Rendering MARKDOWN format (parsed to BlockNote)');
     return (
-      <div ref={containerRef} onClick={handleContainerClick} className="flex flex-col w-full">
+      <div ref={containerRef} onClick={handleContainerClick} onKeyDownCapture={handleReferenceShortcut}
+        role="group" aria-label="Meeting summary editor" aria-describedby={onTranscriptRefClick ? shortcutHelpId : undefined}
+        aria-keyshortcuts={onTranscriptRefClick ? 'Alt+Enter' : undefined} className="flex flex-col w-full">
+        {onTranscriptRefClick && <p id={shortcutHelpId} className="px-4 py-1 text-xs text-muted-foreground">
+          Put the caret in a timestamp reference and press Alt+Enter to open the transcript.
+        </p>}
         <div className="w-full">
           <BlockNoteView
             editor={editor}

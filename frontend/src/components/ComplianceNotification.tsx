@@ -80,7 +80,7 @@ export const ComplianceNotification: React.FC<ComplianceNotificationProps> = ({
               Recording Notice
             </h3>
           </div>
-          <button
+          <button type="button" aria-label="Dismiss recording notice"
             onClick={handleClose}
             className="text-gray-400 hover:text-gray-600 dark:hover:text-ink-300 transition-colors p-0.5 rounded hover:bg-gray-100 dark:hover:bg-ink-800"
           >
