@@ -99,21 +99,22 @@ The evaluator checks model and audio hashes. It rejects repeated recordings,
 including copies with another filename, and refuses to overwrite a report.
 Each recording contributes at most its first 30 seconds. Profiles use the same
 speech-duration weighting as the app. Results include individual decisions,
-input and model hashes, and the embedding version.
+input and model hashes, the embedding version, and the runtime build.
 
-The first run, before the input-scale correction, produced these counts. There
-were 16 known-speaker probes and 32 unknown-speaker probes.
+The corrected macOS ARM run uses the PCM16 feature recipe and pooling fix from
+PRs #101 and #103. It produced these counts with 16 known-speaker probes and
+32 unknown-speaker probes, at threshold 0.65 and margin 0.08:
 
 | References | Correct known names | Wrong known names | Missed known names | False names on unknown speakers |
 |---|---:|---:|---:|---:|
-| Blend only | 3 | 6 | 7 | 13 |
-| Blend and saved samples | 4 | 4 | 8 | 5 |
+| Blend only | 15 | 0 | 1 | 0 |
+| Blend and saved samples | 15 | 0 | 1 | 0 |
 
-Both methods produced incorrect names. This test exposed a feature-input scale
-mismatch: the model's [published metadata recipe](https://github.com/k2-fsa/sherpa-onnx/blob/master/scripts/wespeaker/add_meta_data.py)
-requires PCM16-scale input, while the app supplied normalized samples. Correcting
-that extraction path and handling older voiceprints are separate work. These
-counts do not establish meeting accuracy or justify a threshold change.
+This small clean-speech set does not show a benefit from saved samples after
+the extractor corrections. It does not establish meeting accuracy or justify
+a threshold change. Sample matching remains a draft until representative
+meeting samples show a useful benefit. Generated reports stay outside the
+repository; the fixed recipe and hashes permit another run.
 
 Run the evaluator's score and data-leak checks without a model or audio download:
 

@@ -63,6 +63,7 @@ impl SpeakerClusterer {
 
     /// Seed the clusterer with a saved voice profile so returning speakers
     /// are recognized by name instead of getting an anonymous label.
+    #[cfg(test)]
     pub fn seed_profile(&mut self, id: &str, name: &str, centroid: Vec<f32>) {
         self.seed_profile_samples(super::profile_matching::VoiceProfile {
             id: id.into(),
