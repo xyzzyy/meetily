@@ -97,10 +97,23 @@ pub(crate) async fn speaker_snapshot_on(
     Ok(serde_json::to_string(&snapshot)?)
 }
 
-/// Do not silently remove an entire previously transcribed speech region.
+/// Do not silently remove previously transcribed speech, including row interiors.
 /// This checks missing output, not whether changed words are correct.
 /// Decoder and token times are estimates. Allow a two-second boundary shift.
+/// After that allowance, reject uncovered stretches longer than two seconds.
 fn check_baseline_regions(proposal: &Proposal) -> Result<()> {
+    let mut intervals: Vec<_> = proposal
+        .segments
+        .iter()
+        .filter_map(|new| {
+            let (Some(a), Some(b)) = (new.audio_start_time, new.audio_end_time) else {
+                return None;
+            };
+            (a.is_finite() && b.is_finite() && b > a && new.text.chars().any(char::is_alphanumeric))
+                .then_some((a - 2.0, b + 2.0))
+        })
+        .collect();
+    intervals.sort_by(|a, b| a.0.total_cmp(&b.0));
     for row in &proposal.original {
         let (Some(start), Some(end)) = (row.audio_start_time, row.audio_end_time) else {
             continue;
@@ -115,22 +128,25 @@ fn check_baseline_regions(proposal: &Proposal) -> Result<()> {
             continue;
         }
         let end = end.min(proposal.duration_seconds);
-        let covered =
-            proposal
-                .segments
-                .iter()
-                .any(|new| match (new.audio_start_time, new.audio_end_time) {
-                    (Some(a), Some(b)) => {
-                        a.is_finite()
-                            && b.is_finite()
-                            && b + 2.0 > start
-                            && a - 2.0 < end
-                            && new.text.chars().any(char::is_alphanumeric)
-                    }
-                    _ => false,
-                });
-        if !covered {
-            return Err(anyhow!("Enhance produced no text for previously transcribed speech at {:02}:{:02}. The saved transcript was kept.",start as u64/60,start as u64%60));
+        let mut cursor = start;
+        let mut covered = false;
+        let mut gap = false;
+        for &(a, b) in &intervals {
+            if b <= start {
+                continue;
+            }
+            if a >= end {
+                break;
+            }
+            covered = true;
+            if a - cursor > 2.0 {
+                gap = true;
+                break;
+            }
+            cursor = cursor.max(b);
+        }
+        if !covered || gap || end - cursor > 2.0 {
+            return Err(anyhow!("Enhance left a gap in previously transcribed speech at {:02}:{:02}. The saved transcript was kept.",start as u64/60,start as u64%60));
         }
     }
     Ok(())

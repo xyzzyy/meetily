@@ -1022,6 +1022,7 @@ async fn apply_review_content<R: Runtime>(
     )
     .await
     .map_err(|e| e.to_string())?;
+    emit_speaker_refresh(app, meeting_id);
     let folder = PathBuf::from(&proposal.folder);
     let transcript_export = write_transcripts_json(&folder, &proposal.segments);
     let audio = find_audio_file(&folder)
@@ -1052,12 +1053,22 @@ pub async fn undo_enhancement<R: Runtime>(
     )
     .await
     .map_err(|e| e.to_string())?;
+    emit_speaker_refresh(&app, &meeting_id);
     let segments =
         super::enhancement_review::original_segments(&proposal).map_err(|e| e.to_string())?;
     if write_transcripts_json(&PathBuf::from(&proposal.folder), &segments).is_err() {
         return Ok(Some("Undo restored the transcript in the app, but its recording folder export could not be updated.".into()));
     }
     Ok(None)
+}
+
+fn emit_speaker_refresh<R: Runtime>(app: &AppHandle<R>, meeting_id: &str) {
+    let _ = app.emit(
+        "diarization-progress",
+        serde_json::json!({
+            "meetingId": meeting_id, "status": "completed", "progress": 100, "error": null,
+        }),
+    );
 }
 
 #[tauri::command]

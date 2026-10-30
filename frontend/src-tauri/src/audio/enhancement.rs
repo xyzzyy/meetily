@@ -21,43 +21,51 @@ fn timed_words(
     if result.tokens.len() != result.timestamps.len() || result.tokens.is_empty() {
         return None;
     }
-    let mut words: Vec<(String, f64, f64)> = Vec::new();
+    let mut times = Vec::with_capacity(result.timestamps.len());
     let mut previous = 0.0;
-    for (token, time) in result.tokens.iter().zip(&result.timestamps) {
+    for time in &result.timestamps {
         let time = *time as f64 * 1000.0;
         if !time.is_finite() || time < previous || time < 0.0 || time >= duration_ms {
             return None;
         }
         previous = time;
-        let boundary = token.starts_with(char::is_whitespace);
-        let piece = token.trim();
-        if piece.is_empty() {
-            continue;
+        times.push(time);
+    }
+    // Take word boundaries from the model's own text. Its spacing rules only
+    // change whitespace (" ." joins the previous word, a lone " " separates
+    // two tokens), so its non-space characters are exactly the tokens'.
+    let mut characters = result.tokens.iter().zip(times).flat_map(|(token, time)| {
+        token
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .map(move |c| (c, time))
+    });
+    let mut words: Vec<(String, f64, f64)> = Vec::new();
+    for word in result.text.split_whitespace() {
+        let mut first = None;
+        let mut last = 0.0;
+        for expected in word.chars() {
+            let (actual, time) = characters.next()?;
+            if actual != expected {
+                return None;
+            }
+            first.get_or_insert(time);
+            last = time;
         }
-        if boundary || words.is_empty() {
-            words.push((
-                piece.to_string(),
-                offset_ms + time,
-                offset_ms + (time + 160.0).min(duration_ms),
-            ));
-        } else {
-            let last = words.last_mut().unwrap();
-            last.0.push_str(piece);
-            last.2 = offset_ms + (time + 160.0).min(duration_ms);
-        }
+        words.push((
+            word.to_string(),
+            offset_ms + first?,
+            offset_ms + (last + 160.0).min(duration_ms),
+        ));
+    }
+    if characters.next().is_some() {
+        return None;
     }
     for i in 0..words.len().saturating_sub(1) {
         // Two short words may share a quantized token time. Keep a positive span.
         words[i].2 = words[i].2.min(words[i + 1].1.max(words[i].1 + 40.0));
     }
-    let reconstructed = words
-        .iter()
-        .map(|word| word.0.as_str())
-        .collect::<Vec<_>>()
-        .join(" ");
-    (reconstructed == result.text.split_whitespace().collect::<Vec<_>>().join(" ")
-        && !words.is_empty())
-    .then_some(words)
+    (!words.is_empty()).then_some(words)
 }
 
 pub(crate) fn parakeet_rows(
@@ -1114,6 +1122,56 @@ mod tests {
     }
 
     #[test]
+    fn timed_words_keep_a_break_after_a_space_only_token() {
+        let result = timed(
+            "like 40 minutes",
+            &[" like", " ", "40", " minutes"],
+            &[0.0, 0.25, 0.25, 0.5],
+        );
+        let words = timed_words(&result, 0.0, 2000.0).expect("text with a space-only token");
+        assert_eq!(
+            words.iter().map(|w| w.0.as_str()).collect::<Vec<_>>(),
+            ["like", "40", "minutes"]
+        );
+    }
+
+    #[test]
+    fn timed_words_map_unicode_and_words_inside_one_token() {
+        let result = timed(
+            "Café déjà vu.",
+            &[" Café dé", "jà vu", " ."],
+            &[0.0, 0.25, 0.5],
+        );
+        let words = timed_words(&result, 1000.0, 2000.0).unwrap();
+        assert_eq!(
+            words,
+            vec![
+                ("Café".into(), 1000.0, 1040.0),
+                ("déjà".into(), 1000.0, 1250.0),
+                ("vu.".into(), 1250.0, 1660.0),
+            ]
+        );
+    }
+
+    #[test]
+    fn timed_words_attach_spaced_punctuation_like_the_model_text() {
+        let result = timed(
+            "Hello world.",
+            &[" Hello", " world", " ."],
+            &[0.0, 0.25, 0.5],
+        );
+        let words = timed_words(&result, 0.0, 2000.0).expect("text with spaced punctuation");
+        assert_eq!(
+            words.iter().map(|w| w.0.as_str()).collect::<Vec<_>>(),
+            ["Hello", "world."]
+        );
+        assert_eq!(
+            words[1].2, 660.0,
+            "the word ends after its punctuation token"
+        );
+    }
+
+    #[test]
     fn timed_words_build_spans_from_token_times() {
         // 0.125 seconds stays exact through the f32 token times.
         let result = timed("Hello world", &[" Hello", " world"], &[0.0, 0.125]);
@@ -1843,7 +1901,7 @@ mod tests {
             .unwrap();
         sqlx::query("INSERT INTO meetings(id,title,created_at,updated_at) VALUES ('m1','Test',CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)")
             .execute(&core).await.unwrap();
-        sqlx::query("INSERT INTO transcripts(id,meeting_id,transcript,timestamp,audio_start_time,audio_end_time,duration) VALUES ('old','m1','Old merged text','old time',0,88,88)")
+        sqlx::query("INSERT INTO transcripts(id,meeting_id,transcript,timestamp,audio_start_time,audio_end_time,duration) VALUES ('old','m1','Old merged text','old time',0,2,2)")
             .execute(&core).await.unwrap();
         sqlx::query("INSERT INTO transcript_speakers(transcript_id,meeting_id,speaker_id,speaker_label,diarization_status,published) VALUES ('old','m1','old-speaker','Speaker 1','final',1)")
             .execute(&feature).await.unwrap();
@@ -2324,6 +2382,63 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn long_rows_need_output_across_their_interior() {
+        let (_dir, core, feature, original) = publication_fixture().await;
+        let id = staged_review(&core, &feature, &original).await;
+        let mut proposal = super::super::enhancement_review::load(&feature, "m1", &id)
+            .await
+            .unwrap();
+        proposal.original[0].audio_end_time = Some(88.0);
+        // Reject lost tails, lost heads, and large interior gaps.
+        for spans in [
+            vec![(1.25, 1.41)],
+            vec![(80.0, 88.0)],
+            vec![(0.0, 20.0), (70.0, 88.0)],
+        ] {
+            proposal.segments = spans
+                .into_iter()
+                .map(|(a, b)| {
+                    let mut row = fresh_segments().remove(0);
+                    row.audio_start_time = Some(a);
+                    row.audio_end_time = Some(b);
+                    row.duration = Some(b - a);
+                    row
+                })
+                .collect();
+            let error = super::super::enhancement_review::stage(&core, &feature, proposal)
+                .await
+                .unwrap_err();
+            assert!(error.to_string().contains("left a gap"));
+            proposal = super::super::enhancement_review::load(&feature, "m1", &id)
+                .await
+                .unwrap();
+            proposal.original[0].audio_end_time = Some(88.0);
+        }
+        // Union coverage can be out of order, overlap, and contain short pauses.
+        proposal.segments = [(52.0, 87.0), (1.0, 30.0), (28.0, 48.0)]
+            .into_iter()
+            .map(|(a, b)| {
+                let mut segment = fresh_segments().remove(0);
+                segment.id = uuid::Uuid::new_v4().to_string();
+                segment.audio_start_time = Some(a);
+                segment.audio_end_time = Some(b);
+                segment.duration = Some(b - a);
+                segment
+            })
+            .collect();
+        super::super::enhancement_review::stage(&core, &feature, proposal)
+            .await
+            .unwrap();
+        let saved = crate::diarization::finalize::load_transcripts(&core, "m1")
+            .await
+            .unwrap();
+        assert_eq!(
+            serde_json::to_string(&saved).unwrap(),
+            serde_json::to_string(&original).unwrap()
+        );
+    }
+
+    #[tokio::test]
     async fn an_estimated_boundary_shift_does_not_reject_existing_speech() {
         let (_dir, core, feature, _) = publication_fixture().await;
         sqlx::query("UPDATE transcripts SET audio_start_time=17,audio_end_time=18,duration=1 WHERE id='old'")
@@ -2468,7 +2583,14 @@ mod tests {
 
     #[tokio::test]
     async fn fresh_model_text_and_times_replace_a_long_old_row() {
-        let (_dir, core, feature, original) = publication_fixture().await;
+        let (_dir, core, feature, _) = publication_fixture().await;
+        sqlx::query("UPDATE transcripts SET audio_end_time=88,duration=88 WHERE id='old'")
+            .execute(&core)
+            .await
+            .unwrap();
+        let original = crate::diarization::finalize::load_transcripts(&core, "m1")
+            .await
+            .unwrap();
         let segments = fresh_segments();
         publish(
             &core,

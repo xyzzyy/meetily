@@ -263,6 +263,15 @@ export function RetranscribeDialog({
 
             setIsProcessing(false);
             setError(event.payload.error);
+            setLoadingReview(true);
+            try {
+              const pending = await invoke<EnhancementReview | null>('get_enhancement_review', { meetingId });
+              if (!cleanedUpRef.current) setReview(pending?.applied ? null : pending);
+            } catch (error) {
+              console.warn('Failed to load the pending enhancement:', error);
+            } finally {
+              if (!cleanedUpRef.current) setLoadingReview(false);
+            }
           }
         }
       );
@@ -551,6 +560,7 @@ export function RetranscribeDialog({
                 Close
               </Button>
               <Button
+                disabled={loadingReview}
                 onClick={() => {
                   setError(null);
                   setProgress(null);
