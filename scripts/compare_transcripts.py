@@ -68,7 +68,7 @@ def compare(reference, candidate):
         changes.append({
             'reference_row': index,
             'reference_start': first_present(row, 'audio_start_time', 'start'),
-            'reference_text': row.get('text', row.get('transcript', '')),
+            'reference_text': first_present(row, 'text', 'transcript') or '',
             'edits': [{'type': kind, 'before': before, 'after': after}
                       for kind, at, before, after in reversed(edits) if at == index],
         })

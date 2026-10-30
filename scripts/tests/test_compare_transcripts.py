@@ -38,6 +38,8 @@ class ComparisonTests(unittest.TestCase):
         loaded = comparison.load_rows(path)
         self.assertEqual([row['transcript'] for row in loaded], ['Andrew', 'stay'])
         self.assertEqual(comparison.compare([{'text': 'Andrew stay'}], loaded)['word_difference_rate'], 0)
+        changed = comparison.compare(loaded, [])['changed_reference_rows']
+        self.assertEqual([row['reference_text'] for row in changed], ['Andrew', 'stay'])
 
     def test_regression_gate_requires_checked_words(self):
         with self.assertRaisesRegex(ValueError, 'human-checked'):
