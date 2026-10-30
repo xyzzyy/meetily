@@ -11,12 +11,13 @@ const contentTypes: Record<string, string> = {
 };
 
 async function openMeeting(page: Page, {
-  format = 'markdown', segmentCount = 1, summary = summaryText, longRowIndex,
+  format = 'markdown', segmentCount = 1, summary = summaryText, longRowIndex, enhancement = false,
 }: {
   format?: 'markdown' | 'blocknote' | 'empty';
   segmentCount?: number;
   summary?: string;
   longRowIndex?: number;
+  enhancement?: boolean;
 } = {}) {
     const errors: string[] = [];
     page.on('pageerror', error => errors.push(error.message));
@@ -27,7 +28,10 @@ async function openMeeting(page: Page, {
 
     // Exercise the real production chunks. Only the desktop IPC boundary is
     // replaced; no React components, editors, or extensions are mocked.
-    await page.addInitScript(({ format, transcriptText, summaryText, segmentCount, longRowIndex }) => {
+    await page.addInitScript(({ format, transcriptText, summaryText, segmentCount, longRowIndex, enhancement }) => {
+      let enhanced = false;
+      const controls = { finish: () => {} };
+      Object.assign(window, { __ENHANCEMENT_TEST__: controls });
       let callbackId = 0;
       const callbacks = new Map<number, unknown>();
       const store = new Map<string, unknown>([
@@ -69,11 +73,11 @@ async function openMeeting(page: Page, {
               };
               case 'check_first_launch': return false;
               case 'plugin:app|version': return '0.4.1';
-              case 'api_get_meetings': return [{ id: 'saved-meeting', title: 'Saved planning meeting' }];
+              case 'api_get_meetings': return [{ id: 'saved-meeting', title: 'Saved planning meeting' }, ...(enhancement ? [{ id: 'other-meeting', title: 'Other planning meeting' }] : [])];
               case 'api_get_meeting_metadata': return {
                 id: args.meetingId, title: 'Saved planning meeting',
                 created_at: '2026-10-27T10:00:00Z', updated_at: '2026-10-27T10:00:00Z',
-                folder_path: null,
+                folder_path: enhancement ? '/recording' : null,
               };
               case 'api_get_meeting_transcripts': {
                 const offset = args.offset ?? 0;
@@ -84,7 +88,7 @@ async function openMeeting(page: Page, {
                     return {
                       id: `transcript-${number + 1}`,
                       text: number === longRowIndex ? 'A long supporting transcript passage. '.repeat(180)
-                        : number === 0 ? transcriptText : `Transcript row ${number + 1}. ${'More meeting detail. '.repeat(number % 3)}`,
+                        : number === 0 ? (enhanced && args.meetingId === 'saved-meeting' ? 'Enhanced transcript after background work.' : transcriptText) : `Transcript row ${number + 1}. ${'More meeting detail. '.repeat(number % 3)}`,
                       timestamp: '10:00:00', audio_start_time: number * 10,
                       audio_end_time: number * 10 + 8, confidence: 0.98,
                       speaker_label: 'Speaker 1',
@@ -105,6 +109,15 @@ async function openMeeting(page: Page, {
                   }] },
               };
               case 'api_get_meeting_summary_language': return { language: null, storage: 'metadata' };
+              case 'whisper_init':
+              case 'parakeet_init':
+              case 'funasr_init': return null;
+              case 'whisper_get_available_models': return [{ name: 'large-v3', size_mb: 100, status: 'Available' }];
+              case 'parakeet_get_available_models':
+              case 'funasr_get_available_models': return [];
+              case 'start_retranscription_command': return new Promise(resolve => {
+                controls.finish = () => { enhanced = true; resolve({ segments_count: 1, duration_seconds: 8 }); };
+              });
               case 'api_get_transcript_config': return { provider: 'localWhisper', model: 'large-v3', apiKey: null };
               case 'api_get_model_config': return { provider: 'ollama', model: 'test-model', whisperModel: 'large-v3' };
               case 'api_get_api_key':
@@ -122,7 +135,7 @@ async function openMeeting(page: Page, {
           },
         },
       });
-    }, { format, transcriptText, summaryText: summary, segmentCount, longRowIndex });
+    }, { format, transcriptText, summaryText: summary, segmentCount, longRowIndex, enhancement });
 
     // Serve the static export through request interception, with no dev server.
     await page.route('https://meetily.test/**', async route => {
@@ -258,3 +271,50 @@ for (const { segmentCount, longRowIndex, timestamp } of [
     expect(errors).toEqual([]);
   });
 }
+
+
+test('enhancement runs while the user closes its dialog and visits another meeting', async ({ page }) => {
+  const errors = await openMeeting(page, { enhancement: true });
+  const enhance = page.getByTitle('Retranscribe to enhance your recorded audio');
+  await enhance.click();
+  await page.getByRole('button', { name: 'Start enhancement', exact: true }).click();
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+  await expect(page.getByText('Enhancing meeting', { exact: true })).toBeVisible();
+  await enhance.click();
+  await expect(page.getByRole('button', { name: 'Run in background' })).toBeVisible();
+  await page.getByRole('dialog').getByRole('button', { name: 'Close', exact: true }).click();
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+  // The sidebar starts collapsed, so expand it before selecting another meeting.
+  await page.locator('.fixed.top-0.left-0.h-screen > button').click();
+  await page.getByText('Other planning meeting', { exact: true }).click();
+  await expect(page).toHaveURL(/id=other-meeting/);
+  await page.evaluate(() => (window as any).__ENHANCEMENT_TEST__.finish());
+  await expect(page.getByText('Enhancement complete. 1 segments created.', { exact: true })).toBeVisible();
+  await page.getByRole('button', { name: 'View meeting', exact: true }).click();
+  await expect(page).toHaveURL(/id=saved-meeting/);
+  await expect(page.getByText('Enhanced transcript after background work.', { exact: true })).toBeVisible();
+  expect(errors).toEqual([]);
+});
+
+test('an enhancement dialog reopened after navigation is ready for another job when work finishes', async ({ page }) => {
+  const errors = await openMeeting(page, { enhancement: true });
+  const enhance = page.getByTitle('Retranscribe to enhance your recorded audio');
+  await enhance.click();
+  await page.getByRole('button', { name: 'Start enhancement', exact: true }).click();
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+  await page.locator('.fixed.top-0.left-0.h-screen > button').click();
+  await page.getByText('Other planning meeting', { exact: true }).click();
+  await expect(page).toHaveURL(/id=other-meeting/);
+  await page.locator('.fixed.top-0.left-0.h-screen').getByText('Saved planning meeting', { exact: true }).click();
+  await expect(page).toHaveURL(/id=saved-meeting/);
+  await enhance.click();
+  await expect(page.getByRole('button', { name: 'Run in background' })).toBeVisible();
+  await page.evaluate(() => (window as any).__ENHANCEMENT_TEST__.finish());
+  await expect(page.getByRole('button', { name: 'Start enhancement', exact: true })).toBeEnabled();
+  await expect(page.getByText('The saved model (large-v3) is not available.', { exact: false })).toHaveCount(0);
+  const resultNotice = page.getByText('Enhancement complete. 1 segments created.', { exact: true });
+  await expect(resultNotice).toBeVisible();
+  await page.mouse.move(0, 0);
+  await expect(resultNotice).toHaveCount(0, { timeout: 10000 });
+  expect(errors).toEqual([]);
+});

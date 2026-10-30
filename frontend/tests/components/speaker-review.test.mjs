@@ -46,6 +46,7 @@ function makePanel(overrides = {}, command = async () => undefined, extraProps =
   };
   const mockRequire = name => {
     if (name === 'react') return hooks;
+    if (name === '@/contexts/TranscriptEnhancementContext') return { useEnhancementCompletion() {} };
     if (name === '@/contexts/ConfigContext') return { useConfig: () => ({
       diarizationSettings: settings, isLoadingDiarizationSettings: false,
       betaFeatures: { importAndRetranscribe: true },

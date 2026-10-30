@@ -33,6 +33,7 @@ function dialog(provider, loading = false, selected = true, supported = true, ch
     if (name === '@/hooks/useTranscriptionModels') return { useTranscriptionModels: () => ({ availableModels: [model],
       selectedModelKey: selected ? `${provider}:${model.name}` : '', loadingModels: loading,
       setSelectedModelKey() {}, fetchModels() {}, resetSelection() {} }) };
+    if (name === '@/contexts/TranscriptEnhancementContext') return { useTranscriptEnhancement: () => ({ job: null, start: args => { calls.push({ command: 'start_retranscription_command', args }); }, cancel: async () => {} }) };
     if (name === '@/lib/analytics') return { default: { track: async () => {}, trackError: async () => {} } };
     if (name === '@/lib/funasr') {
       const helper = { exports: {} };
