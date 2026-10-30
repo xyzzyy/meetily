@@ -9,7 +9,7 @@ import unicodedata
 
 
 def load_rows(path):
-    data = json.loads(Path(path).read_text())
+    data = json.loads(Path(path).read_text(encoding='utf-8'))
     rows = data.get('segments', []) if isinstance(data, dict) else data
     if not isinstance(rows, list):
         raise ValueError('Expected transcript rows or a segments array')
@@ -119,7 +119,7 @@ def main():
         if args.verified_reference:
             report['reference_is_ground_truth'] = True
             report['word_error_rate'] = report['word_difference_rate']
-    Path(args.output).write_text(json.dumps(report, indent=2) + '\n')
+    Path(args.output).write_text(json.dumps(report, indent=2) + '\n', encoding='utf-8')
     print(json.dumps({k: v for k, v in report.items() if k != 'changed_reference_rows'}, indent=2))
     return 1 if report.get('regression') else 0
 
