@@ -138,7 +138,11 @@ for (const outcome of ['success', 'failure', 'cancelled']) {
     await act(async () => progress({ payload: {
       meeting_id: request.meetingId, stage: 'transcribing', progress_percentage: 50, message: 'Transcribing current audio...',
     } }));
-    const notice = () => originalToast.toast.getHistory().find(toast => toast.id === 'transcript-enhancement')!;
+    const notice = () => {
+      const current = originalToast.toast.getHistory().find(toast => toast.id === 'transcript-enhancement');
+      if (!current || 'dismiss' in current) throw new Error('Expected the enhancement notice');
+      return current;
+    };
     expect(notice().duration).toBe(Infinity);
     expect(notice().description).toBe('Transcribing current audio...');
     if (outcome === 'cancelled') await act(async () => current.cancel());

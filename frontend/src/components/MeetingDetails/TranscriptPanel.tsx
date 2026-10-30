@@ -417,7 +417,6 @@ export function TranscriptPanel({
           onOpenMeetingFolder={onOpenMeetingFolder}
           meetingId={meetingId}
           meetingFolderPath={meetingFolderPath}
-          onRefetchTranscripts={onRefetchTranscripts}
         />
       </div>
 

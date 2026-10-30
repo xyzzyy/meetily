@@ -323,7 +323,7 @@ export function RetranscribeDialog({
               <Button
                 onClick={() => {
                   setError(null);
-                            }}
+                }}
                 variant="outline"
               >
                 Try Again
