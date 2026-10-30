@@ -326,6 +326,26 @@ test('closing a notice does not reopen it on the next progress update', async ({
   expect(errors).toEqual([]);
 });
 
+test('a completion in the same commit as another notice closing still updates', async ({ page }) => {
+  const errors = await openMeeting(page);
+  const download = downloadCases[0];
+  await page.waitForFunction(event => (window as any).__downloadTest.listenerCount(event) > 0, download.event);
+  for (const modelName of ['closing-notice', 'completing-notice']) {
+    await page.evaluate(({ event, modelName }) => (window as any).__downloadTest.emit(event,
+      { modelName, progress: 99, status: 'downloading' }), { event: download.event, modelName });
+    await expect(page.locator('[data-sonner-toast]').filter({ hasText: modelName })).toContainText('99%');
+  }
+  // Sonner applies a dismissal two frames later. Emit in those frames so both updates share one commit.
+  await page.evaluate(() => {
+    const closing = [...document.querySelectorAll('[data-sonner-toast]')].find(notice => notice.textContent?.includes('closing-notice'));
+    closing!.querySelector<HTMLButtonElement>('button[aria-label="Close download notice"]')!.click();
+    requestAnimationFrame(() => requestAnimationFrame(() => (window as any).__downloadTest.emit(
+      'parakeet-model-download-complete', { modelName: 'completing-notice' })));
+  });
+  await expect(page.locator('[data-sonner-toast]').filter({ hasText: 'completing-notice' })).toContainText('Download complete');
+  expect(errors).toEqual([]);
+});
+
 test('100% summary progress waits for readiness confirmation', async ({ page }) => {
   const errors = await openMeeting(page);
   const download = downloadCases[4];

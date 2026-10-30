@@ -139,7 +139,6 @@ export function useDownloadProgressToast() {
   const cleanupTimers = useRef(new Map<string, ReturnType<typeof setTimeout>>());
   const generations = useRef(new Map<string, number>());
   const generationCounter = useRef(0);
-  const shown = useRef(new Map<string, DownloadProgress>());
   const hasActiveDownloads = [...downloads.values()].some(download => download.status === 'downloading');
 
   const updateDownload = useCallback((provider: DownloadProvider, event: DownloadEvent, fallback: DownloadStatus) => {
@@ -173,6 +172,18 @@ export function useDownloadProgressToast() {
     const next = new Map(current.current).set(key, download);
     current.current = next;
     setDownloads(next);
+    // Publish here, not from a render effect. Sonner's Toaster resubscribes after each of its own
+    // updates, so a notice sent from an effect in the same commit can reach no subscriber.
+    if (!dismissed.current.has(key)) {
+      const id = `download-${key}`;
+      toast.custom(() => <DownloadToastContent download={download} onDismiss={() => {
+        dismissed.current.add(key);
+        toast.dismiss(id);
+      }} />, {
+        position: 'top-right', id,
+        duration: status === 'downloading' ? Infinity : status === 'completed' ? 3000 : status === 'cancelled' ? 5000 : 10000,
+      });
+    }
     const timer = cleanupTimers.current.get(key);
     if (timer) clearTimeout(timer);
     cleanupTimers.current.delete(key);
@@ -186,7 +197,6 @@ export function useDownloadProgressToast() {
         setDownloads(next);
         dismissed.current.delete(key);
         cleanupTimers.current.delete(key);
-        shown.current.delete(key);
         generations.current.delete(key);
       }, delay));
     }
@@ -196,7 +206,6 @@ export function useDownloadProgressToast() {
     let disposed = false;
     const subscriptions: Promise<() => void>[] = [];
     const ownedCleanupTimers = cleanupTimers.current;
-    const renderedNotices = shown.current;
     for (const provider of downloadProviders) {
       const subscribe = (name: string | undefined, status: DownloadStatus) => {
         if (!name) return;
@@ -243,7 +252,6 @@ export function useDownloadProgressToast() {
       ownedCleanupTimers.forEach(clearTimeout);
       ownedCleanupTimers.clear();
       current.current.forEach((_, key) => toast.dismiss(`download-${key}`));
-      renderedNotices.clear();
     };
   }, [updateDownload]);
 
@@ -279,21 +287,6 @@ export function useDownloadProgressToast() {
       clearInterval(timer);
     };
   }, [hasActiveDownloads, updateDownload]);
-
-  useEffect(() => {
-    downloads.forEach((download, key) => {
-      if (dismissed.current.has(key) || shown.current.get(key) === download) return;
-      shown.current.set(key, download);
-      const id = `download-${key}`;
-      toast.custom(() => <DownloadToastContent download={download} onDismiss={() => {
-        dismissed.current.add(key);
-        toast.dismiss(id);
-      }} />, {
-        position: 'top-right', id,
-        duration: download.status === 'downloading' ? Infinity : download.status === 'completed' ? 3000 : download.status === 'cancelled' ? 5000 : 10000,
-      });
-    });
-  }, [downloads]);
 
   return { downloads };
 }
