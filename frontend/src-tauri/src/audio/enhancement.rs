@@ -366,9 +366,13 @@ pub(crate) fn recognition_inputs(
             || start < 0.0
             || end <= start
             || !row.transcript.chars().any(char::is_alphanumeric)
-            || inputs.iter().any(|input| {
-                input.start_timestamp_ms < end * 1000.0 && input.end_timestamp_ms > start * 1000.0
-            })
+            || uncovered_ms(
+                start * 1000.0,
+                end * 1000.0,
+                inputs
+                    .iter()
+                    .map(|input| (input.start_timestamp_ms, input.end_timestamp_ms)),
+            ) < MIN_RECOVERY_MS
         {
             continue;
         }
@@ -393,6 +397,8 @@ pub(crate) fn recognition_inputs(
         speech_context_with_target(&missed, &mixed, policy.context_target_ms)
             .iter()
             .flat_map(|segment| outside_inputs(segment, &taken, &mixed))
+            // Clipping can leave slivers of padding next to a track input.
+            .filter(|piece| piece.end_timestamp_ms - piece.start_timestamp_ms >= MIN_RECOVERY_MS)
             .map(RecognitionInput::mixed),
     );
     inputs.sort_by(|a, b| {
@@ -401,6 +407,27 @@ pub(crate) fn recognition_inputs(
             .then(a.source.cmp(&b.source))
     });
     Ok(inputs)
+}
+
+/// Recover a live row whose speech no input covers, including the uncovered
+/// part of a row an input only partly overlaps. Gaps shorter than this are
+/// pauses between inputs; decoding them alone invites invented text.
+const MIN_RECOVERY_MS: f64 = 500.0;
+
+fn uncovered_ms(start_ms: f64, end_ms: f64, spans: impl IntoIterator<Item = (f64, f64)>) -> f64 {
+    let mut covered: Vec<_> = spans
+        .into_iter()
+        .map(|(a, b)| (a.max(start_ms), b.min(end_ms)))
+        .filter(|(a, b)| b > a)
+        .collect();
+    covered.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let mut cursor = start_ms;
+    let mut free = 0.0;
+    for (a, b) in covered {
+        free += (a - cursor).max(0.0);
+        cursor = cursor.max(b);
+    }
+    free + (end_ms - cursor).max(0.0)
 }
 
 /// Remove the time ranges in `taken` from a 16 kHz span of `audio`.
@@ -474,9 +501,15 @@ fn recognition_speech_segments_with_context(
         {
             continue;
         }
-        if spans.iter().any(|span| {
-            span.start_timestamp_ms < end * 1000.0 && span.end_timestamp_ms > start * 1000.0
-        }) {
+        // Recovered audio overlapping a span merges with it below.
+        if uncovered_ms(
+            start * 1000.0,
+            end * 1000.0,
+            spans
+                .iter()
+                .map(|span| (span.start_timestamp_ms, span.end_timestamp_ms)),
+        ) < MIN_RECOVERY_MS
+        {
             continue;
         }
         // A live transcription is evidence that this region needs another
@@ -1386,6 +1419,22 @@ mod tests {
         assert_eq!(
             outside_inputs(&joined, &[], &audio)[0].samples,
             joined.samples
+        );
+    }
+
+    #[test]
+    fn recovery_measures_the_uncovered_part_of_a_live_row() {
+        // Quiet speech at 4.0-4.7 s before a system input at 4.7-6.0 s.
+        assert_eq!(uncovered_ms(4000.0, 6000.0, [(4700.0, 6000.0)]), 700.0);
+        assert!(uncovered_ms(4000.0, 6000.0, [(4700.0, 6000.0)]) >= MIN_RECOVERY_MS);
+        // A pause between two inputs is not recovered on its own.
+        assert!(
+            uncovered_ms(4000.0, 6000.0, [(3000.0, 4800.0), (5100.0, 7000.0)]) < MIN_RECOVERY_MS
+        );
+        assert_eq!(uncovered_ms(4000.0, 6000.0, []), 2000.0);
+        assert_eq!(
+            uncovered_ms(4000.0, 6000.0, [(3000.0, 5000.0), (4500.0, 6500.0)]),
+            0.0
         );
     }
 
