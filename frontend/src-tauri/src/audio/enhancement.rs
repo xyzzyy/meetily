@@ -348,7 +348,7 @@ pub(crate) fn recognition_inputs(
         // Pickup detection uses the same short analysis windows for every
         // engine. The recognizer's context size must not change that evidence.
         let typical_level = typical_speech_level(&spans);
-        track_levels.push((track.samples.as_slice(), typical_level));
+        track_levels.push((source.as_str(), track.samples.as_slice(), typical_level));
         let retained: Vec<_> = spans
             .into_iter()
             .filter(|segment| !weak_cross_track_pickup(segment, other, typical_level))
@@ -406,7 +406,13 @@ pub(crate) fn recognition_inputs(
     // contains both tracks, so decode only the audio no track speech covers.
     let input_ranges: Vec<_> = inputs
         .iter()
-        .map(|input| (input.start_timestamp_ms, input.end_timestamp_ms))
+        .map(|input| {
+            (
+                input.source.clone().unwrap_or_default(),
+                input.start_timestamp_ms,
+                input.end_timestamp_ms,
+            )
+        })
         .collect();
     inputs.extend(
         speech_context_with_target(&missed, &mixed, policy.context_target_ms)
@@ -415,13 +421,15 @@ pub(crate) fn recognition_inputs(
             // Clipping can leave slivers of padding next to a track input.
             .filter(|piece| piece.end_timestamp_ms - piece.start_timestamp_ms >= MIN_RECOVERY_MS)
             // A piece inside a track's joined input is a pause of that track.
-            // Live row times are estimates, so decode it only if some track
-            // is audible there; recognizers invent text for silence.
             .filter(|piece| {
-                !input_ranges
+                let covering: Vec<&str> = input_ranges
                     .iter()
-                    .any(|(a, b)| *a < piece.end_timestamp_ms && *b > piece.start_timestamp_ms)
-                    || audible(piece, &track_levels)
+                    .filter(|(_, a, b)| {
+                        *a < piece.end_timestamp_ms && *b > piece.start_timestamp_ms
+                    })
+                    .map(|(source, _, _)| source.as_str())
+                    .collect();
+                covering.is_empty() || decode_recovered_pause(piece, &covering, &track_levels)
             })
             .map(RecognitionInput::mixed),
     );
@@ -454,19 +462,35 @@ fn uncovered_ms(start_ms: f64, end_ms: f64, spans: impl IntoIterator<Item = (f64
     free + (end_ms - cursor).max(0.0)
 }
 
-/// Some track reaches the level below which pickup counts as faint. A track
+/// Decide whether to decode a recovered piece that lies inside the joined
+/// input of the `covering` tracks. Live row times are estimates and
+/// recognizers invent text for silence, so a track must be audible there.
+/// That track must not be a covering one: its input already holds the audio,
+/// and the mix would decode its words a second time.
+fn decode_recovered_pause(
+    piece: &super::vad::SpeechSegment,
+    covering: &[&str],
+    tracks: &[(&str, &[f32], f64)],
+) -> bool {
+    let mut audible_tracks = tracks
+        .iter()
+        .filter(|(_, samples, typical)| audible(piece, samples, *typical))
+        .map(|(source, _, _)| *source)
+        .peekable();
+    audible_tracks.peek().is_some() && audible_tracks.all(|source| !covering.contains(&source))
+}
+
+/// The track reaches the level below which pickup counts as faint. A track
 /// with no detected speech has no level to compare against, so it never
 /// counts as audible.
-fn audible(piece: &super::vad::SpeechSegment, tracks: &[(&[f32], f64)]) -> bool {
+fn audible(piece: &super::vad::SpeechSegment, samples: &[f32], typical: f64) -> bool {
     let from = (piece.start_timestamp_ms * 16.0).round() as usize;
     let to = (piece.end_timestamp_ms * 16.0).round() as usize;
-    tracks.iter().any(|(samples, typical)| {
-        *typical > 0.0
-            && samples
-                .get(from..to.min(samples.len()))
-                .filter(|window| !window.is_empty())
-                .is_some_and(|window| rms(window) >= typical * FAINT_LEVEL)
-    })
+    typical > 0.0
+        && samples
+            .get(from..to.min(samples.len()))
+            .filter(|window| !window.is_empty())
+            .is_some_and(|window| rms(window) >= typical * FAINT_LEVEL)
 }
 
 /// Remove the time ranges in `taken` from a 16 kHz span of `audio`.
@@ -1494,16 +1518,43 @@ mod tests {
         let piece = speech_segment(1000.0, 2000.0, 16_000);
         let speech: Vec<f32> = (0..48_000).map(|i| 0.1 * (i as f32 * 0.05).sin()).collect();
         let quiet: Vec<f32> = speech.iter().map(|s| s * 0.05).collect();
-        assert!(audible(&piece, &[(&speech, 0.07)]));
+        assert!(audible(&piece, &speech, 0.07));
         assert!(
-            !audible(&piece, &[(&quiet, 0.07)]),
+            !audible(&piece, &quiet, 0.07),
             "noise-floor audio is a pause"
         );
-        assert!(audible(&piece, &[(&quiet, 0.07), (&speech, 0.07)]));
-        assert!(!audible(&piece, &[(&[], 0.07)]));
+        assert!(!audible(&piece, &[], 0.07));
         assert!(
-            !audible(&piece, &[(&quiet, 0.0)]),
+            !audible(&piece, &quiet, 0.0),
             "a track with no detected speech cannot make a pause audible"
+        );
+        let mic_pause_system_quiet = [
+            ("microphone", quiet.as_slice(), 0.07),
+            ("system", speech.as_slice(), 0.07),
+        ];
+        assert!(
+            decode_recovered_pause(&piece, &["microphone"], &mic_pause_system_quiet),
+            "quiet speech on the other track inside a microphone pause"
+        );
+        assert!(
+            !decode_recovered_pause(&piece, &["system"], &mic_pause_system_quiet),
+            "the system input already holds this audio"
+        );
+        assert!(
+            !decode_recovered_pause(
+                &piece,
+                &["microphone"],
+                &[("microphone", quiet.as_slice(), 0.07)]
+            ),
+            "silence on every track"
+        );
+        let both_audible = [
+            ("microphone", speech.as_slice(), 0.07),
+            ("system", speech.as_slice(), 0.07),
+        ];
+        assert!(
+            !decode_recovered_pause(&piece, &["microphone"], &both_audible),
+            "the mix would repeat the covering track's words"
         );
     }
 
