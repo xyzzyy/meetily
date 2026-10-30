@@ -256,6 +256,30 @@ pub struct DownloadProgress {
     pub total: u64,
 }
 
+// The notice checks the same server as the active pull, after the worker stops.
+#[command]
+pub async fn get_ollama_download_status(
+    model_name: String,
+    endpoint: Option<String>,
+) -> Result<String, String> {
+    if DOWNLOADING_MODELS.read().await.contains(&model_name) {
+        return Ok("downloading".into());
+    }
+    let models = get_ollama_models(endpoint).await?;
+    let canonical = |name: &str| {
+        if name.rsplit('/').next().unwrap_or(name).contains(':') {
+            name.to_string()
+        } else {
+            format!("{}:latest", name)
+        }
+    };
+    Ok(if models.iter().any(|model| canonical(&model.name) == canonical(&model_name)) {
+        "completed"
+    } else {
+        "error"
+    }.into())
+}
+
 #[command]
 pub async fn pull_ollama_model<R: Runtime>(
     app_handle: AppHandle<R>,
@@ -317,6 +341,7 @@ pub async fn pull_ollama_model<R: Runtime>(
         let _ = app_handle.emit(
             "ollama-model-download-error",
             serde_json::json!({
+                "endpoint": endpoint,
                 "modelName": model_name,
                 "error": format!("HTTP {}: {}", status, error_text)
             }),
@@ -344,6 +369,7 @@ pub async fn pull_ollama_model<R: Runtime>(
             let _ = app_handle.emit(
                 "ollama-model-download-error",
                 serde_json::json!({
+                    "endpoint": endpoint,
                     "modelName": model_name,
                     "error": error_msg
                 }),
@@ -379,6 +405,7 @@ pub async fn pull_ollama_model<R: Runtime>(
                             let _ = app_handle.emit(
                                 "ollama-model-download-progress",
                                 serde_json::json!({
+                                    "endpoint": endpoint,
                                     "modelName": model_name,
                                     "progress": progress
                                 }),
@@ -402,6 +429,7 @@ pub async fn pull_ollama_model<R: Runtime>(
                     let _ = app_handle.emit(
                         "ollama-model-download-error",
                         serde_json::json!({
+                            "endpoint": endpoint,
                             "modelName": model_name,
                             "error": error_msg
                         }),
@@ -423,6 +451,7 @@ pub async fn pull_ollama_model<R: Runtime>(
     let _ = app_handle.emit(
         "ollama-model-download-complete",
         serde_json::json!({
+            "endpoint": endpoint,
             "modelName": model_name
         }),
     );

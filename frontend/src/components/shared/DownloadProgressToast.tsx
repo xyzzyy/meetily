@@ -1,21 +1,21 @@
 'use client';
 
-import React, { useEffect, useState, useCallback } from 'react';
+import React, { useEffect, useState, useCallback, useRef } from 'react';
 import { listen } from '@tauri-apps/api/event';
-import { invoke } from '@tauri-apps/api/core';
 import { toast } from 'sonner';
 import { X, Check, ArrowBigDownDash } from 'lucide-react';
-import { getDownloadTotalMb } from '@/lib/onboarding-summary-model';
-import type { ParakeetDownloadProgressEvent, ParakeetModelInfo } from '@/lib/parakeet';
+import { downloadProviders, checkDownloads, eventStatus, type DownloadEvent, type DownloadProvider, type DownloadStatus } from '@/lib/model-downloads';
 
 interface DownloadProgress {
+  provider: string;
+  endpoint?: string | null;
   modelName: string;
   displayName: string;
   progress: number;
   downloadedMb: number;
   totalMb: number;
   speedMbps: number;
-  status: 'downloading' | 'completed' | 'error' | 'cancelled';
+  status: DownloadStatus;
   unitLabel?: string;
   error?: string;
 }
@@ -60,7 +60,7 @@ function DownloadToastContent({
   const isComplete = download.status === 'completed';
   const hasError = download.status === 'error';
   const isCancelled = download.status === 'cancelled';
-  const unitLabel = download.unitLabel ?? 'MB';
+  const unitLabel = download.unitLabel ?? 'MiB';
 
   return (
     <div className="flex items-center gap-3 w-full max-w-sm bg-white dark:bg-ink-900 rounded-lg shadow-lg border border-gray-200 dark:border-ink-800 p-3 relative">
@@ -110,7 +110,7 @@ function DownloadToastContent({
             {/* Progress text */}
             <div className="flex items-center justify-between text-xs text-gray-500 dark:text-ink-400">
               <span>
-                {download.downloadedMb.toFixed(1)} / {download.totalMb.toFixed(1)} {unitLabel}
+                {download.totalMb > 0 ? `${download.downloadedMb.toFixed(1)} / ${download.totalMb.toFixed(1)} ${unitLabel}` : 'Download in progress'}
               </span>
               <span className="flex items-center gap-1">
                 {download.speedMbps > 0 && (
@@ -128,258 +128,130 @@ function DownloadToastContent({
   );
 }
 
-// Hook to manage download progress toasts
+// One lifecycle for all model notices: events, status checks, dismissal, and cleanup.
 export function useDownloadProgressToast() {
   const [downloads, setDownloads] = useState<Map<string, DownloadProgress>>(new Map());
-  const [dismissedModels, setDismissedModels] = useState<Set<string>>(new Set());
+  const current = useRef(downloads);
+  const dismissed = useRef(new Set<string>());
+  const cleanupTimers = useRef(new Map<string, ReturnType<typeof setTimeout>>());
+  const generations = useRef(new Map<string, number>());
 
-  const updateDownload = useCallback((modelName: string, data: Partial<DownloadProgress>) => {
-    setDownloads((prev) => {
-      const updated = new Map(prev);
-      const existing = updated.get(modelName) || {
-        modelName,
-        displayName: modelName,
-        progress: 0,
-        downloadedMb: 0,
-        totalMb: 0,
-        speedMbps: 0,
-        status: 'downloading' as const,
-      };
-
-      updated.set(modelName, { ...existing, ...data });
-      return updated;
-    });
+  const updateDownload = useCallback((provider: DownloadProvider, event: DownloadEvent, fallback: DownloadStatus) => {
+    const modelName = event.modelName ?? event.model ?? provider.fixedModel;
+    if (!modelName) return;
+    const key = `${provider.id}:${modelName}`;
+    const status = eventStatus(event, fallback);
+    const old = current.current.get(key);
+    const restart = old && old.status !== 'downloading' && status === 'downloading' && (event.progress ?? event.percent) === 0;
+    // Ignore late progress after a terminal event. A new attempt starts at zero.
+    if (old && old.status !== 'downloading' && status === 'downloading' && !restart) return;
+    if (restart || !old) {
+      generations.current.set(key, (generations.current.get(key) ?? 0) + 1);
+      dismissed.current.delete(key);
+    }
+    const existing = restart ? undefined : old;
+    const download: DownloadProgress = {
+      provider: provider.id, modelName,
+      displayName: `${provider.label}${provider.fixedModel ? '' : `: ${modelName}`}`,
+      progress: status === 'completed' ? 100 : event.progress ?? event.percent ?? existing?.progress ?? 0,
+      downloadedMb: event.downloaded_mb ?? (event.downloaded_bytes === undefined ? existing?.downloadedMb ?? 0 : event.downloaded_bytes / 1048576),
+      totalMb: event.total_mb ?? (event.total_bytes === undefined ? existing?.totalMb ?? 0 : event.total_bytes / 1048576),
+      speedMbps: status === 'downloading' ? event.speed_mbps ?? 0 : 0,
+      endpoint: event.endpoint ?? existing?.endpoint,
+      status,
+      error: status === 'error' ? categorizeError(event.error ?? 'Download stopped before the model was ready') : undefined,
+    };
+    // Terminal events often omit sizes or send zero placeholders.
+    if (status !== 'downloading' && existing) {
+      download.downloadedMb = existing.downloadedMb;
+      download.totalMb = existing.totalMb;
+    }
+    const next = new Map(current.current).set(key, download);
+    current.current = next;
+    setDownloads(next);
+    const timer = cleanupTimers.current.get(key);
+    if (timer) clearTimeout(timer);
+    cleanupTimers.current.delete(key);
+    if (status !== 'downloading') {
+      const delay = status === 'completed' ? 4000 : status === 'cancelled' ? 6000 : 11000;
+      cleanupTimers.current.set(key, setTimeout(() => {
+        toast.dismiss(`download-${key}`);
+        const next = new Map(current.current);
+        next.delete(key);
+        current.current = next;
+        setDownloads(next);
+        dismissed.current.delete(key);
+        cleanupTimers.current.delete(key);
+      }, delay));
+    }
   }, []);
 
-  const cleanupDownload = useCallback((modelName: string, delay: number = 4000) => {
-    // Remove download from map after delay (allows toast to show and auto-dismiss)
-    setTimeout(() => {
-      toast.dismiss(`download-${modelName}`);
-      setDownloads((prev) => {
-        const updated = new Map(prev);
-        updated.delete(modelName);
-        return updated;
-      });
-    }, delay);
-  }, []);
-
-  // Events can be missed. Confirm idle download notices against engine state.
   useEffect(() => {
-    const pending = [...downloads.values()].filter(download =>
-      download.displayName === 'Transcription Model (Parakeet)' && download.status === 'downloading');
-    if (!pending.length) return;
     let disposed = false;
-    let checking = false;
-    const timer = setInterval(async () => {
-      if (checking) return;
-      checking = true;
-      try {
-        const models = await invoke<ParakeetModelInfo[]>('parakeet_get_available_models');
-        if (disposed) return;
-        for (const download of pending) {
-          const model = models.find(model => model.name === download.modelName);
-          if (model?.status === 'Available') {
-            updateDownload(download.modelName, { status: 'completed', progress: 100, speedMbps: 0 });
-            cleanupDownload(download.modelName);
-          }
-        }
-      } catch (error) {
-        console.warn('Could not check Parakeet download status', error);
-      } finally {
-        checking = false;
-      }
-    }, 2000);
-    return () => { disposed = true; clearInterval(timer); };
-  }, [downloads, updateDownload, cleanupDownload]);
-
-  const showDownloadToast = useCallback((download: DownloadProgress) => {
-    const toastId = `download-${download.modelName}`;
-
-    // Determine duration based on status
-    const getDuration = () => {
-      switch (download.status) {
-        case 'completed': return 3000;      // 3 seconds
-        case 'cancelled': return 5000;      // 5 seconds
-        case 'error': return 10000;         // 10 seconds
-        case 'downloading': return Infinity; // Manual dismiss only
-      }
-    };
-
-    // Dismiss handler
-    const dismissToast = () => {
-      toast.dismiss(toastId);
-      setDismissedModels(prev => {
-        const next = new Set(prev);
-        next.add(download.modelName);
-        return next;
-      });
-    };
-
-    toast.custom(
-      (t) => (
-        <DownloadToastContent
-          download={download}
-          onDismiss={dismissToast}
-        />
-      ),
-      {
-        position: 'top-right',
-        id: toastId,
-        duration: getDuration(),
-      }
-    );
-  }, []);
-
-  // Effect to handle toast visibility based on dismissed state
-  useEffect(() => {
-    downloads.forEach((download) => {
-      // If model was dismissed and is still downloading, don't show it
-      if (dismissedModels.has(download.modelName) && download.status === 'downloading') {
-        return;
-      }
-
-      // If status changed to completed or error, we might want to show it even if dismissed previously
-      // (Optional: remove from dismissed set if you want to force show completion)
-      if (download.status === 'completed' || download.status === 'error') {
-        if (dismissedModels.has(download.modelName)) {
-          // Remove from dismissed so we can show the completion/error toast
-          setDismissedModels(prev => {
-            const next = new Set(prev);
-            next.delete(download.modelName);
-            return next;
-          });
-        }
-      }
-
-      showDownloadToast(download);
-    });
-  }, [downloads, dismissedModels, showDownloadToast]);
-
-  // Listen to Parakeet download events
-  useEffect(() => {
-    const unlistenProgress = listen<ParakeetDownloadProgressEvent>(
-      'parakeet-model-download-progress',
-      (event) => {
-        const { modelName, progress, downloaded_mb, total_mb, speed_mbps, status } = event.payload;
-        const downloadData: DownloadProgress = {
-          modelName,
-          displayName: 'Transcription Model (Parakeet)',
-          progress,
-          downloadedMb: downloaded_mb ?? 0,
-          totalMb: total_mb ?? 670,
-          speedMbps: speed_mbps ?? 0,
-          status: status === 'cancelled'
-            ? 'cancelled'
-            : status === 'completed'
-              ? 'completed'
-              : 'downloading',
-        };
-
-        updateDownload(modelName, downloadData);
-        if (downloadData.status === 'completed') {
-          cleanupDownload(modelName);
-        } else if (downloadData.status === 'cancelled') {
-          cleanupDownload(modelName, 6000);
-        }
-      }
-    );
-
-    const unlistenComplete = listen<{ modelName: string }>(
-      'parakeet-model-download-complete',
-      (event) => {
-        const { modelName } = event.payload;
-        const downloadData: Partial<DownloadProgress> = {
-          modelName,
-          displayName: 'Transcription Model (Parakeet)',
-          progress: 100,
-          speedMbps: 0,
-          status: 'completed',
-        };
-        updateDownload(modelName, downloadData);
-        // Clean up after 4 seconds (completion toast duration is 3s + 1s buffer)
-        cleanupDownload(modelName, 4000);
-      }
-    );
-
-    const unlistenError = listen<{ modelName: string; error: string }>(
-      'parakeet-model-download-error',
-      (event) => {
-        const { modelName, error } = event.payload;
-        const downloadData: DownloadProgress = {
-          modelName,
-          displayName: 'Transcription Model (Parakeet)',
-          progress: 0,
-          downloadedMb: 0,
-          totalMb: 670,
-          speedMbps: 0,
-          status: 'error',
-          error: categorizeError(error),
-        };
-        updateDownload(modelName, downloadData);
-        // Clean up after 11 seconds (error toast duration is 10s + 1s buffer)
-        cleanupDownload(modelName, 11000);
-      }
-    );
-
-    return () => {
-      unlistenProgress.then((fn) => fn());
-      unlistenComplete.then((fn) => fn());
-      unlistenError.then((fn) => fn());
-    };
-  }, [updateDownload, cleanupDownload]);
-
-  // Listen to Built-in AI summary model download events
-  useEffect(() => {
-    const unlisten = listen<{
-      model: string;
-      progress: number;
-      downloaded_mb?: number;
-      total_mb?: number;
-      speed_mbps?: number;
-      status: string;
-      error?: string;
-    }>('builtin-ai-download-progress', (event) => {
-      const { model, progress, downloaded_mb, total_mb, speed_mbps, status, error } = event.payload;
-
-      const downloadData: DownloadProgress = {
-        modelName: model,
-        displayName: `Summary Model (${model})`,
-        progress: progress ?? 0,
-        downloadedMb: downloaded_mb ?? 0,
-        totalMb: getDownloadTotalMb(total_mb, model),
-        speedMbps: speed_mbps ?? 0,
-        unitLabel: 'MiB',
-        status: status === 'completed' || progress >= 100
-          ? 'completed'
-          : status === 'cancelled'
-            ? 'cancelled'
-            : status === 'error'
-              ? 'error'
-              : 'downloading',
-        error: status === 'error' ? categorizeError(error || 'Download failed') : undefined,
+    const subscriptions: Promise<() => void>[] = [];
+    for (const provider of downloadProviders) {
+      const subscribe = (name: string | undefined, status: DownloadStatus) => {
+        if (name) subscriptions.push(listen<DownloadEvent>(name, event => {
+          if (!disposed) updateDownload(provider, event.payload, status);
+        }));
       };
-
-      updateDownload(model, downloadData);
-
-      // Clean up finished downloads after delay to prevent endless toasts
-      if (downloadData.status === 'completed') {
-        cleanupDownload(model, 4000);  // 3s toast + 1s buffer
-      } else if (downloadData.status === 'error') {
-        cleanupDownload(model, 11000); // 10s toast + 1s buffer
-      } else if (downloadData.status === 'cancelled') {
-        cleanupDownload(model, 6000);  // 5s toast + 1s buffer
-      }
-    });
-
+      subscribe(provider.progress, 'downloading');
+      subscribe(provider.complete, 'completed');
+      subscribe(provider.error, 'error');
+      subscribe(provider.cancelled, 'cancelled');
+      subscribe(provider.finished, 'completed');
+    }
+    // Keep the timer stable while progress events arrive. Query providers independently.
+    const checking = new Set<string>();
+    const timer = setInterval(async () => {
+      await Promise.all(downloadProviders.map(async provider => {
+        const pending = [...current.current.values()].filter(item => item.provider === provider.id && item.status === 'downloading');
+        if (!pending.length || checking.has(provider.id)) return;
+        checking.add(provider.id);
+        const attempts = new Map(pending.map(item => [`${provider.id}:${item.modelName}`, generations.current.get(`${provider.id}:${item.modelName}`)]));
+        try {
+          const statuses = await checkDownloads(provider, pending);
+          if (disposed) return;
+          statuses.forEach((status, modelName) => {
+            const key = `${provider.id}:${modelName}`;
+            if (current.current.get(key)?.status === 'downloading' && generations.current.get(key) === attempts.get(key)) {
+              if (status !== 'downloading') updateDownload(provider, { modelName }, status);
+            }
+          });
+        } catch (error) {
+          console.warn(`Could not check ${provider.id} download status`, error);
+        } finally {
+          checking.delete(provider.id);
+        }
+      }));
+    }, 2000);
     return () => {
-      unlisten.then((fn) => fn());
+      disposed = true;
+      clearInterval(timer);
+      subscriptions.forEach(subscription => { void subscription.then(unlisten => unlisten()).catch(console.error); });
+      cleanupTimers.current.forEach(clearTimeout);
+      cleanupTimers.current.clear();
+      current.current.forEach((_, key) => toast.dismiss(`download-${key}`));
     };
-  }, [updateDownload, cleanupDownload]);
+  }, [updateDownload]);
+
+  useEffect(() => {
+    downloads.forEach((download, key) => {
+      if (dismissed.current.has(key)) return;
+      const id = `download-${key}`;
+      toast.custom(() => <DownloadToastContent download={download} onDismiss={() => {
+        dismissed.current.add(key);
+        toast.dismiss(id);
+      }} />, {
+        position: 'top-right', id,
+        duration: download.status === 'downloading' ? Infinity : download.status === 'completed' ? 3000 : download.status === 'cancelled' ? 5000 : 10000,
+      });
+    });
+  }, [downloads]);
 
   return { downloads };
 }
 
-// Component to initialize download toast listeners at app level
 export function DownloadProgressToastProvider() {
   useDownloadProgressToast();
   return null;

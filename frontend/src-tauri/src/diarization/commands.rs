@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 use tauri::{AppHandle, Runtime, State};
 
 use crate::{
@@ -55,14 +55,25 @@ pub async fn get_diarization_model_status<R: Runtime>(
 
 #[tauri::command]
 pub async fn download_diarization_model<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
-    let _operation = super::operations::try_processing_slot()?;
-    crate::diarization::models::download_embedding_model(&app).await?;
-    if !super::finalize::refinement_supported() {
-        return Ok(());
-    }
-    super::finalize::prepare_offline_models(&app)
-        .await
-        .map_err(|error| error.to_string())
+    let result: Result<(), String> = async {
+        let _operation = super::operations::try_processing_slot()?;
+        let _ = app.emit(
+            "diarization-model-download-progress",
+            serde_json::json!({"percent": 0}),
+        );
+        crate::diarization::models::download_embedding_model(&app).await?;
+        if !super::finalize::refinement_supported() {
+            return Ok(());
+        }
+        super::finalize::prepare_offline_models(&app)
+            .await
+            .map_err(|error| error.to_string())
+    }.await;
+    let _ = app.emit(
+        "diarization-model-download-finished",
+        serde_json::json!({"error": result.as_ref().err()}),
+    );
+    result
 }
 
 #[tauri::command]
