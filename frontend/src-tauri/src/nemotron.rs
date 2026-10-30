@@ -876,7 +876,7 @@ impl NemotronProvider {
         let text = self.requests(audio, Job::Words, Some(cancel)).await?;
         Ok(MeetingTranscript {
             words: words_on_timeline(text, audio.len() as f64 / 16.0),
-            turns: bridge_turn_gaps(turns_on_timeline(speakers)),
+            turns: bridge_turn_gaps(turns_on_timeline(speakers), audio.len() as f64 / 16000.0),
         })
     }
 }
@@ -923,10 +923,18 @@ fn turns_on_timeline(parts: Vec<(Reply, f64)>) -> Vec<(String, f64, f64)> {
 /// Word times and speaker turns come from different heads. A turn's first or
 /// last word often ends exactly where the turn begins, or sits in the short
 /// pause beside it, so it matched no speaker and became a row of its own.
-/// Each pause goes to the turns on either side, up to one second each.
-fn bridge_turn_gaps(mut turns: Vec<(String, f64, f64)>) -> Vec<(String, f64, f64)> {
+/// Each pause goes to the turns on either side, up to one second each. The
+/// first and last turns also reach up to one second toward the recording's
+/// start and end.
+fn bridge_turn_gaps(
+    mut turns: Vec<(String, f64, f64)>,
+    duration: f64,
+) -> Vec<(String, f64, f64)> {
     const MAX_BRIDGE: f64 = 1.0;
     turns.sort_by(|a, b| a.1.total_cmp(&b.1));
+    if let Some(first) = turns.first_mut() {
+        first.1 = (first.1 - MAX_BRIDGE).max(0.0).min(first.1);
+    }
     let mut latest: Option<usize> = None;
     for index in 0..turns.len() {
         if let Some(previous) = latest {
@@ -940,6 +948,9 @@ fn bridge_turn_gaps(mut turns: Vec<(String, f64, f64)>) -> Vec<(String, f64, f64
         if latest.map_or(true, |previous| turns[index].2 > turns[previous].2) {
             latest = Some(index);
         }
+    }
+    if let Some(last) = latest {
+        turns[last].2 = (turns[last].2 + MAX_BRIDGE).min(duration).max(turns[last].2);
     }
     turns
 }
@@ -1365,21 +1376,29 @@ mod tests {
     #[test]
     fn a_word_at_the_edge_of_a_turn_gets_the_nearest_speaker() {
         let turn = |speaker: &str, start, end| (speaker.to_string(), start, end);
-        let turns = bridge_turn_gaps(vec![
-            turn("2", 21.5, 26.0),
-            turn("1", 3.3, 6.2),
-            // Overlapping speech keeps both turns as they are.
-            turn("1", 6.0, 20.0),
-            turn("3", 30.0, 31.0),
-        ]);
+        let turns = bridge_turn_gaps(
+            vec![
+                turn("2", 21.5, 26.0),
+                turn("1", 3.3, 6.2),
+                // Overlapping speech keeps both turns as they are.
+                turn("1", 6.0, 20.0),
+                turn("3", 30.0, 31.0),
+            ],
+            31.5,
+        );
         assert_eq!(
             turns,
             vec![
-                turn("1", 3.3, 6.2),
+                turn("1", 2.3, 6.2),
                 turn("1", 6.0, 20.75),
                 turn("2", 20.75, 27.0),
-                turn("3", 29.0, 31.0),
+                turn("3", 29.0, 31.5),
             ]
+        );
+        // A single turn reaches toward both ends, inside the recording.
+        assert_eq!(
+            bridge_turn_gaps(vec![turn("1", 0.4, 9.0)], 12.0),
+            vec![turn("1", 0.0, 10.0)]
         );
     }
 
