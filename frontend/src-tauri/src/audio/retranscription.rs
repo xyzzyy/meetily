@@ -108,8 +108,36 @@ pub async fn start_retranscription<R: Runtime>(
     provider: Option<String>,
     assign_speakers: bool,
 ) -> Result<RetranscriptionResult> {
+    start_retranscription_with_trim(
+        app,
+        meeting_id,
+        meeting_folder_path,
+        language,
+        model,
+        provider,
+        assign_speakers,
+        None,
+    )
+    .await
+}
+
+async fn start_retranscription_with_trim<R: Runtime>(
+    app: AppHandle<R>,
+    meeting_id: String,
+    meeting_folder_path: String,
+    language: Option<String>,
+    model: Option<String>,
+    provider: Option<String>,
+    assign_speakers: bool,
+    trim: Option<super::trim::TrimRange>,
+) -> Result<RetranscriptionResult> {
     let _speaker_operation = crate::diarization::operations::try_meeting_edit(&meeting_id)
         .map_err(|error| anyhow!(error))?;
+    let _summary_operation = if trim.is_some() {
+        Some(super::trim::try_trim(&meeting_id).map_err(|error| anyhow!(error))?)
+    } else {
+        None
+    };
     // Acquire guard - ensures flag is cleared even on panic/early return
     let _guard = RetranscriptionGuard::acquire().map_err(|e| anyhow!(e))?;
 
@@ -134,16 +162,39 @@ pub async fn start_retranscription<R: Runtime>(
         None
     };
     let batch_engine = super::common::BatchEngine::from_provider(provider.as_deref());
-    let result = run_retranscription(
-        app.clone(),
-        meeting_id.clone(),
-        meeting_folder_path,
-        language,
-        model,
-        provider,
-        assign_speakers,
-    )
-    .await;
+    let result = async {
+        let meeting_folder_path = if let Some(range) = trim {
+            emit_progress(&app, &meeting_id, "trimming", 0, "Saving the selected audio range...");
+            let state = app.state::<AppState>();
+            let folder = match super::trim::trim_recording(state.db_manager.pool(), state.speaker_store.pool(),
+                &meeting_id, range, &RETRANSCRIPTION_CANCELLED).await {
+                Ok(folder) => folder,
+                Err(error) => {
+                    if super::trim::check_ready(&meeting_id).is_err() {
+                        // The replacement started. Invalidate old UI data even
+                        // when disk recovery must finish after a restart.
+                        let _ = app.emit("recording-trimmed", serde_json::json!({ "meeting_id": meeting_id }));
+                    }
+                    return Err(error);
+                }
+            };
+            let _ = app.emit("recording-trimmed", serde_json::json!({ "meeting_id": meeting_id }));
+            folder.to_string_lossy().into_owned()
+        } else { meeting_folder_path };
+        let result = run_retranscription(
+            app.clone(),
+            meeting_id.clone(),
+            meeting_folder_path,
+            language,
+            model,
+            provider,
+            assign_speakers,
+        )
+        .await;
+        if trim.is_some() {
+            result.map_err(|error| anyhow!("The recording was trimmed. New transcription did not finish: {error}. Use Enhance to try transcription again."))
+        } else { result }
+    }.await;
 
     // Unload the engine after the batch job (success, failure, or cancellation)
     super::common::unload_engine_after_batch(batch_engine).await;
@@ -204,6 +255,7 @@ fn find_audio_file(folder: &Path) -> Result<PathBuf> {
     if let Ok(entries) = std::fs::read_dir(folder) {
         for entry in entries.flatten() {
             let path = entry.path();
+            if path.file_name().and_then(|name| name.to_str()) == Some(".trim-audio.mp4") { continue; }
             if let Some(ext) = path.extension() {
                 let ext = ext.to_string_lossy().to_lowercase();
                 if AUDIO_EXTENSIONS.contains(&ext.as_str()) {
@@ -885,6 +937,7 @@ fn write_retranscription_metadata(
         let existing = std::fs::read_to_string(&metadata_path)?;
         let mut value: serde_json::Value = serde_json::from_str(&existing)?;
         if let Some(obj) = value.as_object_mut() {
+            obj.insert("audio_file".to_string(), serde_json::json!(audio_filename));
             obj.insert(
                 "duration_seconds".to_string(),
                 serde_json::json!(duration_seconds),
@@ -922,6 +975,32 @@ fn write_retranscription_metadata(
 }
 
 // Tauri commands
+
+/// This command waits for the result, including preparation errors. The audio
+/// folder comes from the meeting database, never from an IPC deletion path.
+#[tauri::command]
+pub async fn trim_and_retranscribe_command<R: Runtime>(
+    app: AppHandle<R>,
+    meeting_id: String,
+    range: super::trim::TrimRange,
+    language: Option<String>,
+    model: Option<String>,
+    provider: Option<String>,
+    assign_speakers: Option<bool>,
+) -> Result<RetranscriptionResult, String> {
+    start_retranscription_with_trim(
+        app,
+        meeting_id,
+        String::new(),
+        language,
+        model,
+        provider,
+        assign_speakers.unwrap_or(false),
+        Some(range),
+    )
+    .await
+    .map_err(|error| format!("{error:#}"))
+}
 
 // Start retranscription (Beta gated using configContext.betaFeatures)
 #[tauri::command]

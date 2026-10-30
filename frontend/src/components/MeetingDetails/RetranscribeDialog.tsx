@@ -17,6 +17,8 @@ import {
   SelectTrigger,
   SelectValue,
 } from '../ui/select';
+import { invoke } from '@tauri-apps/api/core';
+import { Input } from '../ui/input';
 import { useTranscriptEnhancement } from '@/contexts/TranscriptEnhancementContext';
 import { useConfig } from '@/contexts/ConfigContext';
 import { useSpeakerRefinementAvailability } from '@/hooks/useSpeakerRefinementAvailability';
@@ -29,6 +31,7 @@ interface RetranscribeDialogProps {
   onOpenChange: (open: boolean) => void;
   meetingId: string;
   meetingFolderPath: string | null;
+  trim?: boolean;
 }
 
 export function RetranscribeDialog({
@@ -36,6 +39,7 @@ export function RetranscribeDialog({
   onOpenChange,
   meetingId,
   meetingFolderPath,
+  trim = false,
 }: RetranscribeDialogProps) {
   const { selectedLanguage, transcriptModelConfig, diarizationSettings, isLoadingDiarizationSettings } = useConfig();
   const { supported: refinementSupported, checking: checkingRefinement, unavailableReason } = useSpeakerRefinementAvailability();
@@ -47,6 +51,16 @@ export function RetranscribeDialog({
   const progress = isProcessing ? enhancement.job?.progress : null;
   const [error, setError] = useState<string | null>(null);
   const [selectedLang, setSelectedLang] = useState(selectedLanguage || 'auto');
+  const [duration, setDuration] = useState<number | null>(null);
+  const [startSeconds, setStartSeconds] = useState('0');
+  const [endSeconds, setEndSeconds] = useState('');
+  const [trimInfoRequest, setTrimInfoRequest] = useState(0);
+  const startTime = Number(startSeconds);
+  const endTime = Number(endSeconds);
+  const validRange = duration !== null && startSeconds.trim() !== '' && endSeconds.trim() !== ''
+    && Number.isFinite(startTime) && Number.isFinite(endTime) && startTime >= 0
+    && endTime > startTime && endTime <= duration && (startTime > 0 || endTime < duration);
+
 
   // Use centralized model fetching hook
   const {
@@ -106,6 +120,20 @@ export function RetranscribeDialog({
     }
   }, [open, selectedLanguage, transcriptModelConfig, fetchModels, resetSelection]);
 
+  useEffect(() => {
+    if (!open || !trim || isProcessing) return;
+    let cancelled = false;
+    setDuration(null);
+    setStartSeconds('0');
+    setEndSeconds('');
+    invoke<number>('get_recording_trim_info', { meetingId }).then(value => {
+      if (cancelled) return;
+      setDuration(value);
+      setEndSeconds(String(value));
+    }).catch(error => { if (!cancelled) setError(String(error)); });
+    return () => { cancelled = true; };
+  }, [open, trim, meetingId, trimInfoRequest, isProcessing]);
+
   // Default to the app-wide speaker labels setting, including when it finishes
   // loading after the dialog is already open.
   useEffect(() => {
@@ -125,6 +153,10 @@ export function RetranscribeDialog({
       return;
     }
 
+    if (trim && !validRange) {
+      setError('Set a start and end time within the recording. Select a shorter range to keep.');
+      return;
+    }
     setError(null);
 
     try {
@@ -136,6 +168,7 @@ export function RetranscribeDialog({
         model: selectedModelDetails.name,
         provider: selectedModelDetails.provider,
         assignSpeakers: canAssignSpeakers && assignSpeakers,
+        ...(trim ? { range: { start_seconds: startTime, end_seconds: endTime } } : {}),
       });
       onOpenChange(false);
     } catch (err: any) {
@@ -152,7 +185,7 @@ export function RetranscribeDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-[450px]">
+      <DialogContent className="sm:max-w-[450px] max-h-[90vh] overflow-y-auto">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             {isProcessing ? (
@@ -163,12 +196,12 @@ export function RetranscribeDialog({
             ) : error ? (
               <>
                 <AlertCircle className="h-5 w-5 text-red-600 dark:text-red-400" />
-                Enhancement failed
+                {trim ? 'Trim could not start' : 'Enhancement failed'}
               </>
             ) : (
               <>
                 <RefreshCw className="h-5 w-5 text-blue-600 dark:text-blue-400" />
-                Enhance meeting
+                {trim ? 'Trim recording' : 'Enhance meeting'}
               </>
             )}
           </DialogTitle>
@@ -177,11 +210,31 @@ export function RetranscribeDialog({
               ? progress?.message || 'Processing audio...'
               : error
                 ? 'The enhancement could not finish'
-                : 'Create new text and timing from the recording. The saved transcript stays unchanged until enhancement succeeds.'}
+                : trim
+                  ? 'Keep the selected range. This deletes the original recording, old speaker audio, transcript, and summary. Then the app creates a new transcript. This cannot be undone.'
+                  : 'Create new text and timing from the recording. The saved transcript stays unchanged until enhancement succeeds.'}
           </DialogDescription>
         </DialogHeader>
 
         <div className="space-y-4 py-4">
+          {trim && !isProcessing && !error && (
+            <fieldset className="space-y-2" disabled={duration === null}>
+              <legend className="text-sm font-medium">Audio to keep</legend>
+              {duration === null ? <p role="status">Loading recording duration...</p> : (
+                <>
+                  <p className="text-xs text-muted-foreground">Recording length: {duration.toFixed(3)} seconds. Times start at zero.</p>
+                  <div className="grid grid-cols-2 gap-3">
+                    <div><label htmlFor="trim-start" className="text-sm">Start (seconds)</label>
+                      <Input id="trim-start" type="number" min="0" max={duration} step="0.001" value={startSeconds} onChange={event => setStartSeconds(event.target.value)} /></div>
+                    <div><label htmlFor="trim-end" className="text-sm">End (seconds)</label>
+                      <Input id="trim-end" type="number" min="0" max={duration} step="0.001" value={endSeconds} onChange={event => setEndSeconds(event.target.value)} /></div>
+                  </div>
+                  <p className="text-xs text-muted-foreground" role="status">{validRange ? `Keep ${(endTime - startTime).toFixed(3)} seconds.` : 'Select a shorter range. The end must be after the start.'}</p>
+                </>
+              )}
+            </fieldset>
+          )}
+
           {!isProcessing && !error && (
             !isParakeetModel ? (
               <div className="space-y-3">
@@ -299,10 +352,10 @@ export function RetranscribeDialog({
               <Button
                 onClick={handleStartRetranscription}
                 className="bg-blue-600 hover:bg-blue-700"
-                disabled={!!enhancement.job || !meetingFolderPath || loadingModels || !selectedModelDetails || (speakerLabelsEnabled && checkingRefinement)}
+                disabled={!!enhancement.job || !meetingFolderPath || loadingModels || !selectedModelDetails || (speakerLabelsEnabled && checkingRefinement) || (trim && !validRange)}
               >
                 <RefreshCw className="h-4 w-4 mr-2" />
-                Start enhancement
+                {trim ? 'Trim and transcribe' : 'Start enhancement'}
               </Button>
             </>
           )}
@@ -323,6 +376,7 @@ export function RetranscribeDialog({
               <Button
                 onClick={() => {
                   setError(null);
+                  if (trim && duration === null) setTrimInfoRequest(value => value + 1);
                 }}
                 variant="outline"
               >

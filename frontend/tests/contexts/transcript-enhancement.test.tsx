@@ -22,7 +22,7 @@ let deferRegistration = false;
 let releaseRegistration: (() => void) | undefined;
 mock.module('@tauri-apps/api/core', () => ({ ...originalCore, invoke: async (command: string) => {
   commands.push(command);
-  if (command === 'start_retranscription_command') return work.promise;
+  if (command === 'start_retranscription_command' || command === 'trim_and_retranscribe_command') return work.promise;
   if (command === 'cancel_retranscription_command') return cancelCommand();
   throw new Error(`Unexpected command: ${command}`);
 } }));
@@ -158,3 +158,16 @@ for (const outcome of ['success', 'failure', 'cancelled']) {
     expect(notice().type).toBe(outcome === 'success' ? 'success' : outcome === 'failure' ? 'error' : 'info');
   });
 }
+
+test('trim uses the shared task owner and cancellation keeps the actual trim result', async () => {
+  await render();
+  await act(async () => current.start({ ...request, range: { start_seconds: 10, end_seconds: 50 } }));
+  expect(commands).toEqual(['trim_and_retranscribe_command']);
+  await act(async () => current.cancel());
+  expect(current.job?.cancelling).toBe(true);
+  const message = 'The recording was trimmed. New transcription did not finish: cancelled.';
+  await act(async () => { work.reject(new Error(message)); await work.promise.catch(() => {}); });
+  expect(current.job).toBeNull();
+  expect(notices.at(-1)?.options.description).toContain(message);
+  expect(notices.at(-1)?.options.description).not.toBe('The saved transcript was kept.');
+});

@@ -8,6 +8,7 @@ static PROCESSING: AsyncMutex<()> = AsyncMutex::const_new(());
 
 /// Keep speaker processing and manual corrections from changing the same meeting.
 pub fn try_meeting_edit(meeting_id: &str) -> Result<OwnedMutexGuard<()>, String> {
+    crate::audio::trim::check_ready(meeting_id)?;
     let mut meetings = MEETINGS
         .lock()
         .map_err(|_| "Speaker operation lock failed")?;

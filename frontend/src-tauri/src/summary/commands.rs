@@ -99,6 +99,7 @@ pub async fn api_save_meeting_summary<R: Runtime>(
     summary: serde_json::Value,
     _auth_token: Option<String>,
 ) -> Result<serde_json::Value, String> {
+    let _recording = crate::audio::trim::try_summary(&meeting_id)?;
     log_info!(
         "api_save_meeting_summary (native) called for meeting_id: {}",
         meeting_id
@@ -359,6 +360,7 @@ pub async fn api_get_summary<R: Runtime>(
     meeting_id: String,
     _auth_token: Option<String>,
 ) -> Result<SummaryResponse, String> {
+    crate::audio::trim::check_ready(&meeting_id)?;
     log_info!(
         "api_get_summary (native) called for meeting_id: {}",
         meeting_id
@@ -476,6 +478,9 @@ pub async fn api_process_transcript<R: Runtime>(
     use uuid::Uuid;
 
     let m_id = meeting_id.unwrap_or_else(|| format!("meeting-{}", Uuid::new_v4()));
+    // A trim must not race a summary made from the old transcript. Keep this
+    // guard in the background task until all summary writes have stopped.
+    let recording = crate::audio::trim::try_summary(&m_id)?;
     log_info!(
         "api_process_transcript (native) called for meeting_id: {}, model: {}",
         &m_id,
@@ -527,6 +532,7 @@ pub async fn api_process_transcript<R: Runtime>(
         SummaryService::register_cancellation_token(&m_id, started_at);
     let meeting_id_clone = m_id.clone();
     tauri::async_runtime::spawn(async move {
+        let _recording = recording;
         SummaryService::process_transcript_background(
             app,
             pool,

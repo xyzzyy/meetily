@@ -765,6 +765,7 @@ pub(super) fn find_meeting_audio(folder: &Path) -> Result<PathBuf> {
     }
     for entry in std::fs::read_dir(folder)? {
         let path = entry?.path();
+        if path.file_name().and_then(|name| name.to_str()) == Some(".trim-audio.mp4") { continue; }
         let supported = path
             .extension()
             .and_then(|extension| extension.to_str())
@@ -1538,6 +1539,7 @@ pub async fn reconcile_interrupted_runs(
     core_pool: &sqlx::SqlitePool,
     feature_pool: &sqlx::SqlitePool,
 ) -> Result<()> {
+    crate::audio::trim::recover(core_pool, feature_pool).await?;
     crate::audio::enhancement::reconcile_publications(core_pool, feature_pool).await?;
     let prepared: Vec<(String, String)> =
         sqlx::query_as("SELECT id, meeting_id FROM diarization_runs WHERE status = 'prepared'")

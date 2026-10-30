@@ -4,6 +4,13 @@ import { act, create, type ReactTestRenderer } from 'react-test-renderer';
 import type { SummaryProcessResponse } from '../../src/types';
 
 const originalCore = { ...await import('@tauri-apps/api/core') };
+const originalEvents = { ...await import('@tauri-apps/api/event') };
+const listeners = new Map<string, Set<(event: any) => void>>();
+mock.module('@tauri-apps/api/event', () => ({ ...originalEvents, listen: async (name: string, callback: (event: any) => void) => {
+  if (!listeners.has(name)) listeners.set(name, new Set());
+  listeners.get(name)!.add(callback);
+  return () => listeners.get(name)?.delete(callback);
+} }));
 const originalAnalytics = { ...await import('../../src/lib/analytics') };
 const originalPreferences = { ...await import('../../src/lib/summary-language-preferences') };
 const originalToast = { ...await import('sonner') };
@@ -11,6 +18,7 @@ const originalNavigation = { ...await import('next/navigation') };
 const originalConfig = { ...await import('../../src/contexts/ConfigContext') };
 afterAll(() => {
   mock.module('@tauri-apps/api/core', () => originalCore);
+  mock.module('@tauri-apps/api/event', () => originalEvents);
   mock.module('../../src/lib/analytics', () => originalAnalytics);
   mock.module('../../src/lib/summary-language-preferences', () => originalPreferences);
   mock.module('sonner', () => originalToast);
@@ -19,12 +27,14 @@ afterAll(() => {
 });
 
 let selectedMeeting = 'meeting-a';
+let selectedSource: string | null = null;
+let autoSummary = false;
 mock.module('next/navigation', () => ({
   usePathname: () => '/meeting-details', useRouter: () => ({}),
-  useSearchParams: () => new URLSearchParams({ id: selectedMeeting }),
+  useSearchParams: () => new URLSearchParams({ id: selectedMeeting, ...(selectedSource ? { source: selectedSource } : {}) }),
 }));
 mock.module('../../src/contexts/RecordingStateContext', () => ({ useRecordingState: () => ({ isRecording: false }) }));
-mock.module('../../src/contexts/ConfigContext', () => ({ useConfig: () => ({ isAutoSummary: false }) }));
+mock.module('../../src/contexts/ConfigContext', () => ({ useConfig: () => ({ isAutoSummary: autoSummary }) }));
 const notify = mock(() => {});
 mock.module('sonner', () => ({ toast: { info: notify, error: notify, success: notify, warning: notify } }));
 mock.module('../../src/lib/analytics', () => ({ default: {
@@ -43,9 +53,10 @@ const transcriptPage = {
   transcripts: [{ id: 'transcript', text: 'Meeting transcript', timestamp: '00:00' }], total_count: 1, has_more: false,
 };
 let savedSummary: SummaryProcessResponse;
+let readSummary: () => Promise<SummaryProcessResponse>;
 const invoke = mock(async (command: string, args?: Record<string, unknown>): Promise<unknown> => {
   if (command === 'api_get_meetings') return [];
-  if (command === 'api_get_summary') return { ...savedSummary, meeting_id: args!.meetingId };
+  if (command === 'api_get_summary') return { ...await readSummary(), meeting_id: args!.meetingId };
   if (command === 'api_get_meeting_metadata') return readMetadata(args!.meetingId as string);
   if (command === 'api_get_meeting_transcripts') return readTranscripts(args!.meetingId as string);
   if (command === 'api_process_transcript') return { process_id: 'attempt-b' };
@@ -82,9 +93,12 @@ const realSetInterval = globalThis.setInterval;
 const realClearInterval = globalThis.clearInterval;
 beforeEach(() => {
   selectedMeeting = 'meeting-a';
+  selectedSource = null;
+  autoSummary = false;
   readMetadata = async id => metadata(id);
   readTranscripts = async () => transcriptPage;
   savedSummary = { meeting_id: selectedMeeting, status: 'pending', start: 'attempt-a', end: null, data: null, error: null, meetingName: 'Meeting A' };
+  readSummary = async () => savedSummary;
   mounts = 0; timers.clear(); invoke.mockClear(); notify.mockClear();
   globalThis.setInterval = ((callback: () => Promise<void>) => {
     const id = ++nextTimer; timers.set(id, callback); return id;
@@ -118,6 +132,42 @@ function deferMetadata() {
 }
 
 describe('meeting route transcript refresh', () => {
+  test('a trim removes the saved summary without unmounting the current meeting', async () => {
+    savedSummary = { ...savedSummary, status: 'completed', data: { markdown: 'Unwanted office talk' } };
+    await show();
+    expect(text()).toContain('Unwanted office talk');
+    await act(async () => {
+      for (const callback of listeners.get('recording-trimmed') ?? []) callback({ payload: { meeting_id: selectedMeeting } });
+    });
+    expect(summaryState.summaryStatus).toBe('idle');
+    expect(text()).not.toContain('Unwanted office talk');
+    expect(mounts).toBe(1);
+  });
+
+  test('a trim does not start an automatic summary from the recording route', async () => {
+    autoSummary = true;
+    selectedSource = 'recording';
+    savedSummary = { ...savedSummary, status: 'completed', data: { markdown: 'Old summary' } };
+    await show();
+    await act(async () => {
+      for (const callback of listeners.get('recording-trimmed') ?? []) callback({ payload: { meeting_id: selectedMeeting } });
+    });
+    expect(invoke.mock.calls.some(([command]) => command === 'api_get_model_config' || command === 'api_process_transcript')).toBe(false);
+    expect(summaryState.summaryStatus).toBe('idle');
+  });
+
+  test('a summary read started before a trim cannot restore the old summary', async () => {
+    let resolve!: (summary: SummaryProcessResponse) => void;
+    readSummary = () => new Promise(done => { resolve = done; });
+    await show();
+    await act(async () => {
+      for (const callback of listeners.get('recording-trimmed') ?? []) callback({ payload: { meeting_id: selectedMeeting } });
+      resolve({ ...savedSummary, status: 'completed', data: { markdown: 'Old summary from disk' } });
+    });
+    expect(summaryState.summaryStatus).toBe('idle');
+    expect(text()).not.toContain('Old summary from disk');
+  });
+
   test('navigation waits for the new meeting first transcript page before mounting its view', async () => {
     await show();
     await complete('Summary A', 'attempt-a');

@@ -37,8 +37,11 @@ Meetily records your meetings, transcribes them live, and writes summaries witho
 | **Microphone + system audio** | Captures both sources at once and mixes them with RMS-based ducking and clipping prevention. Voice activity detection sends only speech to the transcriber. |
 | **AI summaries** | Summarize with **Ollama** (local), a built-in local model, **Claude**, **Groq**, **OpenRouter**, **OpenAI**, or any OpenAI-compatible endpoint. Summaries are template-based and can be edited. |
 | **Import & enhance** *(beta)* | Transcribe existing audio files, or re-transcribe a recorded meeting with a different model or language. |
+| **Trim recordings** *(beta)* | Set the start and end of a saved recording. Replace the original audio and create a new transcript. |
 | **Model management** | Download, switch between, and delete Whisper and Parakeet models from inside the app. Deleting asks for confirmation first. |
 | **GPU acceleration** | Metal/CoreML on macOS, Vulkan or CUDA on Windows/Linux, with a CPU fallback. |
+
+To trim a saved meeting, select **Trim** next to **Enhance**. Enter the start and end times in seconds, then select **Trim and transcribe**. This deletes the original recording, old speaker audio, transcript, and summary. You cannot undo this change. If transcription fails after the trim, use **Transcribe trimmed audio** or **Enhance** to try again. If a saved trim is interrupted, restart the app to finish it.
 
 <p align="center">
     <img src="docs/home.png" width="49%" alt="Live transcription" />
