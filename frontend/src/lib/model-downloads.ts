@@ -62,8 +62,9 @@ export async function checkDownloads(provider: DownloadProvider, models: { model
       result.set(model.modelName, status);
     }));
   } else if (provider.statusFormat === 'installed') {
-    const status = await invoke<{ installed: boolean }>(provider.list);
-    if (status.installed) models.forEach(model => result.set(model.modelName, 'completed'));
+    const status = await invoke<{ installed: boolean; downloading: boolean }>(provider.list);
+    models.forEach(model => result.set(model.modelName,
+      status.downloading ? 'downloading' : status.installed ? 'completed' : 'error'));
   } else {
     const available = await invoke<Model[]>(provider.list);
     for (const model of models) {

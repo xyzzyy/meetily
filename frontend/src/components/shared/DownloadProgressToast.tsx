@@ -152,6 +152,8 @@ export function useDownloadProgressToast() {
       generations.current.set(key, ++generationCounter.current);
       dismissed.current.delete(key);
     }
+    // Closing progress must not hide its result. A closed result stays closed.
+    if (old?.status === 'downloading' && status !== 'downloading') dismissed.current.delete(key);
     const existing = restart ? undefined : old;
     const download: DownloadProgress = {
       provider: provider.id, modelName,
@@ -216,8 +218,9 @@ export function useDownloadProgressToast() {
           const active = current.current.get(key);
           const attempt = generations.current.get(key);
           const nextStatus = eventStatus(event.payload, status);
-          const duplicateError = active?.status === 'downloading' && nextStatus === 'error'
+          const duplicateError = active && nextStatus === 'error'
             && /already (?:in progress|downloading|running|being downloaded)/i.test(event.payload.error ?? '');
+          if (duplicateError && active.status === 'completed') return;
           const resumedRetry = active && active.status !== 'downloading' && nextStatus === 'downloading'
             && (event.payload.progress ?? event.payload.percent) !== 0;
           // Only duplicate-request errors need worker checks. A real error is terminal.
@@ -226,11 +229,17 @@ export function useDownloadProgressToast() {
             try {
               const states = await checkDownloads(provider, [active]);
               if (disposed || generations.current.get(key) !== attempt || current.current.get(key) !== active) return;
-              const downloading = states.get(active.modelName) === 'downloading';
+              const verified = states.get(active.modelName);
+              if (duplicateError && verified === 'completed') {
+                updateDownload(provider, { modelName }, 'completed');
+                return;
+              }
+              const downloading = verified === 'downloading';
+              if (duplicateError && verified === undefined) return;
               if (resumedRetry ? !downloading : downloading) return;
             } catch (error) {
               console.warn(`Could not verify ${provider.id} download event`, error);
-              if (resumedRetry) return;
+              return;
             }
           }
           if (!disposed) updateDownload(provider, event.payload, status);

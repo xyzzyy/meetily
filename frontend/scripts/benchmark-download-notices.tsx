@@ -35,7 +35,7 @@ const sonner = { ...await import('sonner') };
 mock.module('@tauri-apps/api/core', () => ({ ...core, invoke: async (command: string) => {
   queries++;
   if (command === 'get_ollama_download_status') return ready ? 'completed' : 'downloading';
-  if (command === 'get_diarization_model_status') return { installed: ready };
+  if (command === 'get_diarization_model_status') return { installed: ready, downloading: !ready };
   return ['parakeet', 'whisper', 'funasr', 'nemotron', 'summary'].map(name => ({
     name, status: ready ? (command === 'builtin_ai_list_models' ? { type: 'available' } : 'Available') : { Downloading: { progress: 99 } },
   }));

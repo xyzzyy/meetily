@@ -402,7 +402,7 @@ pub async fn parakeet_download_model<R: Runtime>(
                     "downloaded_mb": progress.downloaded_mb,
                     "total_mb": progress.total_mb,
                     "speed_mbps": progress.speed_mbps,
-                    "status": if progress.percent == 100 { "completed" } else { "downloading" }
+                    "status": "downloading"
                 }),
             ) {
                 log::error!("Failed to emit parakeet download progress event: {}", e);

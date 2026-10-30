@@ -29,7 +29,7 @@ const send = async (event: string, payload: any) => { await act(async () => hand
 
 beforeEach(async () => {
   responses = Object.fromEntries(downloadProviders.map(provider => [provider.list,
-    provider.statusFormat === 'worker' ? 'error' : provider.statusFormat === 'installed' ? { installed: false } : []]));
+    provider.statusFormat === 'worker' ? 'error' : provider.statusFormat === 'installed' ? { installed: false, downloading: true } : []]));
   cleanups = new Map();
   handlers.clear(); invoke.mockClear(); custom.mockClear(); dismiss.mockClear();
   intervalSpy = spyOn(globalThis, 'setInterval').mockImplementation(((callback: any) => {
@@ -69,7 +69,7 @@ for (const provider of downloadProviders) {
   });
   test(`${provider.id}: 100% does not complete a model still being installed`, async () => {
     responses[provider.list] = provider.id === 'ollama' ? 'downloading' : provider.id === 'diarization'
-      ? { installed: false } : [{ name: model, status: provider.id === 'builtin' ? { type: 'downloading' } : { Downloading: { progress: 100 } } }];
+      ? { installed: false, downloading: true } : [{ name: model, status: provider.id === 'builtin' ? { type: 'downloading' } : { Downloading: { progress: 100 } } }];
     await send(provider.progress, progress);
     await act(async () => checkStatus());
     expect(current().props.download.status).toBe('downloading');
@@ -231,3 +231,50 @@ for (const provider of ['parakeet', 'builtin']) {
     expect(current().props.download.status).toBe('completed');
   });
 }
+
+for (const completedFirst of [false, true]) {
+  test(`a duplicate error preserves confirmed completion (event first: ${completedFirst})`, async () => {
+    responses.funasr_get_available_models = [{ name: 'model', status: 'Available' }];
+    await send('funasr-model-download-progress', { modelName: 'model', progress: 99 });
+    if (completedFirst) await send('funasr-model-download-complete', { modelName: 'model' });
+    await send('funasr-model-download-error', { modelName: 'model', error: 'A download is already in progress' });
+    expect(current().props.download.status).toBe('completed');
+    expect(cleanups.has(4000)).toBe(true);
+  });
+}
+
+test('a failed duplicate verification leaves the active notice for a later poll', async () => {
+  responses.funasr_get_available_models = { then: (_: unknown, reject: (error: Error) => void) => reject(new Error('IPC unavailable')) };
+  await send('funasr-model-download-progress', { modelName: 'model', progress: 40 });
+  await send('funasr-model-download-error', { modelName: 'model', error: 'A download is already in progress' });
+  expect(current().props.download.status).toBe('downloading');
+  responses.funasr_get_available_models = [{ name: 'model', status: 'Available' }];
+  await act(async () => checkStatus());
+  expect(current().props.download.status).toBe('completed');
+});
+
+for (const status of ['completed', 'error', 'cancelled']) {
+  test(`closing progress still permits ${status}, but closing that result stays closed`, async () => {
+    await send('model-download-progress', { modelName: 'model', progress: 40 });
+    await act(async () => current().props.onDismiss());
+    const count = custom.mock.calls.length;
+    await send('model-download-progress', { modelName: 'model', status });
+    expect(custom.mock.calls.length).toBe(count + 1);
+    expect(current().props.download.status).toBe(status);
+    await act(async () => current().props.onDismiss());
+    await send('model-download-progress', { modelName: 'model', status });
+    expect(custom.mock.calls.length).toBe(count + 1);
+  });
+}
+
+test('speaker polling recovers a failed download after a lost terminal event', async () => {
+  responses.get_diarization_model_status = { installed: false, downloading: true };
+  await send('diarization-model-download-progress', { percent: 99 });
+  await act(async () => checkStatus());
+  expect(current().props.download.status).toBe('downloading');
+  responses.get_diarization_model_status = { installed: false, downloading: false };
+  await act(async () => checkStatus());
+  expect(current().props.download.status).toBe('error');
+  await act(async () => cleanups.get(11000)!());
+  expect(dismiss).toHaveBeenCalledWith('download-diarization:speaker-models');
+});

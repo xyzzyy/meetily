@@ -128,7 +128,7 @@ async function openMeeting(page: Page, {
               case 'get_meeting_diarization_status': return null;
               case 'get_recording_preferences': return { preferred_mic_device: null, preferred_system_device: null };
               case 'get_diarization_settings': return { enabled: false, mode: 'off', showProvisionalLabels: false };
-              case 'get_diarization_model_status': downloadQueries++; return { installed: modelsReady, refinementSupported: false };
+              case 'get_diarization_model_status': downloadQueries++; return { installed: modelsReady, downloading: !modelsReady, refinementSupported: false };
               case 'whisper_get_available_models':
               case 'parakeet_get_available_models':
               case 'funasr_get_available_models':

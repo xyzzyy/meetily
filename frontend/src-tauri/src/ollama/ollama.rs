@@ -265,7 +265,14 @@ pub async fn get_ollama_download_status(
     if DOWNLOADING_MODELS.read().await.contains(&model_name) {
         return Ok("downloading".into());
     }
-    let models = get_ollama_models(endpoint).await?;
+    let models = match get_ollama_models(endpoint).await {
+        Ok(models) => models,
+        Err(error) => {
+            // No worker remains to make progress, including when the server is offline.
+            log::warn!("Could not verify the stopped Ollama download: {}", error);
+            return Ok("error".into());
+        }
+    };
     let canonical = |name: &str| {
         if name.rsplit('/').next().unwrap_or(name).contains(':') {
             name.to_string()
@@ -286,21 +293,16 @@ pub async fn pull_ollama_model<R: Runtime>(
     model_name: String,
     endpoint: Option<String>,
 ) -> Result<(), String> {
-    // Check if model is already being downloaded
+    // Check and insert under one lock so two requests cannot start the same pull.
     {
-        let downloading = DOWNLOADING_MODELS.read().await;
-        if downloading.contains(&model_name) {
+        let mut downloading = DOWNLOADING_MODELS.write().await;
+        if !downloading.insert(model_name.clone()) {
             log::warn!("Model {} is already being downloaded, ignoring duplicate request", model_name);
             return Err(format!("Model {} is already being downloaded", model_name));
         }
     }
 
-    // Mark model as downloading
-    {
-        let mut downloading = DOWNLOADING_MODELS.write().await;
-        downloading.insert(model_name.clone());
-        log::info!("Started download tracking for model: {}", model_name);
-    }
+    log::info!("Started download tracking for model: {}", model_name);
 
     let client = Client::new();
     let base_url = endpoint.as_deref().unwrap_or("http://localhost:11434");
@@ -311,21 +313,29 @@ pub async fn pull_ollama_model<R: Runtime>(
         "stream": true
     });
 
-    let response = client
+    let response = match client
         .post(&url)
         .json(&payload)
         .timeout(Duration::from_secs(600)) // 10 minutes timeout for pulling
         .send()
         .await
-        .map_err(|e| {
-            if e.is_timeout() {
+    {
+        Ok(response) => response,
+        Err(error) => {
+            DOWNLOADING_MODELS.write().await.remove(&model_name);
+            let message = if error.is_timeout() {
                 format!("Download timed out. The model may be large, please try using the Ollama CLI: ollama pull {}", model_name)
-            } else if e.is_connect() {
+            } else if error.is_connect() {
                 format!("Cannot connect to {}. Please check if the Ollama server is running.", base_url)
             } else {
-                format!("Failed to download model: {}", e)
-            }
-        })?;
+                format!("Failed to download model: {}", error)
+            };
+            let _ = app_handle.emit("ollama-model-download-error", serde_json::json!({
+                "endpoint": endpoint, "modelName": model_name, "error": message
+            }));
+            return Err(message);
+        }
+    };
 
     if !response.status().is_success() {
         let status = response.status();
@@ -539,5 +549,31 @@ pub async fn get_ollama_model_context(
             // Return default instead of error for better UX
             Ok(4000)
         }
+    }
+}
+
+#[cfg(test)]
+mod download_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[tokio::test]
+    async fn failed_request_clears_worker_state_emits_error_and_permits_retry() {
+        let app = tauri::test::mock_app();
+        let errors = Arc::new(AtomicUsize::new(0));
+        let observed = errors.clone();
+        tauri::Listener::listen(&app, "ollama-model-download-error", move |_| {
+            observed.fetch_add(1, Ordering::Relaxed);
+        });
+        let model = "failed-request-regression".to_string();
+        // An invalid URL fails in send() without a network service or model transfer.
+        let endpoint = Some("://invalid".to_string());
+        for _ in 0..2 {
+            let error = pull_ollama_model(app.handle().clone(), model.clone(), endpoint.clone()).await.unwrap_err();
+            assert!(error.contains("Failed to download model"), "{error}");
+            assert!(!DOWNLOADING_MODELS.read().await.contains(&model));
+        }
+        assert_eq!(errors.load(Ordering::Relaxed), 2);
+        assert_eq!(get_ollama_download_status(model, endpoint).await.unwrap(), "error");
     }
 }
