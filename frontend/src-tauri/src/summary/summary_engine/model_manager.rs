@@ -659,10 +659,7 @@ impl ModelManager {
                 }
             };
             let chunk_len = chunk.len() as u64;
-            writer
-                .write_all(&chunk)
-                .await
-                .map_err(|e| anyhow!("Error writing to file: {}", e))?;
+            self.download_io_result(model_name, writer.write_all(&chunk).await).await?;
 
             downloaded += chunk_len;
             bytes_since_last_report += chunk_len;
@@ -723,7 +720,7 @@ impl ModelManager {
             }
         }
 
-        writer.flush().await?;
+        self.download_io_result(model_name, writer.flush().await).await?;
         drop(writer);
 
         log::info!("Download completed for model: {}", model_name);
@@ -778,6 +775,19 @@ impl ModelManager {
             active.remove(model_name);
         }
 
+        Ok(())
+    }
+
+    // A missed error event must still be recoverable from the model status.
+    async fn download_io_result(&self, model_name: &str, result: std::io::Result<()>) -> Result<()> {
+        if let Err(error) = result {
+            let message = format!("Error writing to file: {}", error);
+            if let Some(model) = self.available_models.write().await.get_mut(model_name) {
+                model.status = ModelStatus::Error(message.clone());
+            }
+            self.active_downloads.write().await.remove(model_name);
+            return Err(anyhow!(message));
+        }
         Ok(())
     }
 
@@ -871,6 +881,35 @@ impl ModelManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn failed_write_or_flush_leaves_a_pollable_error_without_an_event() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = ModelManager::new_with_models_dir(Some(dir.path().to_path_buf())).unwrap();
+        manager.init().await.unwrap();
+        let name = "gemma3:1b";
+        let file_path = dir.path().join("read-only-output");
+        std::fs::write(&file_path, b"").unwrap();
+        for fail_on_flush in [false, true] {
+            manager.active_downloads.write().await.insert(name.to_string());
+            manager.available_models.write().await.get_mut(name).unwrap().status =
+                ModelStatus::Downloading { progress: 99 };
+            let file = fs::File::open(&file_path).await.unwrap();
+            let mut writer = BufWriter::with_capacity(if fail_on_flush { 8 } else { 1 }, file);
+            // Tokio queues the first file write. The next write or flush reports its error.
+            writer.write_all(b"GGUF").await.unwrap();
+            let result = if fail_on_flush {
+                writer.flush().await
+            } else {
+                writer.write_all(b"GGUF").await
+            };
+            assert!(result.is_err());
+            assert!(manager.download_io_result(name, result).await.is_err());
+            assert!(!manager.active_downloads.read().await.contains(name));
+            let model = manager.list_models().await.into_iter().find(|model| model.name == name).unwrap();
+            assert!(matches!(model.status, ModelStatus::Error(_)));
+        }
+    }
 
     #[tokio::test]
     async fn shared_model_discovery_prefers_owned_and_protects_shared_deletion() {
