@@ -520,7 +520,7 @@ async fn run_retranscription<R: Runtime>(
             (rows, confidence)
         };
         total_confidence += confidence * rows.len() as f32;
-        transcript_sources.extend(std::iter::repeat_n(segment.source.clone(), rows.len()));
+        transcript_sources.extend(std::iter::repeat(segment.source.clone()).take(rows.len()));
         all_transcripts.extend(rows);
     }
     let mut ordered: Vec<_> = all_transcripts
@@ -1447,10 +1447,7 @@ mod tests {
                     vec![(text, chunk.start_timestamp_ms, chunk.end_timestamp_ms)]
                 }
             };
-            sources.extend(std::iter::repeat_n(
-                chunk.source.clone(),
-                decoded_rows.len(),
-            ));
+            sources.extend(std::iter::repeat(chunk.source.clone()).take(decoded_rows.len()));
             rows.extend(decoded_rows);
         }
         if let Some(engine) = funasr {

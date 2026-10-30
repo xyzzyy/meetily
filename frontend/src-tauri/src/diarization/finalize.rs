@@ -527,7 +527,7 @@ impl EnhancementSpeakerAnalysis {
     pub(crate) fn speaker_key(&self, start: f64, end: f64, source: Option<&str>) -> Option<String> {
         self.windows
             .iter()
-            .filter(|window| source.is_none_or(|source| window.source == source))
+            .filter(|window| source.map_or(true, |source| window.source == source))
             .filter_map(|window| {
                 let overlap = (end.min(window.end) - start.max(window.start)).max(0.0);
                 (overlap > 0.0).then(|| {
@@ -589,7 +589,7 @@ impl EnhancementSpeakerAnalysis {
             let windows: Vec<_> = self
                 .windows
                 .iter()
-                .filter(|w| source.as_deref().is_none_or(|s| w.source == s))
+                .filter(|w| source.as_deref().map_or(true, |s| w.source == s))
                 .cloned()
                 .collect();
             let source_overlap = source.is_some()
