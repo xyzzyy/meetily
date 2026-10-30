@@ -17,6 +17,128 @@ pub struct SpeechSegment {
     pub confidence: f32,
 }
 
+/// Thresholds, padding, and minimum speech length shared by the live
+/// processor and the batch detector.
+fn processor_config(redemption_time_ms: u32) -> VadConfig {
+    // Use STRICT settings to prevent silence from reaching Whisper
+    let mut config = VadConfig::default();
+    config.sample_rate = VAD_SAMPLE_RATE as usize;
+
+    // CONTINUOUS SPEECH FIX: Tuned for capturing complete 5+ second utterances
+    // Previous: 0.55/0.40 with 400ms redemption was fragmenting speech into 40ms segments
+    // New: More lenient thresholds + longer redemption for continuous speech
+    config.positive_speech_threshold = 0.50;  // Silero default - good for continuous speech
+    config.negative_speech_threshold = 0.35;  // Silero default - allows natural pauses
+
+    // Use the caller's redemption time without additional capping. The batch
+    // paths (`import.rs`, `retranscription.rs`) pass 2000ms to bridge natural
+    // pauses; the live path (`pipeline.rs`) passes 500ms to reduce pause-induced
+    // latency. A qualifying silence is still required; bounded uninterrupted-
+    // speech delivery is tracked in #756.
+    config.redemption_time = Duration::from_millis(redemption_time_ms as u64);
+    config.pre_speech_pad = Duration::from_millis(300);   // Pre-speech padding for context
+    config.post_speech_pad = Duration::from_millis(400);  // Increased: more context at end
+
+    // CRITICAL FIX: Increased min_speech_time to prevent tiny 40ms fragments
+    // Previous: 100ms allowed too-short segments that Whisper rejects
+    // New: 250ms ensures segments are substantial enough for Whisper (>100ms requirement)
+    config.min_speech_time = Duration::from_millis(250);  // Prevent tiny fragments
+    config
+}
+
+/// Silero v4 is specified for 512, 1024, or 1536-sample frames at 16 kHz.
+/// `VadSession::process` always uses 480-sample (30 ms) frames; on a recorded
+/// call that scored clear, loud speech below the start threshold, depending on
+/// where the pass began. Batch callers have the whole recording, so score
+/// specified frames directly and apply the same segmentation rules as
+/// `VadSession`: a speech start pads back by `pre_speech_pad`, speech shorter
+/// than `min_speech_time` is dropped, and speech ends after `redemption_time`
+/// of silence plus `post_speech_pad`.
+pub(crate) fn batch_speech_segments(
+    samples_16k: &[f32],
+    redemption_time_ms: u32,
+    mut progress: impl FnMut(u32, usize) -> bool,
+) -> Result<Vec<SpeechSegment>> {
+    const FRAME: usize = 512;
+    crate::ensure_onnx_runtime_available()?;
+    let config = processor_config(redemption_time_ms);
+    let mut session = VadSession::new(config)
+        .map_err(|e| anyhow!("Failed to create VAD session: {:?}", e))?;
+    let per_ms = VAD_SAMPLE_RATE as usize / 1000;
+    let pre_pad = config.pre_speech_pad.as_millis() as usize * per_ms;
+    let post_pad = config.post_speech_pad.as_millis() as usize * per_ms;
+    let min_speech = config.min_speech_time.as_millis() as usize * per_ms;
+    let redemption = config.redemption_time.as_millis() as usize * per_ms;
+    let segment = |start: usize, end: usize| {
+        let end = end.min(samples_16k.len());
+        SpeechSegment {
+            samples: samples_16k[start..end].to_vec(),
+            start_timestamp_ms: start as f64 / per_ms as f64,
+            end_timestamp_ms: end as f64 / per_ms as f64,
+            confidence: 0.9,
+        }
+    };
+    let count = samples_16k.len().div_ceil(FRAME).max(1);
+    let mut segments = Vec::new();
+    // (start sample, speech samples so far, minimum length reached)
+    let mut speech: Option<(usize, usize, bool)> = None;
+    let mut silent = 0;
+    for (index, chunk) in samples_16k.chunks(FRAME).enumerate() {
+        let mut frame: Vec<f32> = chunk
+            .iter()
+            .map(|s| if s.is_finite() { s.clamp(-1.0, 1.0) } else { 0.0 })
+            .collect();
+        frame.resize(FRAME, 0.0);
+        let output = session
+            .forward(frame)
+            .map_err(|e| anyhow!("VAD processing failed: {}", e))?;
+        let probability = *output
+            .try_extract_array::<f32>()
+            .map_err(|e| anyhow!("VAD processing failed: {}", e))?
+            .first()
+            .ok_or_else(|| anyhow!("VAD returned no probability"))?;
+        let frame_start = index * FRAME;
+        if probability < config.negative_speech_threshold {
+            silent += FRAME;
+        } else {
+            silent = 0;
+        }
+        match speech.as_mut() {
+            None => {
+                if probability > config.positive_speech_threshold {
+                    speech = Some((frame_start.saturating_sub(pre_pad), 0, false));
+                }
+            }
+            Some((start, speech_time, passed)) => {
+                *speech_time += FRAME;
+                if *speech_time > min_speech {
+                    *passed = true;
+                }
+                if probability < config.negative_speech_threshold {
+                    if !*passed {
+                        speech = None;
+                    } else if silent > redemption {
+                        let end = frame_start + FRAME - silent + post_pad;
+                        segments.push(segment(*start, end));
+                        speech = None;
+                    }
+                }
+            }
+        }
+        if (index % 100 == 0 || index + 1 == count)
+            && !progress(((index + 1) * 100 / count) as u32, segments.len())
+        {
+            return Err(anyhow!(
+                "Enhancement cancelled. The saved transcript was kept."
+            ));
+        }
+    }
+    if let Some((start, _, true)) = speech {
+        segments.push(segment(start, samples_16k.len()));
+    }
+    Ok(segments)
+}
+
 /// Processes audio in 30ms chunks but returns complete speech segments
 pub struct ContinuousVadProcessor {
     session: VadSession,
@@ -36,29 +158,7 @@ impl ContinuousVadProcessor {
     pub fn new(input_sample_rate: u32, redemption_time_ms: u32) -> Result<Self> {
         crate::ensure_onnx_runtime_available()?;
 
-        // Use STRICT settings to prevent silence from reaching Whisper
-        let mut config = VadConfig::default();
-        config.sample_rate = VAD_SAMPLE_RATE as usize;
-
-        // CONTINUOUS SPEECH FIX: Tuned for capturing complete 5+ second utterances
-        // Previous: 0.55/0.40 with 400ms redemption was fragmenting speech into 40ms segments
-        // New: More lenient thresholds + longer redemption for continuous speech
-        config.positive_speech_threshold = 0.50;  // Silero default - good for continuous speech
-        config.negative_speech_threshold = 0.35;  // Silero default - allows natural pauses
-
-        // Use the caller's redemption time without additional capping. The batch
-        // paths (`import.rs`, `retranscription.rs`) pass 2000ms to bridge natural
-        // pauses; the live path (`pipeline.rs`) passes 500ms to reduce pause-induced
-        // latency. A qualifying silence is still required; bounded uninterrupted-
-        // speech delivery is tracked in #756.
-        config.redemption_time = Duration::from_millis(redemption_time_ms as u64);
-        config.pre_speech_pad = Duration::from_millis(300);   // Pre-speech padding for context
-        config.post_speech_pad = Duration::from_millis(400);  // Increased: more context at end
-
-        // CRITICAL FIX: Increased min_speech_time to prevent tiny 40ms fragments
-        // Previous: 100ms allowed too-short segments that Whisper rejects
-        // New: 250ms ensures segments are substantial enough for Whisper (>100ms requirement)
-        config.min_speech_time = Duration::from_millis(250);  // Prevent tiny fragments
+        let config = processor_config(redemption_time_ms);
 
         debug!("Creating VAD session with: sample_rate={}Hz, redemption={}ms, min_speech={}ms, input_rate={}Hz",
                VAD_SAMPLE_RATE, redemption_time_ms, 250, input_sample_rate);
@@ -90,6 +190,13 @@ impl ContinuousVadProcessor {
     /// Process incoming audio samples and return any complete speech segments
     /// Handles resampling from input sample rate to 16kHz for VAD processing
     pub fn process_audio(&mut self, samples: &[f32]) -> Result<Vec<SpeechSegment>> {
+        self.process_audio_with_observer(samples, |_| {})
+    }
+
+    /// Expose the exact converted samples used by VAD and the recognizer.
+    pub(crate) fn process_audio_with_observer(
+        &mut self, samples: &[f32], observe: impl FnOnce(&[f32]),
+    ) -> Result<Vec<SpeechSegment>> {
         // Resample to 16kHz if needed
         let resampled_audio = if self.sample_rate == 16000 {
             samples.to_vec()
@@ -97,6 +204,7 @@ impl ContinuousVadProcessor {
             self.resample_to_16k(samples)?
         };
 
+        observe(&resampled_audio);
         self.buffer.extend_from_slice(&resampled_audio);
         let mut completed_segments = Vec::new();
 

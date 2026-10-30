@@ -23,7 +23,47 @@ pub(crate) enum BatchEngine {
     Nemotron,
 }
 
+/// Input policy belongs to the backend, not to the shared Enhance workflow.
+/// Context is a target for joining nearby speech; it never pads a model input
+/// with invented audio or removes the pauses between utterances.
+#[derive(Clone, Copy, Debug, serde::Serialize)]
+pub(crate) struct EnhancementInputPolicy {
+    pub context_target_ms: f64,
+    pub max_input_samples: usize,
+}
+
 impl BatchEngine {
+    pub(crate) fn enhancement_input_policy(self) -> EnhancementInputPolicy {
+        match self {
+            // Whisper encodes 30-second windows. Keep the short-phrase context
+            // that passed the checked recording, without a live latency limit.
+            Self::Whisper => EnhancementInputPolicy {
+                context_target_ms: 8_000.0,
+                max_input_samples: 30 * 16_000,
+            },
+            // The input limit is a bounded local ONNX memory budget, so long
+            // continuous speech needs no Whisper-sized ceiling. Joining 30
+            // seconds of context made the INT8 model skip whole clauses on
+            // the checked call; 8 seconds kept more of the speech.
+            Self::Parakeet => EnhancementInputPolicy {
+                context_target_ms: 8_000.0,
+                max_input_samples: 60 * 16_000,
+            },
+            // Native Nemotron supplies word times and bounds its own requests
+            // to five minutes, with shorter retries if alignment fails.
+            Self::Nemotron => EnhancementInputPolicy {
+                context_target_ms: 8_000.0,
+                max_input_samples: 300 * 16_000,
+            },
+            // Respect the actual helper protocol. FUN-ASR returns no word
+            // times, so each input becomes one row; longer context made rows
+            // coarser without better words on the checked recording.
+            Self::FunAsr => EnhancementInputPolicy {
+                context_target_ms: 8_000.0,
+                max_input_samples: crate::funasr_engine::MAX_AUDIO_SAMPLES,
+            },
+        }
+    }
     /// Map a transcript provider name to its batch engine. Unknown or missing
     /// providers use Whisper, as before.
     pub(crate) fn from_provider(provider: Option<&str>) -> Self {
@@ -89,7 +129,8 @@ pub(crate) async fn get_or_init_funasr<R: tauri::Runtime>(
         Some(model) => model.to_string(),
         None => configured_funasr_model(
             crate::api::api::api_get_transcript_config(app.clone(), app.state(), None).await,
-        ).map_err(anyhow::Error::msg)?,
+        )
+        .map_err(anyhow::Error::msg)?,
     };
     let engine = batch_engine().map_err(anyhow::Error::msg)?;
     engine.load_selected_model(&selected).await?;

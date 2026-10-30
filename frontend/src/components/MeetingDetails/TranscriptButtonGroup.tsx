@@ -1,10 +1,12 @@
 "use client";
 
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useEffect } from 'react';
 import { Button } from '@/components/ui/button';
 import { ButtonGroup } from '@/components/ui/button-group';
-import { Copy, FolderOpen, RefreshCw } from 'lucide-react';
+import { Copy, FolderOpen, RefreshCw, Undo2 } from 'lucide-react';
 import Analytics from '@/lib/analytics';
+import { invoke } from '@tauri-apps/api/core';
+import { toast } from 'sonner';
 import { RetranscribeDialog } from './RetranscribeDialog';
 import { useConfig } from '@/contexts/ConfigContext';
 
@@ -29,13 +31,40 @@ export function TranscriptButtonGroup({
 }: TranscriptButtonGroupProps) {
   const { betaFeatures } = useConfig();
   const [showRetranscribeDialog, setShowRetranscribeDialog] = useState(false);
+  const [undoReviewId, setUndoReviewId] = useState<string | null>(null);
+  const [undoing, setUndoing] = useState(false);
+  const refreshUndo = useCallback(async () => {
+    if (!meetingId) { setUndoReviewId(null); return; }
+    const result = await invoke<{ id: string; applied: boolean } | null>('get_enhancement_review', { meetingId });
+    setUndoReviewId(result?.applied ? result.id : null);
+  }, [meetingId]);
+  useEffect(() => {
+    setUndoReviewId(null);
+    let active = true;
+    if (meetingId) invoke<{ id: string; applied: boolean } | null>('get_enhancement_review', { meetingId })
+      .then(result => { if (active) setUndoReviewId(result?.applied ? result.id : null); })
+      .catch(() => { if (active) setUndoReviewId(null); });
+    return () => { active = false; };
+  }, [meetingId]);
 
   const handleRetranscribeComplete = useCallback(async () => {
+    await refreshUndo().catch(() => setUndoReviewId(null));
     // Refetch transcripts to show the updated data
     if (onRefetchTranscripts) {
       await onRefetchTranscripts();
     }
-  }, [onRefetchTranscripts]);
+  }, [onRefetchTranscripts, refreshUndo]);
+
+  const handleUndo = async () => {
+    if (!meetingId || !undoReviewId || undoing) return;
+    setUndoing(true);
+    try {
+      const warning = await invoke<string | null>('undo_enhancement', { meetingId, reviewId: undoReviewId });
+      await handleRetranscribeComplete();
+      if (warning) toast.warning(warning); else toast.success('Enhancement undone.');
+    } catch (error) { toast.error(String(error)); }
+    finally { setUndoing(false); }
+  };
 
   return (
     <div className="flex items-center justify-center w-full gap-2">
@@ -68,6 +97,13 @@ export function TranscriptButtonGroup({
           <FolderOpen className="@[22rem]:mr-2" size={18} />
           <span className="hidden @[22rem]:inline">Recording</span>
         </Button>
+
+        {undoReviewId && (
+          <Button size="sm" variant="outline" onClick={handleUndo} disabled={undoing} title="Undo last enhancement" className="px-2 @[22rem]:px-3">
+            <Undo2 />
+            <span className="hidden @[22rem]:inline">{undoing ? 'Undoing...' : 'Undo'}</span>
+          </Button>
+        )}
 
         {betaFeatures.importAndRetranscribe && meetingId && meetingFolderPath && (
           <Button
