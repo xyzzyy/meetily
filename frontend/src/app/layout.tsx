@@ -76,6 +76,9 @@ export default function RootLayout({
   children: React.ReactNode
 }) {
   const [showOnboarding, setShowOnboarding] = useState(false)
+  // Wait for the onboarding check so the main page cannot probe audio
+  // devices (and trigger macOS permission prompts) before setup.
+  const [onboardingChecked, setOnboardingChecked] = useState(false)
   const [onboardingCompleted, setOnboardingCompleted] = useState(false)
 
   // Import audio state
@@ -103,6 +106,7 @@ export default function RootLayout({
         setShowOnboarding(true)
         setOnboardingCompleted(false)
       })
+      .finally(() => setOnboardingChecked(true))
   }, [])
 
   // Disable context menu in production
@@ -259,7 +263,7 @@ export default function RootLayout({
                                 <DownloadProgressToastProvider />
 
                                 {/* Show onboarding or main app */}
-                                {showOnboarding ? (
+                                {!onboardingChecked ? null : showOnboarding ? (
                                   <OnboardingFlow onComplete={handleOnboardingComplete} />
                                 ) : (
                                   <div className="flex">

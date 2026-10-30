@@ -7,6 +7,13 @@ use super::platform;
 
 /// List all available audio devices on the system
 pub async fn list_audio_devices() -> Result<Vec<AudioDevice>> {
+    // CoreAudio can block indefinitely while probing input devices (for
+    // example, waiting on a microphone permission prompt). Keep that off the
+    // async workers so other Tauri commands still run.
+    tokio::task::spawn_blocking(enumerate_audio_devices).await?
+}
+
+fn enumerate_audio_devices() -> Result<Vec<AudioDevice>> {
     let host = cpal::default_host();
 
     // Platform-specific device enumeration

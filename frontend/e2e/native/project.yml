@@ -1,0 +1,27 @@
+name: MeetilyLaunch
+options:
+  bundleIdPrefix: com.meetily.ci
+settings:
+  base:
+    MACOSX_DEPLOYMENT_TARGET: '14.4'
+    SWIFT_VERSION: '5.0'
+    CODE_SIGN_IDENTITY: '-'
+    CODE_SIGN_STYLE: Manual
+    GENERATE_INFOPLIST_FILE: YES
+    ENABLE_APP_SANDBOX: NO
+targets:
+  NativeLaunchTests:
+    type: bundle.ui-testing
+    platform: macOS
+    sources:
+      - LaunchTests.swift
+schemes:
+  MeetilyLaunch:
+    build:
+      targets:
+        NativeLaunchTests: [test]
+    test:
+      targets:
+        - NativeLaunchTests
+      environmentVariables:
+        MEETILY_APP_PATH: ${MEETILY_APP_PATH}

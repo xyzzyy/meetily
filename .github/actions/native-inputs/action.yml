@@ -1,0 +1,20 @@
+name: Get native build inputs
+description: Download the production frontend and unpack the executable helpers.
+runs:
+  using: composite
+  steps:
+    - uses: actions/download-artifact@v4
+      with:
+        name: frontend-build
+        path: frontend/out
+    - uses: actions/download-artifact@v4
+      with:
+        pattern: native-helper-*
+        merge-multiple: true
+        path: ${{ runner.temp }}/native-helpers
+    - shell: bash
+      run: |
+        mkdir -p frontend/src-tauri/binaries
+        for archive in "$RUNNER_TEMP"/native-helpers/*.tar.gz; do
+          tar -xzf "$archive" -C frontend/src-tauri/binaries
+        done
