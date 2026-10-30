@@ -474,15 +474,13 @@ async fn run_retranscription<R: Runtime>(
                 .map_err(|e| anyhow!("FUN-ASR transcription failed on segment {}: {}", i, e))?;
             // FUN-ASR has no word times. Keep the complete VAD spans
             // selected above, without changing Parakeet's token-timed rows.
-            let rows = if result.text.trim().is_empty() {
-                Vec::new()
-            } else {
-                vec![(
-                    result.text,
-                    segment.start_timestamp_ms,
-                    segment.end_timestamp_ms,
-                )]
-            };
+            let rows = super::enhancement::untimed_row(
+                result.text,
+                segment.start_timestamp_ms,
+                segment.end_timestamp_ms,
+            )
+            .into_iter()
+            .collect();
             (rows, 0.9f32)
         } else if use_parakeet {
             let result = parakeet_engine
@@ -512,11 +510,13 @@ async fn run_retranscription<R: Runtime>(
                 .transcribe_batch_audio_with_confidence(segment.samples.clone(), language.clone())
                 .await
                 .map_err(|error| anyhow!("Whisper transcription failed on segment {i}: {error}"))?;
-            let rows = if text.trim().is_empty() {
-                Vec::new()
-            } else {
-                vec![(text, segment.start_timestamp_ms, segment.end_timestamp_ms)]
-            };
+            let rows: Vec<_> = super::enhancement::untimed_row(
+                text,
+                segment.start_timestamp_ms,
+                segment.end_timestamp_ms,
+            )
+            .into_iter()
+            .collect();
             (rows, confidence)
         };
         total_confidence += confidence * rows.len() as f32;
@@ -1441,11 +1441,13 @@ mod tests {
                         .unwrap()
                         .0
                 };
-                if text.trim().is_empty() {
-                    Vec::new()
-                } else {
-                    vec![(text, chunk.start_timestamp_ms, chunk.end_timestamp_ms)]
-                }
+                super::super::enhancement::untimed_row(
+                    text,
+                    chunk.start_timestamp_ms,
+                    chunk.end_timestamp_ms,
+                )
+                .into_iter()
+                .collect()
             };
             sources.extend(std::iter::repeat(chunk.source.clone()).take(decoded_rows.len()));
             rows.extend(decoded_rows);

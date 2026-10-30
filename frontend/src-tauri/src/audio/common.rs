@@ -40,10 +40,12 @@ impl BatchEngine {
                 context_target_ms: 8_000.0,
                 max_input_samples: 30 * 16_000,
             },
-            // This is a bounded local ONNX memory budget, not a model-wide
-            // context limit. Longer TDT inputs need no Whisper-sized ceiling.
+            // The input limit is a bounded local ONNX memory budget, so long
+            // continuous speech needs no Whisper-sized ceiling. Joining 30
+            // seconds of context made the INT8 model skip whole clauses on
+            // the checked call; 8 seconds kept more of the speech.
             Self::Parakeet => EnhancementInputPolicy {
-                context_target_ms: 30_000.0,
+                context_target_ms: 8_000.0,
                 max_input_samples: 60 * 16_000,
             },
             // Respect the actual helper protocol. FUN-ASR returns no word

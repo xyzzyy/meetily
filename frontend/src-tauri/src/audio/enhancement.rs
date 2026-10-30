@@ -227,11 +227,25 @@ pub(crate) fn decode_enhancement_audio(path: &std::path::Path) -> Result<Enhance
     }
 }
 
-/// Reject very weak pickup only when its volume pattern follows the other
-/// capture track. Level alone cannot distinguish quiet speech from pickup.
+fn rms(samples: &[f32]) -> f64 {
+    (samples.iter().map(|s| (*s as f64).powi(2)).sum::<f64>() / samples.len().max(1) as f64).sqrt()
+}
+
+/// Median speech level of one track, used to judge pickup on that track.
+fn typical_speech_level(spans: &[super::vad::SpeechSegment]) -> f64 {
+    let mut levels: Vec<f64> = spans.iter().map(|span| rms(&span.samples)).collect();
+    levels.sort_by(f64::total_cmp);
+    levels.get(levels.len() / 2).copied().unwrap_or(0.0)
+}
+
+/// Reject pickup of the other capture track. Both rules need the other track
+/// to be at least 10 times louder, so quiet speech alone always remains.
+/// Pickup is either far below this track's own typical speech level, or very
+/// weak with a volume pattern that follows the other track.
 fn weak_cross_track_pickup(
     segment: &super::vad::SpeechSegment,
     other: &super::decoder::DecodedAudio,
+    typical_level: f64,
 ) -> bool {
     const FRAME: usize = 160; // 10 ms at 16 kHz
     let from = (segment.start_timestamp_ms * 16.0).round() as usize;
@@ -240,14 +254,19 @@ fn weak_cross_track_pickup(
         return false;
     };
     let count = segment.samples.len().min(reference.len());
-    if count < 16000 {
+    if count == 0 {
         return false;
     }
-    let rms = |samples: &[f32]| {
-        (samples.iter().map(|s| (*s as f64).powi(2)).sum::<f64>() / samples.len() as f64).sqrt()
-    };
     let level = rms(&segment.samples[..count]);
-    if level >= 0.01 || level <= 0.0 || rms(&reference[..count]) < level * 10.0 {
+    if level <= 0.0 || rms(&reference[..count]) < level * 10.0 {
+        return false;
+    }
+    // On the checked call, echo and noise sat at 3-7% of the track's speech
+    // level under a loud other track; real speech stayed above 24%.
+    if level < typical_level * 0.15 {
+        return true;
+    }
+    if level >= 0.01 || count < 16000 {
         return false;
     }
     let envelope = |samples: &[f32]| samples.chunks_exact(FRAME).map(rms).collect::<Vec<_>>();
@@ -320,9 +339,10 @@ pub(crate) fn recognition_inputs(
         let other = &audio.tracks[1 - index].1;
         // Pickup detection uses the same short analysis windows for every
         // engine. The recognizer's context size must not change that evidence.
+        let typical_level = typical_speech_level(&spans);
         let retained: Vec<_> = spans
             .into_iter()
-            .filter(|segment| !weak_cross_track_pickup(segment, other))
+            .filter(|segment| !weak_cross_track_pickup(segment, other, typical_level))
             .collect();
         inputs.extend(
             speech_context_with_target(&retained, &track.samples, policy.context_target_ms)
@@ -441,21 +461,7 @@ fn recognition_speech_segments_with_context(
     mut progress: impl FnMut(u32, usize) -> bool,
 ) -> Result<Vec<super::vad::SpeechSegment>> {
     let converted = decoded.to_whisper_format();
-    let mut processor = super::vad::ContinuousVadProcessor::new(16_000, pause_ms)?;
-    let frame = 16_000 * super::constants::MIXING_WINDOW_MS / 1000;
-    let count = converted.len().div_ceil(frame).max(1);
-    let mut spans = Vec::new();
-    for (index, window) in converted.chunks(frame).enumerate() {
-        spans.extend(processor.process_audio(window)?);
-        if (index % 100 == 0 || index + 1 == count)
-            && !progress(((index + 1) * 100 / count) as u32, spans.len())
-        {
-            return Err(anyhow!(
-                "Enhancement cancelled. The saved transcript was kept."
-            ));
-        }
-    }
-    spans.extend(processor.flush()?);
+    let mut spans = super::vad::batch_speech_segments(&converted, pause_ms, &mut progress)?;
     for row in known_speech {
         let (Some(start), Some(end)) = (row.audio_start_time, row.audio_end_time) else {
             continue;
@@ -506,6 +512,27 @@ fn recognition_speech_segments_with_context(
         &converted,
         context_target_ms,
     ))
+}
+
+/// Rows without word times span their whole input. More words than the audio
+/// can hold is not a transcription of it: on a 1.1-second clip Whisper returned
+/// a nine-word caption credit. Real speech on the checked call stayed under
+/// 5 words per second.
+pub(crate) fn untimed_row(text: String, start_ms: f64, end_ms: f64) -> Option<(String, f64, f64)> {
+    const MAX_WORDS_PER_SECOND: f64 = 6.0;
+    let words = text.split_whitespace().count();
+    if words == 0 {
+        return None;
+    }
+    let seconds = ((end_ms - start_ms) / 1000.0).max(0.0);
+    if words >= 4 && words as f64 > seconds * MAX_WORDS_PER_SECOND {
+        log::warn!(
+            "Discarding {words} words decoded from {seconds:.1}s of audio at {:.1}s: more than speech can hold",
+            start_ms / 1000.0
+        );
+        return None;
+    }
+    Some((text, start_ms, end_ms))
 }
 
 /// Longest pause that recognition context joins across.
@@ -1248,12 +1275,12 @@ mod tests {
             duration_seconds: 6.0,
         };
         assert!(
-            weak_cross_track_pickup(&quiet, &other),
+            weak_cross_track_pickup(&quiet, &other, 0.004),
             "reject weak copies of the same speech pattern"
         );
         other.samples.fill(0.0);
         assert!(
-            !weak_cross_track_pickup(&quiet, &other),
+            !weak_cross_track_pickup(&quiet, &other, 0.004),
             "quiet speech alone must remain"
         );
         other.samples = (0..6 * 16000)
@@ -1263,14 +1290,33 @@ mod tests {
             })
             .collect();
         assert!(
-            !weak_cross_track_pickup(&quiet, &other),
+            !weak_cross_track_pickup(&quiet, &other, 0.004),
             "independent overlapping speech must remain"
         );
         quiet.samples = waveform(0.05, 0.0);
         other.samples = waveform(0.1, 0.0);
         assert!(
-            !weak_cross_track_pickup(&quiet, &other),
+            !weak_cross_track_pickup(&quiet, &other, 0.004),
             "comparable voices must remain"
+        );
+        // A track whose speech is normally loud: a faint span under a loud
+        // other track is bleed, even without a matching volume pattern.
+        quiet.samples = waveform(0.003, 0.0);
+        other.samples = (0..6 * 16000)
+            .map(|i| {
+                let t = i as f32 / 16000.0;
+                0.1 * (t * 300.0).sin() * (0.2 + 0.8 * (t * 2.21 + 2.5).sin().max(0.0))
+            })
+            .collect();
+        assert!(weak_cross_track_pickup(&quiet, &other, 0.06));
+        assert!(
+            !weak_cross_track_pickup(&quiet, &other, 0.004),
+            "a quiet talker's normal level is not pickup"
+        );
+        other.samples.fill(0.0);
+        assert!(
+            !weak_cross_track_pickup(&quiet, &other, 0.06),
+            "faint speech with the other track silent must remain"
         );
     }
 
@@ -1526,7 +1572,6 @@ mod tests {
 
     #[test]
     fn model_context_can_expand_without_changing_the_analysis_windows_or_audio() {
-        use super::super::common::BatchEngine;
         let audio: Vec<f32> = (0..30 * 16_000).map(|i| i as f32 / 1_000_000.0).collect();
         let spans: Vec<_> = (0..5)
             .map(|i| {
@@ -1541,13 +1586,7 @@ mod tests {
             })
             .collect();
         let analysis = speech_context(&spans, &audio);
-        let extended = speech_context_with_target(
-            &analysis,
-            &audio,
-            BatchEngine::Parakeet
-                .enhancement_input_policy()
-                .context_target_ms,
-        );
+        let extended = speech_context_with_target(&analysis, &audio, 30_000.0);
         assert!(extended.len() < analysis.len());
         assert_eq!(
             extended[0].samples,
@@ -1556,6 +1595,17 @@ mod tests {
         );
         assert_eq!(extended[0].start_timestamp_ms, 0.0);
         assert_eq!(extended[0].end_timestamp_ms, 29_000.0);
+    }
+
+    #[test]
+    fn untimed_rows_reject_more_words_than_the_audio_can_hold() {
+        let caption = "Captions by Red Bee Media Copyright Australian Broadcasting Corporation";
+        assert!(untimed_row(caption.into(), 652_500.0, 653_600.0).is_none());
+        assert!(untimed_row(caption.into(), 650_000.0, 653_600.0).is_some());
+        let fast = "probably a very good tool to use for this kind of thing.";
+        assert!(untimed_row(fast.into(), 415_800.0, 418_300.0).is_some());
+        assert!(untimed_row("Yeah.".into(), 0.0, 100.0).is_some());
+        assert!(untimed_row("  ".into(), 0.0, 1000.0).is_none());
     }
 
     #[test]
