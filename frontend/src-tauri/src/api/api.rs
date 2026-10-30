@@ -523,11 +523,11 @@ pub async fn api_get_model_config<R: Runtime>(
     match SettingsRepository::get_model_config(pool).await {
         Ok(Some(config)) => {
             log_info!(
-                "✅ Found model config in database: provider={}, model={}, whisperModel={}, ollamaEndpoint={:?}",
+                "✅ Found model config in database: provider={}, model={}, whisperModel={}, custom Ollama endpoint={}",
                 &config.provider,
                 &config.model,
                 &config.whisper_model,
-                &config.ollama_endpoint
+                config.ollama_endpoint.is_some()
             );
             match SettingsRepository::get_api_key(pool, &config.provider).await {
                 Ok(api_key) => {
@@ -573,11 +573,11 @@ pub async fn api_save_model_config<R: Runtime>(
     _auth_token: Option<String>,
 ) -> Result<serde_json::Value, String> {
     log_info!(
-        "💾 api_save_model_config called (native): provider='{}', model='{}', whisperModel='{}', ollamaEndpoint={:?}",
+        "💾 api_save_model_config called (native): provider='{}', model='{}', whisperModel='{}', custom Ollama endpoint={}",
         &provider,
         &model,
         &whisper_model,
-        &ollama_endpoint
+        ollama_endpoint.is_some()
     );
     let pool = state.db_manager.pool();
 
@@ -1366,11 +1366,8 @@ pub async fn api_save_custom_openai_config<R: Runtime>(
     temperature: Option<f32>,
     top_p: Option<f32>,
 ) -> Result<serde_json::Value, String> {
-    log_info!(
-        "api_save_custom_openai_config called: endpoint='{}', model='{}'",
-        &endpoint,
-        &model
-    );
+    // Endpoints are not logged: a URL can carry a user name, password or token.
+    log_info!("api_save_custom_openai_config called: model='{}'", &model);
 
     // Validate required fields
     if endpoint.trim().is_empty() {
@@ -1415,10 +1412,7 @@ pub async fn api_save_custom_openai_config<R: Runtime>(
 
     match SettingsRepository::save_custom_openai_config(pool, &config).await {
         Ok(()) => {
-            log_info!(
-                "✅ Successfully saved custom OpenAI config for endpoint: {}",
-                config.endpoint
-            );
+            log_info!("✅ Successfully saved custom OpenAI config");
             Ok(serde_json::json!({
                 "status": "success",
                 "message": "Custom OpenAI configuration saved successfully"
@@ -1444,11 +1438,7 @@ pub async fn api_get_custom_openai_config<R: Runtime>(
     match SettingsRepository::get_custom_openai_config(pool).await {
         Ok(config) => {
             if let Some(ref c) = config {
-                log_info!(
-                    "✅ Found custom OpenAI config: endpoint='{}', model='{}'",
-                    c.endpoint,
-                    c.model
-                );
+                log_info!("✅ Found custom OpenAI config: model='{}'", c.model);
             } else {
                 log_info!("No custom OpenAI config found");
             }
@@ -1470,11 +1460,15 @@ pub async fn api_test_custom_openai_connection<R: Runtime>(
     api_key: Option<String>,
     model: String,
 ) -> Result<serde_json::Value, String> {
-    log_info!(
-        "api_test_custom_openai_connection called: endpoint='{}', model='{}'",
-        &endpoint,
-        &model
-    );
+    test_custom_openai_connection(endpoint, api_key, model).await
+}
+
+async fn test_custom_openai_connection(
+    endpoint: String,
+    api_key: Option<String>,
+    model: String,
+) -> Result<serde_json::Value, String> {
+    log_info!("api_test_custom_openai_connection called: model='{}'", &model);
 
     // Validate endpoint URL format
     if !endpoint.starts_with("http://") && !endpoint.starts_with("https://") {
@@ -1499,7 +1493,7 @@ pub async fn api_test_custom_openai_connection<R: Runtime>(
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
         .build()
-        .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
+        .map_err(|e| format!("Failed to create HTTP client: {}", crate::http_error::request_error(&e)))?;
 
     let mut request = client
         .post(&url)
@@ -1549,45 +1543,93 @@ pub async fn api_test_custom_openai_connection<R: Runtime>(
                         }
 
                         // Response was 200 but doesn't match OpenAI format
-                        log_warn!(
-                            "⚠️ Endpoint returned 200 but response doesn't match OpenAI format: {}",
-                            response_text
-                        );
+                        log_warn!("Endpoint response does not match the OpenAI format");
                         Err("Endpoint is reachable but doesn't appear to be OpenAI-compatible. Response is missing 'choices' array or 'message.content' / 'message.reasoning_content' field.".to_string())
                     }
-                    Err(e) => {
-                        log_warn!(
-                            "⚠️ Endpoint returned 200 but response is not valid JSON: {}",
-                            e
-                        );
-                        Err(format!(
-                            "Endpoint is reachable but returned invalid JSON: {}. Response: {}",
-                            e, response_text
-                        ))
+                    Err(_) => {
+                        log_warn!("Endpoint response is not valid JSON");
+                        Err("Endpoint is reachable but returned invalid JSON.".to_string())
                     }
                 }
             } else {
-                log_warn!(
-                    "⚠️ Custom OpenAI connection test failed with status {}: {}",
-                    status,
-                    response_text
-                );
-                Err(format!(
-                    "Connection failed with status {}: {}",
-                    status, response_text
-                ))
+                let message = crate::http_error::status_error(status);
+                log_warn!("Custom OpenAI connection test failed: {}", message);
+                Err(message)
             }
         }
         Err(e) => {
-            log_error!("❌ Custom OpenAI connection test failed: {}", e);
-            if e.is_timeout() {
-                Err("Connection timed out. Please check the endpoint URL.".to_string())
-            } else if e.is_connect() {
-                Err("Could not connect to endpoint. Please verify the URL is correct and the server is running.".to_string())
-            } else {
-                Err(format!("Connection failed: {}", e))
+            let message = crate::http_error::request_error(&e);
+            log_error!("Custom OpenAI connection test failed: {}", message);
+            Err(message.to_string())
+        }
+    }
+}
+
+#[cfg(test)]
+mod connection_privacy_tests {
+    use super::*;
+    use crate::http_error::test_support::{assert_private, closed_endpoint, respond_once};
+    use std::sync::{Mutex, Once};
+
+    struct CapturedLogs;
+    static LOGS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+    static LOGGER: CapturedLogs = CapturedLogs;
+    static INITIALIZE: Once = Once::new();
+
+    impl log::Log for CapturedLogs {
+        fn enabled(&self, metadata: &log::Metadata<'_>) -> bool {
+            metadata.target() == "app_lib::api::api"
+        }
+        fn log(&self, record: &log::Record<'_>) {
+            if self.enabled(record.metadata()) {
+                LOGS.lock().unwrap().push(record.args().to_string());
             }
         }
+        fn flush(&self) {}
+    }
+
+    #[tokio::test]
+    async fn failed_connection_tests_keep_credentials_out_of_results_and_logs() {
+        INITIALIZE.call_once(|| {
+            log::set_logger(&LOGGER).unwrap();
+            log::set_max_level(log::LevelFilter::Info);
+        });
+        let error = test_custom_openai_connection(
+            closed_endpoint(),
+            Some("review-header-secret".into()),
+            "model".into(),
+        )
+        .await
+        .unwrap_err();
+        assert_private(&error);
+        for (status, body) in [
+            (
+                "401 Unauthorized",
+                "review-password review-query-secret review-header-secret",
+            ),
+            ("200 OK", "invalid JSON review-header-secret"),
+            ("200 OK", r#"{"unexpected":"review-header-secret"}"#),
+        ] {
+            let (endpoint, server) = respond_once(status, body).await;
+            let error = test_custom_openai_connection(
+                endpoint,
+                Some("review-header-secret".into()),
+                "model".into(),
+            )
+            .await
+            .unwrap_err();
+            server.await.unwrap();
+            assert_private(&error);
+            if status.starts_with("401") {
+                assert!(error.contains("HTTP 401"));
+            }
+        }
+        let logs = LOGS.lock().unwrap().join("\n");
+        assert!(
+            logs.contains("connection test failed"),
+            "the real error log must be captured"
+        );
+        assert_private(&logs);
     }
 }
 

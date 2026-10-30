@@ -31,7 +31,7 @@ export function useModelConfiguration({ serverAddress }: UseModelConfigurationPr
             model: data.model,
             whisperModel: data.whisperModel,
             hasApiKey: !!data.apiKey,
-            ollamaEndpoint: data.ollamaEndpoint || 'default'
+            hasOllamaEndpoint: !!data.ollamaEndpoint
           });
           // Fetch API key if not included and provider requires it
           if (data.provider !== 'ollama' && data.provider !== 'custom-openai' && !data.apiKey) {
@@ -60,9 +60,9 @@ export function useModelConfiguration({ serverAddress }: UseModelConfigurationPr
                 // For custom-openai, model field should match customOpenAIModel
                 data.model = customConfig.model || data.model;
                 console.log('✅ Loaded custom OpenAI config:', {
-                  displayName: customConfig.displayName,
-                  endpoint: customConfig.endpoint,
                   model: customConfig.model,
+                  hasEndpoint: !!customConfig.endpoint,
+                  hasApiKey: !!customConfig.apiKey,
                 });
               }
             } catch (err) {
@@ -90,7 +90,7 @@ export function useModelConfiguration({ serverAddress }: UseModelConfigurationPr
     const setupListener = async () => {
       const { listen } = await import('@tauri-apps/api/event');
       const unlisten = await listen<ModelConfig>('model-config-updated', (event) => {
-        console.log('Meeting details received model-config-updated event:', event.payload);
+        console.log('Meeting details received model-config-updated event:', event.payload.provider, event.payload.model);
         setModelConfig(event.payload);
       });
 
@@ -116,7 +116,7 @@ export function useModelConfiguration({ serverAddress }: UseModelConfigurationPr
         apiKey: configToSave.apiKey ?? null,
         ollamaEndpoint: configToSave.ollamaEndpoint ?? null
       };
-      console.log('Saving model config with payload:', payload);
+      console.log('Saving model config:', payload.provider, payload.model);
 
       // Track model configuration change
       if (updatedConfig && (
