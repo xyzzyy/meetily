@@ -127,6 +127,7 @@ export default function PageContent({
   };
 
   const summaryGeneration = useSummaryGeneration({
+    isSummaryDirty: meetingData.isSummaryDirty,
     initialSummary,
     meeting,
     transcripts: meetingData.transcripts,

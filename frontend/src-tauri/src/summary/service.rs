@@ -5,7 +5,7 @@ use crate::summary::llm_client::LLMProvider;
 use crate::summary::language_detection::detect_summary_language;
 use crate::summary::metadata::read_detected_summary_language_from_metadata;
 use crate::summary::processor::{
-    clean_llm_markdown_detailed, extract_meeting_name_from_markdown, generate_meeting_summary,
+    clean_llm_markdown_detailed, generate_meeting_summary,
     language_name_from_code, require_visible_markdown,
 };
 use crate::summary::templates::{self, Template};
@@ -602,17 +602,7 @@ impl SummaryService {
                 .await
                 {
                     Ok(true) => {
-                        if let Some(name) =
-                            extract_meeting_name_from_markdown(&generated.final_markdown)
-                                .filter(|name| !name.is_empty())
-                        {
-                            if let Err(error) =
-                                MeetingsRepository::update_meeting_name(&pool, &meeting_id, &name)
-                                    .await
-                            {
-                                error!("Failed to update meeting name for {}: {}", meeting_id, error);
-                            }
-                        }
+                        // Summary generation must preserve the saved meeting title.
                         info!("Summary saved successfully for meeting_id: {}", meeting_id);
                     }
                     Ok(false) => warn!("Skipped stale summary completion for meeting_id: {}", meeting_id),

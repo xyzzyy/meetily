@@ -25,6 +25,8 @@ mock.module('next/navigation', () => ({
 }));
 mock.module('../../src/contexts/RecordingStateContext', () => ({ useRecordingState: () => ({ isRecording: false }) }));
 mock.module('../../src/contexts/ConfigContext', () => ({ useConfig: () => ({ isAutoSummary: false }) }));
+const confirmReplacement = mock(async () => false);
+mock.module('@tauri-apps/plugin-dialog', () => ({ confirm: confirmReplacement }));
 const notify = mock(() => {});
 mock.module('sonner', () => ({ toast: { info: notify, error: notify, success: notify, warning: notify } }));
 mock.module('../../src/lib/analytics', () => ({ default: {
@@ -42,12 +44,16 @@ let readTranscripts: (id: string) => Promise<unknown>;
 const transcriptPage = {
   transcripts: [{ id: 'transcript', text: 'Meeting transcript', timestamp: '00:00' }], total_count: 1, has_more: false,
 };
+const legacySummary = (content: string) => ({
+  Agenda: { title: 'Agenda', blocks: [{ id: 'a', type: 'paragraph', color: 'default', content }] },
+});
 let savedSummary: SummaryProcessResponse;
 const invoke = mock(async (command: string, args?: Record<string, unknown>): Promise<unknown> => {
   if (command === 'api_get_meetings') return [];
   if (command === 'api_get_summary') return { ...savedSummary, meeting_id: args!.meetingId };
   if (command === 'api_get_meeting_metadata') return readMetadata(args!.meetingId as string);
   if (command === 'api_get_meeting_transcripts') return readTranscripts(args!.meetingId as string);
+  if (command === 'api_save_meeting_summary') return null;
   if (command === 'api_process_transcript') return { process_id: 'attempt-b' };
   if (command === 'api_cancel_summary') return { cancelled: true };
   throw new Error(`Unexpected command: ${command}`);
@@ -59,11 +65,14 @@ const { useMeetingData } = await import('../../src/hooks/meeting-details/useMeet
 
 // Use a lightweight content view around the actual route, transcript loader, state hooks and polling provider.
 let summaryState: ReturnType<typeof useSummaryGeneration>;
+let meetingData: ReturnType<typeof useMeetingData>;
 let refresh: () => Promise<void>;
 let mounts = 0;
 function SummaryView(props: any) {
   const data = useMeetingData(props);
+  meetingData = data;
   summaryState = useSummaryGeneration({
+    isSummaryDirty: data.isSummaryDirty,
     meeting: props.meeting, initialSummary: props.initialSummary, transcripts: data.transcripts,
     modelConfig: { provider: 'ollama', model: 'test', whisperModel: 'base' }, isModelConfigLoading: false,
     selectedTemplate: 'daily_standup', setAiSummary: data.setAiSummary, updateMeetingTitle: data.updateMeetingTitle,
@@ -86,10 +95,13 @@ beforeEach(() => {
   readTranscripts = async () => transcriptPage;
   savedSummary = { meeting_id: selectedMeeting, status: 'pending', start: 'attempt-a', end: null, data: null, error: null, meetingName: 'Meeting A' };
   mounts = 0; timers.clear(); invoke.mockClear(); notify.mockClear();
+  confirmReplacement.mockReset();
+  confirmReplacement.mockResolvedValue(false);
   globalThis.setInterval = ((callback: () => Promise<void>) => {
     const id = ++nextTimer; timers.set(id, callback); return id;
   }) as typeof setInterval;
   globalThis.clearInterval = ((id: number) => { timers.delete(id); }) as typeof clearInterval;
+
 });
 afterEach(async () => {
   if (renderer) await act(async () => renderer!.unmount());
@@ -170,4 +182,54 @@ describe('meeting route transcript refresh', () => {
     expect(invoke.mock.calls.find(([command]) => command === 'api_cancel_summary')?.[1]?.processId).toBe('attempt-b');
     expect(timers.size).toBe(0);
   });
+  test('legacy edits require confirmation and a successful save clears their dirty state', async () => {
+    savedSummary = { ...savedSummary, status: 'completed', data: { Agenda: { title: 'Agenda', blocks: [{ id: 'a', type: 'paragraph', color: 'default', content: 'Original legacy notes' }] } } };
+    await show();
+    await act(async () => { meetingData.handleSummaryChange({ Agenda: { title: 'Agenda', blocks: [{ id: 'a', type: 'paragraph', color: 'default', content: 'Unsaved legacy edit' }] } }); });
+    expect(meetingData.isSummaryDirty).toBe(true);
+    await act(async () => { await summaryState.handleRegenerateSummary(); });
+    expect(confirmReplacement).toHaveBeenCalledTimes(1);
+    expect(invoke.mock.calls.some(([command]) => command === 'api_process_transcript')).toBe(false);
+    expect(text()).toContain('Unsaved legacy edit');
+    await act(async () => { await meetingData.saveAllChanges(); });
+    expect(meetingData.isSummaryDirty).toBe(false);
+  });
+
+
+  for (const status of ['cancelled', 'failed', 'completed'] as const) {
+    test(`loading saved legacy notes after ${status} clears dirty state and avoids a false replacement prompt`, async () => {
+      savedSummary = { ...savedSummary, status: 'completed', data: legacySummary('Saved legacy notes') };
+      await show();
+      await act(async () => { meetingData.handleSummaryChange(legacySummary('Unsaved legacy edit')); });
+      confirmReplacement.mockResolvedValue(true);
+      await act(async () => { await summaryState.handleRegenerateSummary(); });
+      savedSummary = { ...savedSummary, status, start: 'attempt-b', error: status === 'failed' ? 'Model unavailable' : null };
+      await tick();
+      expect(text()).toContain('Saved legacy notes');
+      expect(text()).not.toContain('Unsaved legacy edit');
+      expect(meetingData.isSummaryDirty).toBe(false);
+      confirmReplacement.mockClear();
+      confirmReplacement.mockResolvedValue(false);
+      await act(async () => { await summaryState.handleRegenerateSummary(); });
+      expect(confirmReplacement).toHaveBeenCalledTimes(0);
+      expect(invoke.mock.calls.filter(([command]) => command === 'api_process_transcript')).toHaveLength(2);
+    });
+  }
+
+  test('stopping without loading saved notes keeps visible legacy edits dirty', async () => {
+    savedSummary = { ...savedSummary, status: 'completed', data: legacySummary('Saved legacy notes') };
+    await show();
+    await act(async () => { meetingData.handleSummaryChange(legacySummary('Unsaved legacy edit')); });
+    confirmReplacement.mockResolvedValue(true);
+    await act(async () => { await summaryState.handleRegenerateSummary(); });
+    await act(async () => { await summaryState.handleStopGeneration(); });
+    expect(text()).toContain('Unsaved legacy edit');
+    expect(meetingData.isSummaryDirty).toBe(true);
+    confirmReplacement.mockClear();
+    confirmReplacement.mockResolvedValue(false);
+    await act(async () => { await summaryState.handleRegenerateSummary(); });
+    expect(confirmReplacement).toHaveBeenCalledTimes(1);
+    expect(invoke.mock.calls.filter(([command]) => command === 'api_process_transcript')).toHaveLength(1);
+  });
+
 });

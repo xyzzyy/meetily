@@ -159,10 +159,11 @@ export const BlockNoteSummaryView = forwardRef<BlockNoteSummaryViewRef, BlockNot
 
   // Notify parent of dirty state changes
   useEffect(() => {
-    if (onDirtyChange) {
+    // Legacy edits belong to the parent state, not this editor's dirty flag.
+    if (format !== 'legacy' && onDirtyChange) {
       onDirtyChange(isDirty);
     }
-  }, [isDirty, onDirtyChange]);
+  }, [format, isDirty, onDirtyChange]);
 
   const handleSave = useCallback(async () => {
     if (!onSave || !isDirty) return;
