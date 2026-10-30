@@ -114,6 +114,7 @@ pub struct RecordingState {
     // Audio devices
     microphone_device: Mutex<Option<Arc<AudioDevice>>>,
     system_device: Mutex<Option<Arc<AudioDevice>>>,
+    stopped_device_names: Mutex<(Option<String>, Option<String>)>,
 
     // Audio pipeline
     audio_sender: Mutex<Option<mpsc::UnboundedSender<AudioChunk>>>,
@@ -132,6 +133,7 @@ pub struct RecordingState {
 
     // Recording start time for accurate timestamps
     recording_start: Mutex<Option<Instant>>,
+    recording_end: Mutex<Option<Instant>>,
     // Pause time tracking
     pause_start: Mutex<Option<Instant>>,
     total_pause_duration: Mutex<std::time::Duration>,
@@ -144,6 +146,7 @@ impl RecordingState {
             is_paused: AtomicBool::new(false),
             microphone_device: Mutex::new(None),
             system_device: Mutex::new(None),
+            stopped_device_names: Mutex::new((None, None)),
             audio_sender: Mutex::new(None),
             buffer_pool: AudioBufferPool::new(16, 48000), // Pool of 16 buffers with 48kHz samples capacity
             error_count: AtomicU32::new(0),
@@ -152,6 +155,7 @@ impl RecordingState {
             error_callback: Mutex::new(None),
             stats: Mutex::new(RecordingStats::default()),
             recording_start: Mutex::new(None),
+            recording_end: Mutex::new(None),
             pause_start: Mutex::new(None),
             total_pause_duration: Mutex::new(std::time::Duration::ZERO),
         })
@@ -159,8 +163,14 @@ impl RecordingState {
 
     // Recording control
     pub fn start_recording(&self) -> Result<()> {
+        let mut start = self.recording_start.lock().unwrap();
+        *self.recording_end.lock().unwrap() = None;
+        *self.stopped_device_names.lock().unwrap() = (None, None);
+        *self.pause_start.lock().unwrap() = None;
+        *self.total_pause_duration.lock().unwrap() = std::time::Duration::ZERO;
+        *start = Some(Instant::now());
+        self.is_paused.store(false, Ordering::SeqCst);
         self.is_recording.store(true, Ordering::SeqCst);
-        *self.recording_start.lock().unwrap() = Some(Instant::now());
         self.error_count.store(0, Ordering::SeqCst);
         self.recoverable_error_count.store(0, Ordering::SeqCst);
         *self.last_error.lock().unwrap() = None;
@@ -168,10 +178,21 @@ impl RecordingState {
     }
 
     pub fn stop_recording(&self) {
-        self.is_recording.store(false, Ordering::SeqCst);
+        // Use the start lock to serialize timing changes with start and pause.
+        let _start = self.recording_start.lock().unwrap();
+        if self.is_recording.swap(false, Ordering::SeqCst) {
+            let end = Instant::now();
+            *self.recording_end.lock().unwrap() = Some(end);
+            // Retain text for analytics while releasing device references below.
+            *self.stopped_device_names.lock().unwrap() = (
+                self.get_microphone_device().map(|device| device.name.clone()),
+                self.get_system_device().map(|device| device.name.clone()),
+            );
+            if let Some(pause_start) = self.pause_start.lock().unwrap().take() {
+                *self.total_pause_duration.lock().unwrap() += end.saturating_duration_since(pause_start);
+            }
+        }
         self.is_paused.store(false, Ordering::SeqCst);
-        // Clear pause tracking when stopping
-        *self.pause_start.lock().unwrap() = None;
         // The audio sender stays open so captures can drain their final audio.
         // AudioPipelineManager::stop() closes it after the streams stop.
         // CRITICAL: Clear device references to release microphone/speaker
@@ -182,6 +203,7 @@ impl RecordingState {
     }
 
     pub fn pause_recording(&self) -> Result<()> {
+        let _start = self.recording_start.lock().unwrap();
         if !self.is_recording() {
             return Err(anyhow::anyhow!("Cannot pause when not recording"));
         }
@@ -196,6 +218,7 @@ impl RecordingState {
     }
 
     pub fn resume_recording(&self) -> Result<()> {
+        let _start = self.recording_start.lock().unwrap();
         if !self.is_recording() {
             return Err(anyhow::anyhow!("Cannot resume when not recording"));
         }
@@ -244,6 +267,20 @@ impl RecordingState {
 
     pub fn get_system_device(&self) -> Option<Arc<AudioDevice>> {
         self.system_device.lock().unwrap().clone()
+    }
+
+    /// Device names remain available after an error stops capture.
+    pub fn get_device_names(&self) -> (Option<String>, Option<String>) {
+        // Wait for any concurrent stop to finish storing its snapshot.
+        let _start = self.recording_start.lock().unwrap();
+        if self.is_recording() {
+            (
+                self.get_microphone_device().map(|device| device.name.clone()),
+                self.get_system_device().map(|device| device.name.clone()),
+            )
+        } else {
+            self.stopped_device_names.lock().unwrap().clone()
+        }
     }
 
     // Audio pipeline management
@@ -359,12 +396,12 @@ impl RecordingState {
         self.recording_start
             .lock()
             .unwrap()
-            .map(|start| start.elapsed().as_secs_f64())
+            .map(|start| self.recording_end.lock().unwrap()
+                .unwrap_or_else(Instant::now).saturating_duration_since(start).as_secs_f64())
     }
 
     pub fn get_active_recording_duration(&self) -> Option<f64> {
-        self.recording_start.lock().unwrap().map(|start| {
-            let total_duration = start.elapsed().as_secs_f64();
+        self.get_recording_duration().map(|total_duration| {
             let pause_duration = self.get_total_pause_duration();
             let current_pause = if self.is_paused() {
                 self.pause_start
@@ -375,7 +412,7 @@ impl RecordingState {
             } else {
                 0.0
             };
-            total_duration - pause_duration - current_pause
+            (total_duration - pause_duration - current_pause).max(0.0)
         })
     }
 
@@ -409,6 +446,8 @@ impl RecordingState {
         *self.error_callback.lock().unwrap() = None;
         *self.stats.lock().unwrap() = RecordingStats::default();
         *self.recording_start.lock().unwrap() = None;
+        *self.recording_end.lock().unwrap() = None;
+        *self.stopped_device_names.lock().unwrap() = (None, None);
         *self.pause_start.lock().unwrap() = None;
         *self.total_pause_duration.lock().unwrap() = std::time::Duration::ZERO;
         self.error_count.store(0, Ordering::SeqCst);
@@ -426,6 +465,7 @@ impl Default for RecordingState {
             is_paused: AtomicBool::new(false),
             microphone_device: Mutex::new(None),
             system_device: Mutex::new(None),
+            stopped_device_names: Mutex::new((None, None)),
             audio_sender: Mutex::new(None),
             buffer_pool: AudioBufferPool::new(16, 48000), // Pool of 16 buffers with 48kHz samples capacity
             error_count: AtomicU32::new(0),
@@ -434,6 +474,7 @@ impl Default for RecordingState {
             error_callback: Mutex::new(None),
             stats: Mutex::new(RecordingStats::default()),
             recording_start: Mutex::new(None),
+            recording_end: Mutex::new(None),
             pause_start: Mutex::new(None),
             total_pause_duration: Mutex::new(std::time::Duration::ZERO),
         }
@@ -448,5 +489,60 @@ impl Clone for RecordingStats {
             total_duration: self.total_duration,
             last_activity: self.last_activity,
         }
+    }
+}
+
+#[cfg(test)]
+mod timing_tests {
+    use super::*;
+
+    #[test]
+    fn stopped_device_names_follow_device_changes_and_reset_with_the_session() {
+        use super::super::devices::DeviceType;
+        let state = RecordingState::new();
+        state.start_recording().unwrap();
+        state.set_microphone_device(Arc::new(AudioDevice::new("Original microphone".into(), DeviceType::Input)));
+        state.set_microphone_device(Arc::new(AudioDevice::new("Replacement microphone".into(), DeviceType::Input)));
+        state.set_system_device(Arc::new(AudioDevice::new("Speakers".into(), DeviceType::Output)));
+        let names = (Some("Replacement microphone".into()), Some("Speakers".into()));
+        assert_eq!(state.get_device_names(), names);
+        state.stop_recording();
+        state.stop_recording();
+        assert_eq!(state.get_device_names(), names);
+        state.start_recording().unwrap();
+        assert_eq!(state.get_device_names(), (None, None));
+        state.set_microphone_device(Arc::new(AudioDevice::new("New microphone".into(), DeviceType::Input)));
+        state.stop_recording();
+        state.cleanup();
+        assert_eq!(state.get_device_names(), (None, None));
+    }
+
+    #[test]
+    fn stopped_timing_does_not_grow_during_teardown_or_a_repeated_stop() {
+        let state = RecordingState::new();
+        state.start_recording().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        state.stop_recording();
+        let duration = state.get_recording_duration().unwrap();
+        let active = state.get_active_recording_duration();
+        assert!(duration >= 0.02);
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        state.stop_recording();
+        assert_eq!(state.get_recording_duration(), Some(duration));
+        assert_eq!(state.get_active_recording_duration(), active);
+    }
+
+    #[test]
+    fn a_new_recording_resets_stopped_timing_and_pause_totals() {
+        let state = RecordingState::new();
+        state.start_recording().unwrap();
+        state.pause_recording().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        state.stop_recording();
+        assert!(state.get_total_pause_duration() >= 0.02);
+        state.start_recording().unwrap();
+        assert_eq!(state.get_total_pause_duration(), 0.0);
+        assert!(!state.is_paused());
+        assert!(state.get_recording_duration().unwrap() < 0.02);
     }
 }
