@@ -454,15 +454,18 @@ fn uncovered_ms(start_ms: f64, end_ms: f64, spans: impl IntoIterator<Item = (f64
     free + (end_ms - cursor).max(0.0)
 }
 
-/// Some track reaches the level below which pickup counts as faint.
+/// Some track reaches the level below which pickup counts as faint. A track
+/// with no detected speech has no level to compare against, so it never
+/// counts as audible.
 fn audible(piece: &super::vad::SpeechSegment, tracks: &[(&[f32], f64)]) -> bool {
     let from = (piece.start_timestamp_ms * 16.0).round() as usize;
     let to = (piece.end_timestamp_ms * 16.0).round() as usize;
     tracks.iter().any(|(samples, typical)| {
-        samples
-            .get(from..to.min(samples.len()))
-            .filter(|window| !window.is_empty())
-            .is_some_and(|window| rms(window) >= typical * FAINT_LEVEL)
+        *typical > 0.0
+            && samples
+                .get(from..to.min(samples.len()))
+                .filter(|window| !window.is_empty())
+                .is_some_and(|window| rms(window) >= typical * FAINT_LEVEL)
     })
 }
 
@@ -1498,6 +1501,10 @@ mod tests {
         );
         assert!(audible(&piece, &[(&quiet, 0.07), (&speech, 0.07)]));
         assert!(!audible(&piece, &[(&[], 0.07)]));
+        assert!(
+            !audible(&piece, &[(&quiet, 0.0)]),
+            "a track with no detected speech cannot make a pause audible"
+        );
     }
 
     #[test]
