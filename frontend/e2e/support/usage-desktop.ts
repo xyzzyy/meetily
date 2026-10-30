@@ -23,9 +23,7 @@ export async function installUsageDesktop(page: Page) {
         if (listener.event === event) callbacks.get(listener.handler)?.({ event, id, payload });
       }
     };
-    const store = new Map<string, unknown>([
-      ['analyticsOptedIn', false], ['analyticsDefaultOffMigrationV1', true],
-    ]);
+    const store = new Map<string, unknown>();
     const metadata = () => {
       if (!state.meeting) throw new Error(`Meeting not found: ${meetingId}`);
       return {

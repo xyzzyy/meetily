@@ -33,7 +33,7 @@ async function loadHook({
     toasts.push(args);
     activeToasts.set(args[1]?.id ?? Symbol('toast'), args);
   };
-  const calls = { save: 0, clear: 0, markSaved: 0, flush: 0, poll: 0, transcriptionSuccess: 0, meetingsCompleted: 0, markedIds: [], savedMeetings: [], recoveryReads: [], refreshes: 0, navigation: [], recording: [], disabled: [], active: [] };
+  const calls = { save: 0, clear: 0, markSaved: 0, flush: 0, poll: 0, markedIds: [], savedMeetings: [], recoveryReads: [], refreshes: 0, navigation: [], recording: [], disabled: [], active: [] };
   const storage = new Map([['indexeddb_current_meeting_id', 'old-recording']]);
   const recordingStatus = Object.fromEntries([
     'IDLE', 'STOPPING', 'PROCESSING_TRANSCRIPTS', 'SAVING', 'ERROR', 'COMPLETED', 'RECORDING',
@@ -93,11 +93,6 @@ async function loadHook({
       applyPinnedSummaryLanguageToMeeting: async () => true,
     };
     if (name === '@tauri-apps/api/core') return { invoke: async () => ({ enabled: false }) };
-    if (name === '@/lib/analytics') return { default: {
-      trackTranscriptionSuccess: () => calls.transcriptionSuccess++,
-      trackPageView() {}, getMeetingsCountToday: async () => 1,
-      trackMeetingCompleted: async () => { calls.meetingsCompleted++; }, updateMeetingCount: async () => {},
-    } };
     if (name === '@/services/transcriptService') return { transcriptService: {
       getTranscriptionStatus: async () => {
         calls.poll++;
@@ -247,7 +242,6 @@ test('a final transcript warning permits meeting save and replaces the success t
   await state.hook.handleRecordingStop(true);
   assert.equal(state.calls.save, 1);
   assert.equal(state.calls.markSaved, 1);
-  assert.equal(state.calls.transcriptionSuccess, 0);
   assert.equal(state.calls.clear, 1);
   assert.equal(state.toasts.at(-1)[0], 'Meeting saved. Transcript may be incomplete');
   assert.equal(state.toasts.at(-1)[1].description, transcriptWarning);
@@ -265,7 +259,6 @@ test('a late transcript warning replaces success without preventing meeting save
   finishPoll({ is_processing: false, chunks_in_queue: 0 });
   await stopping;
   assert.equal(state.calls.save, 1);
-  assert.equal(state.calls.transcriptionSuccess, 0);
   assert.equal(state.toasts.at(-1)[1].description, transcriptWarning);
 });
 
@@ -291,7 +284,6 @@ test('a new recording clears the transcript warning before a successful stop', a
   assert.equal(state.activeToasts.has('recording-transcript-incomplete'), false);
   await state.hook.handleRecordingStop(true);
   assert.equal(state.calls.save, 1);
-  assert.equal(state.calls.transcriptionSuccess, 1);
   assert.equal(state.activeToasts.size, 1);
   assert.equal(state.toasts.at(-1)[0], 'Recording saved successfully!');
 });
@@ -325,7 +317,6 @@ for (const pendingStep of ['transcription wait', 'recovery read', 'meeting save'
     assert.equal(state.calls.save, 1);
     assert.equal(state.calls.markSaved, 1);
     assert.deepEqual(state.calls.markedIds, ['old-recording']);
-    assert.equal(state.calls.transcriptionSuccess, 0);
     assert.equal(state.calls.clear, 0);
     assert.equal(state.calls.navigation.length, 0);
     assert.equal(state.activeToasts.has('recording-transcript-incomplete'), false);
@@ -349,7 +340,6 @@ test('a late save error cannot become success when a new recording starts', asyn
   finishPoll({ is_processing: false, chunks_in_queue: 0 });
   await stopping;
   assert.equal(state.calls.save, 0);
-  assert.equal(state.calls.transcriptionSuccess, 0);
   assert.equal(state.calls.markSaved, 0);
   assert.equal(state.statuses.at(-1).status, 'RECORDING');
 });
@@ -399,7 +389,6 @@ test('an older stop cannot block or release the newer stop guard', async t => {
   assert.equal(state.calls.save, 2);
   finishSaves[1]({ meeting_id: 'second-meeting' });
   await second;
-  assert.equal(state.calls.transcriptionSuccess, 1);
   assert.equal(state.activeToasts.has('recording-transcript-incomplete'), false);
 });
 
@@ -445,8 +434,6 @@ for (const pendingStep of ['transcription wait', 'meeting save']) {
     assert.equal(state.toasts.length, 0);
     assert.equal(state.statuses.at(-1).status, 'IDLE');
     assert.equal(state.calls.active.at(-1), false);
-    assert.equal(state.calls.meetingsCompleted, 1);
-    assert.equal(state.calls.transcriptionSuccess, 1);
     assert.equal(state.listeners.size, 0);
   });
 }

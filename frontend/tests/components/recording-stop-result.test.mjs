@@ -17,7 +17,7 @@ function loadStopAction(result) {
   }
   visit(file);
   assert.ok(initializer);
-  const calls = { stopped: [], success: 0, processing: [], stopping: [], paths: [], requestsFinished: 0 };
+  const calls = { stopped: [], processing: [], stopping: [], paths: [], requestsFinished: 0 };
   const compiled = ts.transpileModule(`const stop = ${initializer}; stop;`, {
     compilerOptions: { module: ts.ModuleKind.CommonJS },
   }).outputText;
@@ -30,36 +30,32 @@ function loadStopAction(result) {
     setRecordingPath: value => calls.paths.push(value),
     onRecordingStop: value => calls.stopped.push(value),
     onStopRequestFinished: () => calls.requestsFinished++,
-    Analytics: { trackTranscriptionSuccess: () => calls.success++ },
     console: { log() {}, error() {} },
   });
   return { action, calls };
 }
 
-test('a duplicate stop does not start post-processing or report success', async () => {
+test('a duplicate stop does not start post-processing', async () => {
   const { action, calls } = loadStopAction(false);
   await action();
   assert.deepEqual(calls.stopped, []);
-  assert.equal(calls.success, 0);
   assert.deepEqual(calls.paths, []);
   assert.equal(calls.processing.at(-1), false);
   assert.equal(calls.stopping.at(-1), false);
   assert.equal(calls.requestsFinished, 1);
 });
 
-test('the owning stop starts post-processing without claiming transcription success', async () => {
+test('the owning stop starts post-processing', async () => {
   const { action, calls } = loadStopAction(true);
   await action();
   assert.deepEqual(calls.stopped, [true]);
-  assert.equal(calls.success, 0);
   assert.equal(calls.requestsFinished, 1);
 });
 
-test('a failed stop cannot report success', async () => {
+test('a failed stop reports a failed post-processing result', async () => {
   const { action, calls } = loadStopAction(new Error('Write failed'));
   await action();
   assert.deepEqual(calls.stopped, [false]);
-  assert.equal(calls.success, 0);
   assert.equal(calls.requestsFinished, 1);
 });
 
@@ -85,7 +81,7 @@ async function loadRecordingListeners() {
   visit(file);
   assert.ok(effect);
   const listeners = new Map();
-  const calls = { stopped: [], errors: [] };
+  const calls = { stopped: [] };
   const compiled = ts.transpileModule(effect, {
     compilerOptions: { module: ts.ModuleKind.CommonJS },
   }).outputText;
@@ -99,7 +95,6 @@ async function loadRecordingListeners() {
     setTranscriptionErrors() {}, setIsProcessing() {}, setSpeechDetected() {},
     onRecordingStop: value => calls.stopped.push(value),
     onTranscriptionError() {},
-    Analytics: { trackTranscriptionError: message => calls.errors.push(message) },
     console: { log() {}, error() {} },
   });
   await new Promise(setImmediate);
@@ -114,7 +109,6 @@ test('a fatal worker error waits for native stop completion before post-processi
     userMessage: 'Speech recognition failed. Recording is stopping.',
   } });
   assert.deepEqual(calls.stopped, []);
-  assert.deepEqual(calls.errors, ['Speech recognition failed. Recording is stopping.']);
 });
 
 test('a nonfatal chunk error does not end the recording in the interface', async t => {
@@ -124,5 +118,4 @@ test('a nonfatal chunk error does not end the recording in the interface', async
     phase: 'active', actionable: false, error: 'One chunk failed', userMessage: 'One chunk failed',
   } });
   assert.deepEqual(calls.stopped, []);
-  assert.deepEqual(calls.errors, ['One chunk failed']);
 });

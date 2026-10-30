@@ -19,10 +19,7 @@ async function openMeeting(page: Page, {
     await page.addInitScript(({ format, transcriptText, summaryText, segmentCount, longRowIndex }) => {
       let callbackId = 0;
       const callbacks = new Map<number, unknown>();
-      const store = new Map<string, unknown>([
-        ['analyticsOptedIn', false],
-        ['analyticsDefaultOffMigrationV1', true],
-      ]);
+      const store = new Map<string, unknown>();
       Object.assign(window, {
         __TAURI_OS_PLUGIN_INTERNALS__: {
           platform: 'macos', version: '15.0', family: 'unix', os_type: 'macos',
