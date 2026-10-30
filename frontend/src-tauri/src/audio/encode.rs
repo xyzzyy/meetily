@@ -1,6 +1,6 @@
+use anyhow::Context;
 use super::ffmpeg::find_ffmpeg_path; // Correct path to encode module
 use super::AudioDevice;
-use anyhow::Context;
 use std::io::Write;
 use std::sync::Arc;
 use std::{
@@ -24,10 +24,7 @@ pub fn encode_single_audio(
     channels: u16,
     output_path: &PathBuf,
 ) -> anyhow::Result<()> {
-    debug!(
-        "Starting FFmpeg process for {} bytes of audio data",
-        data.len()
-    );
+    debug!("Starting FFmpeg process for {} bytes of audio data", data.len());
 
     if data.is_empty() {
         return Err(anyhow::anyhow!("No audio data provided for encoding"));
@@ -42,9 +39,9 @@ pub fn encode_single_audio(
     let mut command = Command::new(ffmpeg_path);
     command
         .args([
-            // Keep checkpoint logs small while retaining encoder warnings.
+            // Keep checkpoint logs small; output is drained while audio is written.
             "-loglevel",
-            "warning",
+            "error",
             "-nostats",
             "-f",
             "f32le",
