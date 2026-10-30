@@ -140,8 +140,7 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
     openai: null,
     openrouter: null,
   });
-  const providerApiKeyVersionsRef = useRef<Record<string, number>>({});
-  const providerApiKeyLastUpdateRef = useRef<Record<string, string | null>>({});
+  const providerApiKeyChangesRef = useRef<Record<string, { version: number; value: string | null }>>({});
 
   // Ollama models list and error state
   const [models, setModels] = useState<OllamaModel[]>([]);
@@ -323,7 +322,7 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
     const loadAllApiKeys = async () => {
       try {
         const providers = ['claude', 'groq', 'openai', 'openrouter'] as const;
-        const versions = { ...providerApiKeyVersionsRef.current };
+        const changes = { ...providerApiKeyChangesRef.current };
         const keys = await Promise.all(
           providers.map(p =>
             invoke<string>('api_get_api_key', { provider: p })
@@ -335,7 +334,7 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
           const next = { ...previous };
           providers.forEach((provider, index) => {
             // Do not restore a key changed while this startup request was pending.
-            if ((versions[provider] ?? 0) === (providerApiKeyVersionsRef.current[provider] ?? 0)) {
+            if (changes[provider] === providerApiKeyChangesRef.current[provider]) {
               next[provider] = keys[index] || null;
             }
           });
@@ -472,15 +471,14 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
 
   // Update individual provider API key
   const updateProviderApiKey = useCallback((provider: string, apiKey: string | null) => {
-    providerApiKeyVersionsRef.current[provider] = (providerApiKeyVersionsRef.current[provider] ?? 0) + 1;
-    providerApiKeyLastUpdateRef.current[provider] = apiKey;
+    providerApiKeyChangesRef.current[provider] = {
+      version: (providerApiKeyChangesRef.current[provider]?.version ?? 0) + 1, value: apiKey,
+    };
     setProviderApiKeys(prev => ({ ...prev, [provider]: apiKey }));
   }, []);
 
-  const getProviderApiKeyChange = useCallback((provider: string) => ({
-    version: providerApiKeyVersionsRef.current[provider] ?? 0,
-    value: providerApiKeyLastUpdateRef.current[provider] ?? null,
-  }), []);
+  const getProviderApiKeyChange = useCallback((provider: string) =>
+    providerApiKeyChangesRef.current[provider] ?? { version: 0, value: null }, []);
 
   // Settings can be open in more than one place. Do not let a save started
   // in one view restore a key removed from another view.
