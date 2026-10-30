@@ -21,7 +21,7 @@ env:
 jobs:
   frontend:
     name: Frontend build and tests
-    runs-on: ubuntu-24.04
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
@@ -96,7 +96,7 @@ jobs:
   macos:
     name: macOS release build and tests
     needs: frontend
-    runs-on: macos-latest
+    runs-on: blacksmith-6vcpu-macos-15
     timeout-minutes: 60
     env:
       MACOSX_DEPLOYMENT_TARGET: '14.4'

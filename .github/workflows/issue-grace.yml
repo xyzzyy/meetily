@@ -25,7 +25,7 @@ jobs:
       github.event.issue.state == 'closed' &&
       !github.event.issue.pull_request &&
       contains(github.event.comment.body, '/reopen')
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 5
     concurrency:
       group: issue-template-${{ github.event.issue.number }}
@@ -54,7 +54,7 @@ jobs:
 
   sweep:
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 10
     concurrency:
       group: issue-template-nightly
