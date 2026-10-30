@@ -61,6 +61,7 @@ function DownloadToastContent({
   const hasError = download.status === 'error';
   const isCancelled = download.status === 'cancelled';
   const unitLabel = download.unitLabel ?? 'MiB';
+  const percent = Number.isFinite(download.progress) ? Math.min(100, Math.max(0, download.progress)) : 0;
 
   return (
     <div className="flex items-center gap-3 w-full max-w-sm bg-white dark:bg-ink-900 rounded-lg shadow-lg border border-gray-200 dark:border-ink-800 p-3 relative">
@@ -100,10 +101,12 @@ function DownloadToastContent({
         ) : (
           <>
             {/* Progress bar */}
-            <div className="w-full h-1.5 bg-gray-200 dark:bg-ink-800 rounded-full overflow-hidden mb-1.5">
+            <div role="progressbar" aria-label={`${download.displayName} download`}
+              aria-valuemin={0} aria-valuemax={100} aria-valuenow={percent}
+              className="w-full h-1.5 bg-gray-200 dark:bg-ink-800 rounded-full overflow-hidden mb-1.5">
               <div
                 className="h-full bg-primary rounded-full transition-all duration-300"
-                style={{ width: `${download.progress}%` }}
+                style={{ width: `${percent}%` }}
               />
             </div>
 
@@ -117,7 +120,7 @@ function DownloadToastContent({
                   <span>{download.speedMbps.toFixed(1)} {unitLabel}/s</span>
                 )}
                 <span className="text-gray-900 dark:text-ink-100 font-medium">
-                  {Math.round(download.progress)}%
+                  {Math.round(percent)}%
                 </span>
               </span>
             </div>
@@ -135,6 +138,9 @@ export function useDownloadProgressToast() {
   const dismissed = useRef(new Set<string>());
   const cleanupTimers = useRef(new Map<string, ReturnType<typeof setTimeout>>());
   const generations = useRef(new Map<string, number>());
+  const generationCounter = useRef(0);
+  const shown = useRef(new Map<string, DownloadProgress>());
+  const hasActiveDownloads = [...downloads.values()].some(download => download.status === 'downloading');
 
   const updateDownload = useCallback((provider: DownloadProvider, event: DownloadEvent, fallback: DownloadStatus) => {
     const modelName = event.modelName ?? event.model ?? provider.fixedModel;
@@ -146,7 +152,7 @@ export function useDownloadProgressToast() {
     // Ignore late progress after a terminal event. A new attempt starts at zero.
     if (old && old.status !== 'downloading' && status === 'downloading' && !restart) return;
     if (restart || !old) {
-      generations.current.set(key, (generations.current.get(key) ?? 0) + 1);
+      generations.current.set(key, ++generationCounter.current);
       dismissed.current.delete(key);
     }
     const existing = restart ? undefined : old;
@@ -182,6 +188,8 @@ export function useDownloadProgressToast() {
         setDownloads(next);
         dismissed.current.delete(key);
         cleanupTimers.current.delete(key);
+        shown.current.delete(key);
+        generations.current.delete(key);
       }, delay));
     }
   }, []);
@@ -191,9 +199,29 @@ export function useDownloadProgressToast() {
     const subscriptions: Promise<() => void>[] = [];
     for (const provider of downloadProviders) {
       const subscribe = (name: string | undefined, status: DownloadStatus) => {
-        if (name) subscriptions.push(listen<DownloadEvent>(name, event => {
+        if (!name) return;
+        const subscription = listen<DownloadEvent>(name, async event => {
+          if (disposed) return;
+          const modelName = event.payload.modelName ?? event.payload.model ?? provider.fixedModel;
+          const key = `${provider.id}:${modelName}`;
+          const active = current.current.get(key);
+          const attempt = generations.current.get(key);
+          // A rejected duplicate request does not terminate the worker that owns the files.
+          if (active?.status === 'downloading' && eventStatus(event.payload, status) === 'error') {
+            try {
+              const states = await checkDownloads(provider, [active]);
+              if (disposed || generations.current.get(key) !== attempt || current.current.get(key)?.status !== 'downloading') return;
+              if (states.get(active.modelName) === 'downloading') return;
+            } catch (error) {
+              console.warn(`Could not verify ${provider.id} download error`, error);
+            }
+          }
           if (!disposed) updateDownload(provider, event.payload, status);
-        }));
+        }).catch(error => {
+          console.warn(`Could not listen for ${name}`, error);
+          return () => {};
+        });
+        subscriptions.push(subscription);
       };
       subscribe(provider.progress, 'downloading');
       subscribe(provider.complete, 'completed');
@@ -201,6 +229,19 @@ export function useDownloadProgressToast() {
       subscribe(provider.cancelled, 'cancelled');
       subscribe(provider.finished, 'completed');
     }
+    return () => {
+      disposed = true;
+      subscriptions.forEach(subscription => { void subscription.then(unlisten => unlisten()).catch(error => console.warn('Could not remove download listener', error)); });
+      cleanupTimers.current.forEach(clearTimeout);
+      cleanupTimers.current.clear();
+      current.current.forEach((_, key) => toast.dismiss(`download-${key}`));
+      shown.current.clear();
+    };
+  }, [updateDownload]);
+
+  useEffect(() => {
+    if (!hasActiveDownloads) return;
+    let disposed = false;
     // Keep the timer stable while progress events arrive. Query providers independently.
     const checking = new Set<string>();
     const timer = setInterval(async () => {
@@ -228,16 +269,13 @@ export function useDownloadProgressToast() {
     return () => {
       disposed = true;
       clearInterval(timer);
-      subscriptions.forEach(subscription => { void subscription.then(unlisten => unlisten()).catch(console.error); });
-      cleanupTimers.current.forEach(clearTimeout);
-      cleanupTimers.current.clear();
-      current.current.forEach((_, key) => toast.dismiss(`download-${key}`));
     };
-  }, [updateDownload]);
+  }, [hasActiveDownloads, updateDownload]);
 
   useEffect(() => {
     downloads.forEach((download, key) => {
-      if (dismissed.current.has(key)) return;
+      if (dismissed.current.has(key) || shown.current.get(key) === download) return;
+      shown.current.set(key, download);
       const id = `download-${key}`;
       toast.custom(() => <DownloadToastContent download={download} onDismiss={() => {
         dismissed.current.add(key);

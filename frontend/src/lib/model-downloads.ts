@@ -70,6 +70,8 @@ export async function checkDownloads(provider: DownloadProvider, models: { model
       const status = available.find(item => item.name === model.modelName)?.status;
       if (status === 'Available' || (typeof status === 'object' && status?.type === 'available')) {
         result.set(model.modelName, 'completed');
+      } else if (typeof status === 'object' && status && ('Downloading' in status || status.type === 'downloading')) {
+        result.set(model.modelName, 'downloading');
       } else if (status === 'Missing' || (typeof status === 'object' && status &&
         ('Error' in status || 'Corrupted' in status || ['not_downloaded', 'corrupted', 'error'].includes(status.type ?? '')))) {
         result.set(model.modelName, 'error');

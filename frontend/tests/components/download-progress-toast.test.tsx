@@ -28,7 +28,9 @@ const current = () => custom.mock.calls.at(-1)![0]('toast');
 const send = async (event: string, payload: any) => { await act(async () => handlers.get(event)!({ payload })); };
 
 beforeEach(async () => {
-  responses = {}; cleanups = new Map();
+  responses = Object.fromEntries(downloadProviders.map(provider => [provider.list,
+    provider.statusFormat === 'worker' ? 'error' : provider.statusFormat === 'installed' ? { installed: false } : []]));
+  cleanups = new Map();
   handlers.clear(); invoke.mockClear(); custom.mockClear(); dismiss.mockClear();
   intervalSpy = spyOn(globalThis, 'setInterval').mockImplementation(((callback: any) => {
     checkStatus = callback;
@@ -156,4 +158,46 @@ test('worker-confirmed cancellation uses the common cancellation cleanup', async
     expect(current().props.download.status).toBe('cancelled');
     expect(cleanups.has(6000)).toBe(true);
   }
+});
+
+test('one progress event updates only its own notice', async () => {
+  await send('parakeet-model-download-progress', { modelName: 'first', progress: 20 });
+  await send('builtin-ai-download-progress', { model: 'second', progress: 20, status: 'downloading' });
+  custom.mockClear();
+  await send('parakeet-model-download-progress', { modelName: 'first', progress: 21 });
+  expect(custom).toHaveBeenCalledTimes(1);
+  expect(current().props.download.modelName).toBe('first');
+});
+
+test('no polling timer is scheduled when there are no active downloads', () => {
+  expect(intervalSpy).not.toHaveBeenCalled();
+});
+
+test('a duplicate request error cannot replace an active worker notice', async () => {
+  responses.funasr_get_available_models = [{ name: 'model', status: { Downloading: { progress: 40 } } }];
+  await send('funasr-model-download-progress', { modelName: 'model', progress: 40 });
+  await send('funasr-model-download-error', { modelName: 'model', error: 'A download is already in progress' });
+  expect(current().props.download.status).toBe('downloading');
+  responses.funasr_get_available_models = [{ name: 'model', status: 'Available' }];
+  await act(async () => checkStatus());
+  expect(current().props.download.status).toBe('completed');
+});
+
+test('an error verification reply cannot overwrite a completion event', async () => {
+  let resolve!: (value: unknown) => void;
+  responses.funasr_get_available_models = new Promise(done => { resolve = done; });
+  await send('funasr-model-download-progress', { modelName: 'model', progress: 99 });
+  let verification: Promise<void>;
+  await act(async () => { verification = Promise.resolve(handlers.get('funasr-model-download-error')!({ payload: {
+    modelName: 'model', error: 'A download is already in progress',
+  } })); });
+  await send('funasr-model-download-complete', { modelName: 'model' });
+  await act(async () => { resolve([{ name: 'model', status: 'Missing' }]); await verification; });
+  expect(current().props.download.status).toBe('completed');
+});
+
+test('progress updates do not recreate the polling timer', async () => {
+  await send('model-download-progress', { modelName: 'model', progress: 10 });
+  for (let progress = 11; progress < 30; progress++) await send('model-download-progress', { modelName: 'model', progress });
+  expect(intervalSpy).toHaveBeenCalledTimes(1);
 });

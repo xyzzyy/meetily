@@ -156,6 +156,15 @@ pnpm build
 pnpm test:release
 ```
 
+To compare model download notices with the base branch, run:
+
+```bash
+bun scripts/benchmark-download-notices.tsx --base=origin/main --out=/tmp/download-notices.json
+```
+
+The benchmark runs the real React hooks with a test clock and a mocked desktop boundary. It records notice update counts, idle polling, and recovery when a completion event is lost. Its timings exclude browser layout, native IPC, model transfers, and transcription. Add `--prior=<commit>` to compare another revision. The release tests check real notice rendering in Chromium and WebKit, with desktop replies replaced by test data.
+
+
 On Linux, add `--with-deps` to the browser installation command. CI saves screenshots and traces when a release test fails.
 
 ### Backend (Tauri)
