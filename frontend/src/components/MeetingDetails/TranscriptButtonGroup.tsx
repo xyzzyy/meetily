@@ -84,7 +84,7 @@ export function TranscriptButtonGroup({
             <Scissors size={18} /><span className="hidden @[22rem]:inline">Trim</span>
           </Button>
           <RetranscribeDialog open={showTrimDialog} onOpenChange={setShowTrimDialog} meetingId={meetingId}
-            meetingFolderPath={meetingFolderPath} onComplete={handleRetranscribeComplete} trim />
+            meetingFolderPath={meetingFolderPath} trim />
         </>
       )}
 

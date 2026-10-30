@@ -127,15 +127,6 @@ async function openMeeting(page: Page, {
                   }] },
               };
               case 'api_get_meeting_summary_language': return { language: null, storage: 'metadata' };
-              case 'whisper_init':
-              case 'parakeet_init':
-              case 'funasr_init': return null;
-              case 'whisper_get_available_models': return [{ name: 'large-v3', size_mb: 100, status: 'Available' }];
-              case 'parakeet_get_available_models':
-              case 'funasr_get_available_models': return [];
-              case 'start_retranscription_command': return new Promise(resolve => {
-                controls.finish = () => { enhanced = true; resolve({ segments_count: 1, duration_seconds: 8 }); };
-              });
               case 'api_get_transcript_config': return { provider: 'localWhisper', model: 'large-v3', apiKey: null };
               case 'api_get_model_config': return { provider: 'ollama', model: 'test-model', whisperModel: 'large-v3' };
               case 'api_get_api_key':
@@ -154,6 +145,9 @@ async function openMeeting(page: Page, {
               case 'cancel_retranscription_command': trimCancelled = true; return null;
               case 'trim_and_retranscribe_command':
               case 'start_retranscription_command': {
+                if (enhancement) return new Promise(resolve => {
+                  controls.finish = () => { enhanced = true; resolve({ segments_count: 1, duration_seconds: 8 }); };
+                });
                 trimCalls.push({ command, args });
                 trimCancelled = false;
                 if (command === 'trim_and_retranscribe_command') {
@@ -365,6 +359,7 @@ test('an enhancement dialog reopened after navigation is ready for another job w
   await expect(resultNotice).toBeVisible();
   await page.mouse.move(0, 0);
   await expect(resultNotice).toHaveCount(0, { timeout: 10000 });
+});
 
 for (const failure of [false, true]) {
   test(`trims a saved recording and ${failure ? 'can retry text creation' : 'shows the new transcript'}`, async ({ page }) => {
@@ -390,15 +385,14 @@ for (const failure of [false, true]) {
     const calls = await page.evaluate(() => (window as any).__trimTest.calls);
     expect(calls).toHaveLength(1);
     expect(calls[0]).toEqual({ command: 'trim_and_retranscribe_command', args: {
-      meetingId: 'saved-meeting', range: { start_seconds: 10, end_seconds: 50 },
+      meetingId: 'saved-meeting', meetingFolderPath: '/recordings/saved-meeting', range: { start_seconds: 10, end_seconds: 50 },
       language: null, model: 'large-v3', provider: 'whisper', assignSpeakers: false,
     } });
     await page.evaluate(fail => (window as any).__trimTest.finish(fail), failure);
     if (failure) {
-      await expect(dialog).toContainText('The recording was trimmed. New transcription did not finish');
-      await dialog.getByRole('button', { name: 'Try Again', exact: true }).click();
-      await expect(dialog.getByRole('spinbutton')).toHaveCount(0);
-      await dialog.getByRole('button', { name: 'Transcribe trimmed audio', exact: true }).click();
+      await expect(page.getByText('The recording was trimmed. New transcription did not finish', { exact: false })).toBeVisible();
+      await page.getByTitle('Retranscribe to enhance your recorded audio').click();
+      await dialog.getByRole('button', { name: 'Start enhancement', exact: true }).click();
       const retry = await page.evaluate(() => (window as any).__trimTest.calls[1]);
       expect(retry.command).toBe('start_retranscription_command');
       expect(retry.args.range).toBeUndefined();
@@ -417,11 +411,11 @@ test('trim cancellation waits for the native job and keeps the saved trim result
   const dialog = page.getByRole('dialog');
   await dialog.getByRole('spinbutton', { name: 'Start (seconds)', exact: true }).fill('10');
   await dialog.getByRole('button', { name: 'Trim and transcribe', exact: true }).click();
-  await dialog.getByRole('button', { name: 'Cancel', exact: true }).click();
-  await expect(dialog.getByRole('button', { name: 'Stopping...', exact: true })).toBeDisabled();
-  await expect(dialog).toBeVisible();
+  await expect(dialog).toHaveCount(0);
+  await page.getByRole('button', { name: 'Cancel', exact: true }).click();
+  await expect(page.getByText('Cancelling enhancement...', { exact: true })).toBeVisible();
   await page.evaluate(() => (window as any).__trimTest.finish());
-  await expect(dialog).toContainText('The recording was trimmed. New transcription did not finish: Retranscription cancelled');
+  await expect(page.getByText('The recording was trimmed. New transcription did not finish: Retranscription cancelled', { exact: false })).toBeVisible();
   await expect(page.getByText(transcriptText, { exact: true })).toHaveCount(0);
   expect(errors).toEqual([]);
 });

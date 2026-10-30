@@ -62,7 +62,6 @@ export function RetranscribeDialog({
     && endTime > startTime && endTime <= duration && (startTime > 0 || endTime < duration);
 
 
-
   // Use centralized model fetching hook
   const {
     availableModels,
@@ -134,7 +133,6 @@ export function RetranscribeDialog({
     }).catch(error => { if (!cancelled) setError(String(error)); });
     return () => { cancelled = true; };
   }, [open, trim, meetingId, trimInfoRequest, isProcessing]);
-
 
   // Default to the app-wide speaker labels setting, including when it finishes
   // loading after the dialog is already open.
