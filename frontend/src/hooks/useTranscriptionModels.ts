@@ -8,7 +8,7 @@ export interface RawModelInfo {
 }
 
 export interface ModelOption {
-  provider: 'whisper' | 'parakeet' | 'funasr';
+  provider: 'whisper' | 'parakeet' | 'funasr' | 'nemotron';
   name: string;
   displayName: string;
   size_mb: number;
@@ -51,6 +51,7 @@ export function useTranscriptionModels(transcriptModelConfig: TranscriptModelCon
     const providers = [
       { provider: 'whisper' as const, label: 'Whisper', init: 'whisper_init', list: 'whisper_get_available_models' },
       { provider: 'parakeet' as const, label: 'Parakeet', init: 'parakeet_init', list: 'parakeet_get_available_models' },
+      { provider: 'nemotron' as const, label: 'Nemotron', init: 'nemotron_init', list: 'nemotron_get_available_models' },
       { provider: 'funasr' as const, label: 'FUN-ASR', init: 'funasr_init', list: 'funasr_get_available_models' },
     ];
     const results = await Promise.all(providers.map(async ({ provider, label, init, list }) => {

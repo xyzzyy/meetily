@@ -52,6 +52,7 @@ pub mod openai;
 pub mod openrouter;
 pub mod parakeet_engine;
 pub mod funasr_engine;
+pub mod nemotron;
 pub mod state;
 pub mod storage_safety;
 pub mod summary;
@@ -730,6 +731,13 @@ pub fn run() {
             parakeet_engine::commands::parakeet_cancel_download,
             parakeet_engine::commands::parakeet_delete_corrupted_model,
             parakeet_engine::commands::open_parakeet_models_folder,
+            // Nemotron local runtime commands
+            nemotron::nemotron_download_model,
+            nemotron::nemotron_cancel_download,
+            nemotron::nemotron_delete_model,
+            nemotron::nemotron_init,
+            nemotron::nemotron_get_available_models,
+            nemotron::nemotron_has_available_models,
             // FUN-ASR engine commands
             funasr_engine::commands::funasr_init,
             funasr_engine::commands::funasr_get_available_models,

@@ -25,6 +25,7 @@ export const FUNASR_SUPPORTED_LANGUAGES = new Set(['auto', 'en', 'zh', 'ja']);
 
 /** The languages a transcription provider accepts, from a full language list. */
 export function languagesForProvider<T extends { code: string }>(provider: string | undefined, languages: T[]): T[] {
+  if (provider === 'nemotron') return languages.filter(language => language.code === 'auto');
   return provider === 'funasr'
     ? languages.filter((language) => FUNASR_SUPPORTED_LANGUAGES.has(language.code))
     : languages;

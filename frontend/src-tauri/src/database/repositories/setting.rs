@@ -182,7 +182,7 @@ impl SettingsRepository {
             // Local models do not use an API key. FUN-ASR used to fall through
             // to the error arm, which made api_get_transcript_config fail for
             // every saved FUN-ASR configuration.
-            "parakeet" | "funasr" => return Ok(()),
+            "parakeet" | "funasr" | "nemotron" => return Ok(()),
             "deepgram" => "deepgramApiKey",
             "elevenLabs" => "elevenLabsApiKey",
             "groq" => "groqApiKey",
@@ -217,7 +217,7 @@ impl SettingsRepository {
             // Local models do not use an API key. FUN-ASR used to fall through
             // to the error arm, which made api_get_transcript_config fail for
             // every saved FUN-ASR configuration.
-            "parakeet" | "funasr" => return Ok(None),
+            "parakeet" | "funasr" | "nemotron" => return Ok(None),
             "deepgram" => "deepgramApiKey",
             "elevenLabs" => "elevenLabsApiKey",
             "groq" => "groqApiKey",

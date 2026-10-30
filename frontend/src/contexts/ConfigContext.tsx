@@ -546,6 +546,9 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
   // FUN-ASR rejects other languages, and recording would refuse to start, so
   // fall back to auto-detect when it is selected with an unsupported language.
   useEffect(() => {
+    if (transcriptModelConfig.provider === 'nemotron' && selectedLanguage !== 'auto') {
+      handleSetSelectedLanguage('auto');
+    }
     if (
       transcriptModelConfig.provider === 'funasr'
       && !FUNASR_SUPPORTED_LANGUAGES.has(selectedLanguage)

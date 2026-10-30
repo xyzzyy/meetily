@@ -1,4 +1,4 @@
-//! Timing and publication for Enhance. Model input chunks do not define Parakeet rows.
+//! Timing and publication for Enhance. Model input chunks do not define Parakeet or Nemotron rows.
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::{anyhow, Result};
@@ -80,9 +80,19 @@ pub(crate) fn parakeet_rows(
             "The transcription model returned invalid token times. The saved transcript was kept."
         )
     })?;
-    Ok(group_words(words, |start, end| {
+    Ok(word_rows(words, speakers, source))
+}
+
+/// Group timed words on the recording timeline into rows that end at speaker
+/// changes, pauses and sentence ends.
+pub(crate) fn word_rows(
+    words: Vec<(String, f64, f64)>,
+    speakers: Option<&EnhancementSpeakerAnalysis>,
+    source: Option<&str>,
+) -> Vec<(String, f64, f64)> {
+    group_words(words, |start, end| {
         speakers.and_then(|analysis| analysis.speaker_key(start / 1000.0, end / 1000.0, source))
-    }))
+    })
 }
 
 fn group_words(
@@ -1507,6 +1517,7 @@ mod tests {
             (BatchEngine::Whisper, 500),
             (BatchEngine::Parakeet, 500),
             (BatchEngine::FunAsr, 500),
+            (BatchEngine::Nemotron, 500),
         ] {
             let inputs = recognition_inputs(
                 &audio,
@@ -1637,6 +1648,7 @@ mod tests {
             BatchEngine::Whisper,
             BatchEngine::Parakeet,
             BatchEngine::FunAsr,
+            BatchEngine::Nemotron,
         ] {
             let spans = recognition_inputs(
                 &audio,
@@ -1764,6 +1776,7 @@ mod tests {
             BatchEngine::Whisper,
             BatchEngine::Parakeet,
             BatchEngine::FunAsr,
+            BatchEngine::Nemotron,
         ] {
             let policy = engine.enhancement_input_policy();
             let chunks = input_chunks(&audio, policy.max_input_samples);
@@ -1781,10 +1794,10 @@ mod tests {
             for pair in chunks.windows(2) {
                 assert_eq!(pair[0].end_timestamp_ms, pair[1].start_timestamp_ms);
             }
-            if engine == BatchEngine::Parakeet {
+            if matches!(engine, BatchEngine::Parakeet | BatchEngine::Nemotron) {
                 assert!(
                     chunks.iter().any(|chunk| chunk.samples.len() > 30 * 16_000),
-                    "TDT must have room beyond a Whisper-sized window"
+                    "word-timed backends must have room beyond a Whisper-sized window"
                 );
             } else {
                 assert!(

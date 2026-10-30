@@ -20,6 +20,7 @@ pub(crate) enum BatchEngine {
     Whisper,
     Parakeet,
     FunAsr,
+    Nemotron,
 }
 
 /// Input policy belongs to the backend, not to the shared Enhance workflow.
@@ -48,6 +49,12 @@ impl BatchEngine {
                 context_target_ms: 8_000.0,
                 max_input_samples: 60 * 16_000,
             },
+            // Native Nemotron supplies word times and bounds its own requests
+            // to five minutes, with shorter retries if alignment fails.
+            Self::Nemotron => EnhancementInputPolicy {
+                context_target_ms: 8_000.0,
+                max_input_samples: 300 * 16_000,
+            },
             // Respect the actual helper protocol. FUN-ASR returns no word
             // times, so each input becomes one row; longer context made rows
             // coarser without better words on the checked recording.
@@ -63,6 +70,7 @@ impl BatchEngine {
         match provider {
             Some("parakeet") => Self::Parakeet,
             Some("funasr") => Self::FunAsr,
+            Some("nemotron") => Self::Nemotron,
             _ => Self::Whisper,
         }
     }
@@ -90,7 +98,7 @@ pub(crate) async fn unload_engine_after_batch(engine: BatchEngine) {
                 e.unload_model().await;
             }
         }
-        BatchEngine::FunAsr => {
+        BatchEngine::FunAsr | BatchEngine::Nemotron => {
             // Batch helpers belong to the job and stop when its provider drops.
             // Never unload the global recording engine here.
         }

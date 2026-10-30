@@ -484,7 +484,7 @@ pub(crate) async fn prepare_enhancement<R: Runtime>(
             &ids,
         )
         .await?;
-    let (sources, mut quality_flags) = discover_sources(folder)?;
+    let (sources, quality_flags) = discover_sources(folder)?;
     let directory = folder.join(".diarization");
     std::fs::create_dir_all(&directory)?;
     let request = SidecarRequest {
@@ -505,17 +505,91 @@ pub(crate) async fn prepare_enhancement<R: Runtime>(
             response.error.unwrap_or_else(|| "no speech found".into())
         ));
     }
-    let mut windows = rebuild_windows(&response.intervals);
-    stabilize_speaker_ids(&mut windows, &old_speakers);
+    let intervals = response.intervals;
+    analysis_from_intervals(
+        app,
+        &old_speakers,
+        &request.sources,
+        &intervals,
+        quality_flags,
+        cancelled,
+    )
+    .await
+}
+
+/// Speaker analysis from turns the transcription model found in the mixed
+/// recording (speaker key, start and end in seconds). Remembered voices are
+/// still matched against those turns.
+pub(crate) async fn prepare_enhancement_from_turns<R: Runtime>(
+    app: &AppHandle<R>,
+    meeting_id: &str,
+    folder: &Path,
+    turns: &[(String, f64, f64)],
+    cancelled: &AtomicBool,
+) -> Result<EnhancementSpeakerAnalysis> {
+    check_cancelled_flag(cancelled)?;
+    if turns.is_empty() {
+        return Err(anyhow!("Speaker analysis failed: no speech found"));
+    }
+    let state = app.state::<AppState>();
+    let old_rows = load_transcripts(state.db_manager.pool(), meeting_id).await?;
+    let ids = old_rows
+        .iter()
+        .map(|row| row.id.clone())
+        .collect::<Vec<_>>();
+    let old_speakers =
+        crate::database::repositories::diarization::DiarizationRepository::get_transcript_metadata(
+            state.speaker_store.pool(),
+            &ids,
+        )
+        .await?;
+    let sources = vec![SidecarSource {
+        kind: "mixed".to_string(),
+        path: find_meeting_audio(folder)?.to_string_lossy().into_owned(),
+        forced_speaker_id: None,
+    }];
+    let intervals = turns
+        .iter()
+        .map(|(speaker, start, end)| SidecarInterval {
+            speaker_id: speaker.clone(),
+            source: "mixed".to_string(),
+            start: *start,
+            end: *end,
+            confidence: 1.0,
+            is_overlap: false,
+            candidate_speaker_ids: Vec::new(),
+        })
+        .collect::<Vec<_>>();
+    analysis_from_intervals(
+        app,
+        &old_speakers,
+        &sources,
+        &intervals,
+        vec!["mixed_audio".to_string(), "model_speakers".to_string()],
+        cancelled,
+    )
+    .await
+}
+
+async fn analysis_from_intervals<R: Runtime>(
+    app: &AppHandle<R>,
+    old_speakers: &[crate::database::repositories::diarization::TranscriptSpeakerMetadata],
+    sources: &[SidecarSource],
+    intervals: &[SidecarInterval],
+    mut quality_flags: Vec<String>,
+    cancelled: &AtomicBool,
+) -> Result<EnhancementSpeakerAnalysis> {
+    let mut windows = rebuild_windows(intervals);
+    stabilize_speaker_ids(&mut windows, old_speakers);
     if windows.iter().any(|window| window.is_overlap) {
         quality_flags.push("overlap_detected".into());
     }
     check_cancelled_flag(cancelled)?;
-    let audio = load_source_audio(&request.sources).await?;
+    let audio = load_source_audio(sources).await?;
     check_cancelled_flag(cancelled)?;
     let names = recognize_final_profiles(app, &mut windows, &audio).await;
     check_cancelled_flag(cancelled)?;
-    let labels = speaker_labels(&windows, &old_speakers, &names);
+    let labels = speaker_labels(&windows, old_speakers, &names);
     Ok(EnhancementSpeakerAnalysis {
         windows,
         labels,

@@ -75,8 +75,6 @@ export function RetranscribeDialog({
   const { selectedLanguage, transcriptModelConfig, diarizationSettings, isLoadingDiarizationSettings } = useConfig();
   const { supported: refinementSupported, checking: checkingRefinement, unavailableReason } = useSpeakerRefinementAvailability();
   const speakerLabelsEnabled = !isLoadingDiarizationSettings && diarizationSettings.enabled;
-  const canAssignSpeakers = speakerLabelsEnabled && refinementSupported;
-  const [assignSpeakers, setAssignSpeakers] = useState(canAssignSpeakers);
   const [isProcessing, setIsProcessing] = useState(false);
   const [review, setReview] = useState<EnhancementReview | null>(null);
   const [isApplying, setIsApplying] = useState(false);
@@ -118,6 +116,10 @@ export function RetranscribeDialog({
     return availableModels.find(m => m.provider === provider && m.name === name);
   }, [selectedModelKey, availableModels]);
   const isParakeetModel = selectedModelDetails?.provider === 'parakeet';
+  // Nemotron finds speakers itself, so it does not need the speaker refinement model.
+  const modelFindsSpeakers = selectedModelDetails?.provider === 'nemotron';
+  const canAssignSpeakers = speakerLabelsEnabled && (refinementSupported || modelFindsSpeakers);
+  const [assignSpeakers, setAssignSpeakers] = useState(canAssignSpeakers);
   const languageOptions = useMemo(
     () => languagesForProvider(selectedModelDetails?.provider, LANGUAGES),
     [selectedModelDetails?.provider],
@@ -471,7 +473,7 @@ export function RetranscribeDialog({
               <div>
                 <label htmlFor="enhance-assign-speakers" className="text-sm font-medium">Assign speakers</label>
                 <p className="text-xs text-muted-foreground">
-                  {!speakerLabelsEnabled ? 'Enable speaker labels in Settings to use this.' : unavailableReason || 'Identify speakers in the new transcript.'}
+                  {!speakerLabelsEnabled ? 'Enable speaker labels in Settings to use this.' : modelFindsSpeakers ? 'Nemotron identifies speakers while it transcribes.' : unavailableReason || 'Identify speakers in the new transcript.'}
                 </p>
               </div>
               <Switch id="enhance-assign-speakers" checked={canAssignSpeakers && assignSpeakers}

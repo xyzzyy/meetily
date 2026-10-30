@@ -80,7 +80,7 @@ function nodes(node) {
   return [node, ...nodes(node.props?.children)];
 }
 const start = tree => nodes(tree).find(node => node.type === 'Button' && node.props.className === 'bg-blue-600 hover:bg-blue-700');
-for (const provider of ['parakeet', 'whisper', 'funasr']) {
+for (const provider of ['parakeet', 'whisper', 'funasr', 'nemotron']) {
   const instance = dialog(provider);
   assert.equal(start(instance.tree).props.disabled, false);
   await start(instance.tree).props.onClick();
@@ -170,4 +170,15 @@ for (const action of ['Keep saved transcript', 'Apply proposed transcript']) {
   await undo.props.onClick();
   assert.equal(instance.calls[0].command, 'undo_enhancement');
   assert.equal(instance.calls[0].args.reviewId, 'applied-1');
+}
+
+// Nemotron supplies speaker turns without the separate refinement model.
+{
+  const instance = dialog('nemotron', false, true, false);
+  const toggle = nodes(instance.tree).find(node => node.type === 'Switch');
+  assert.equal(toggle.props.checked, true);
+  assert.equal(toggle.props.disabled, false);
+  await start(instance.tree).props.onClick();
+  assert.equal(instance.calls[0].args.provider, 'nemotron');
+  assert.equal(instance.calls[0].args.assignSpeakers, true);
 }

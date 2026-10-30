@@ -225,6 +225,7 @@ async fn run_retranscription<R: Runtime>(
     // Determine which provider to use (default to whisper)
     let batch_engine = super::common::BatchEngine::from_provider(provider.as_deref());
     let use_parakeet = batch_engine == super::common::BatchEngine::Parakeet;
+    let use_nemotron = batch_engine == super::common::BatchEngine::Nemotron;
 
     info!(
         "Starting retranscription for meeting {} with language {:?}, model {:?}, provider {:?}",
@@ -264,6 +265,35 @@ async fn run_retranscription<R: Runtime>(
     // Check for cancellation
     if RETRANSCRIPTION_CANCELLED.load(Ordering::SeqCst) {
         return Err(anyhow!("Retranscription cancelled"));
+    }
+
+    if use_nemotron && assign_speakers {
+        // Convert to 16kHz mono format (CPU-intensive, run in blocking task)
+        let audio_samples = tokio::task::spawn_blocking(move || decoded.to_whisper_format())
+            .await
+            .map_err(|e| anyhow!("Resample task panicked: {}", e))?;
+        info!(
+            "Converted to 16kHz mono format: {} samples",
+            audio_samples.len()
+        );
+        let (transcripts, analysis) =
+            nemotron_with_speakers(&app, &meeting_id, &folder_path, model.as_deref(), &audio_samples)
+                .await?;
+        let transcript_sources = vec![None; transcripts.len()];
+        return save_retranscription(
+            &app,
+            meeting_id,
+            meeting_folder_path,
+            original,
+            duration_seconds,
+            language,
+            transcripts,
+            Some(analysis),
+            transcript_sources,
+            provider,
+            model,
+        )
+        .await;
     }
 
     let speaker_analysis = if assign_speakers {
@@ -405,6 +435,16 @@ async fn run_retranscription<R: Runtime>(
         None
     };
 
+    let nemotron_provider = if use_nemotron {
+        Some(
+            crate::nemotron::configured_provider(&app, model.as_deref())
+                .await
+                .map_err(anyhow::Error::msg)?,
+        )
+    } else {
+        None
+    };
+
     // Transcribe complete speech spans before assigning speakers. A change on
     // one track can occur during speech on the other track; cutting the mixed
     // audio at that estimate can remove word context on both sides of the cut.
@@ -466,7 +506,30 @@ async fn run_retranscription<R: Runtime>(
             continue;
         }
 
-        let (rows, confidence) = if let Some(provider) = funasr_provider.as_ref() {
+        let (rows, confidence) = if let Some(provider) = nemotron_provider.as_ref() {
+            let words = provider
+                .transcribe_words(&segment.samples)
+                .await
+                .map_err(|e| anyhow!("Nemotron transcription failed on segment {i}: {e}"))?;
+            let words = words
+                .into_iter()
+                .map(|(text, start, end)| {
+                    (
+                        text,
+                        segment.start_timestamp_ms + start,
+                        segment.start_timestamp_ms + end,
+                    )
+                })
+                .collect();
+            (
+                super::enhancement::word_rows(
+                    words,
+                    speaker_analysis.as_ref(),
+                    segment.source.as_deref(),
+                ),
+                0.9f32,
+            )
+        } else if let Some(provider) = funasr_provider.as_ref() {
             use crate::audio::transcription::TranscriptionProvider;
             let result = provider
                 .transcribe(segment.samples.clone(), language.clone())
@@ -542,6 +605,91 @@ async fn run_retranscription<R: Runtime>(
         transcribed_count, processable_count, avg_confidence
     );
 
+    let effective_model = if let Some(engine) = whisper_engine.as_ref() {
+        engine.get_current_model().await
+    } else if let Some(engine) = parakeet_engine.as_ref() {
+        engine.get_current_model().await
+    } else {
+        model
+    };
+    save_retranscription(
+        &app,
+        meeting_id,
+        meeting_folder_path,
+        original,
+        duration_seconds,
+        language,
+        all_transcripts,
+        speaker_analysis,
+        transcript_sources,
+        provider,
+        effective_model,
+    )
+    .await
+}
+
+/// Transcribes the whole recording with Nemotron, using the speakers the model
+/// finds. Rows come from its word times and end where the speaker changes.
+async fn nemotron_with_speakers<R: Runtime>(
+    app: &AppHandle<R>,
+    meeting_id: &str,
+    folder_path: &Path,
+    model: Option<&str>,
+    audio_samples: &[f32],
+) -> Result<(
+    Vec<(String, f64, f64)>,
+    crate::diarization::finalize::EnhancementSpeakerAnalysis,
+)> {
+    emit_progress(app, meeting_id, "transcribing", 25, "Loading Nemotron...");
+    let provider = crate::nemotron::configured_provider(app, model)
+        .await
+        .map_err(anyhow::Error::msg)?;
+    let minutes = audio_samples.len() as f64 / 16000.0 / 60.0;
+    emit_progress(
+        app,
+        meeting_id,
+        "transcribing",
+        30,
+        &format!("Transcribing {minutes:.0} min and identifying speakers with Nemotron..."),
+    );
+    let meeting = provider
+        .transcribe_meeting(audio_samples, &RETRANSCRIPTION_CANCELLED)
+        .await;
+    if RETRANSCRIPTION_CANCELLED.load(Ordering::SeqCst) {
+        return Err(anyhow!("Retranscription cancelled"));
+    }
+    let meeting = meeting.map_err(|e| anyhow!("Nemotron transcription failed: {e}"))?;
+    drop(provider);
+    emit_progress(app, meeting_id, "speakers", 75, "Matching speakers...");
+    let analysis = crate::diarization::finalize::prepare_enhancement_from_turns(
+        app,
+        meeting_id,
+        folder_path,
+        &meeting.turns,
+        &RETRANSCRIPTION_CANCELLED,
+    )
+    .await?;
+    Ok((
+        super::enhancement::word_rows(meeting.words, Some(&analysis), None),
+        analysis,
+    ))
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn save_retranscription<R: Runtime>(
+    app: &AppHandle<R>,
+    meeting_id: String,
+    meeting_folder_path: String,
+    original: Vec<crate::database::models::Transcript>,
+    duration_seconds: f64,
+    language: Option<String>,
+    all_transcripts: Vec<(String, f64, f64)>,
+    speaker_analysis: Option<crate::diarization::finalize::EnhancementSpeakerAnalysis>,
+    transcript_sources: Vec<Option<String>>,
+    provider: Option<String>,
+    model: Option<String>,
+) -> Result<RetranscriptionResult> {
+    let app = app.clone();
     // Check for cancellation
     if RETRANSCRIPTION_CANCELLED.load(Ordering::SeqCst) {
         return Err(anyhow!("Retranscription cancelled"));
@@ -557,13 +705,6 @@ async fn run_retranscription<R: Runtime>(
         .map(|analysis| analysis.label_with_sources(&rows, &transcript_sources))
         .transpose()?;
     let state = app.state::<AppState>();
-    let effective_model = if let Some(engine) = whisper_engine.as_ref() {
-        engine.get_current_model().await
-    } else if let Some(engine) = parakeet_engine.as_ref() {
-        engine.get_current_model().await
-    } else {
-        model.clone()
-    };
     let review_id = super::enhancement_review::stage(
         state.db_manager.pool(),
         state.speaker_store.pool(),
@@ -576,7 +717,7 @@ async fn run_retranscription<R: Runtime>(
             duration_seconds,
             language: language.clone(),
             provider,
-            model: effective_model,
+            model,
             core_backup: Vec::new(),
             speaker_backup: String::new(),
             publication_rows: String::new(),
@@ -1329,6 +1470,9 @@ mod tests {
                 }
                 super::super::common::BatchEngine::FunAsr => {
                     crate::config::DEFAULT_FUNASR_MODEL.into()
+                }
+                super::super::common::BatchEngine::Nemotron => {
+                    unreachable!("Nemotron uses its dedicated native-server regression test")
                 }
             });
         let language = std::env::var("MEETILY_BENCHMARK_LANGUAGE")
