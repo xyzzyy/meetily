@@ -21,18 +21,17 @@ pub struct DiarizationSession {
 
 impl DiarizationSession {
     pub fn new(embedding_model_path: &Path) -> Result<Self, EmbeddingError> {
-        Self::with_profiles(embedding_model_path, Vec::new())
+        Self::with_voice_profiles(embedding_model_path, Vec::new())
     }
 
-    /// Create a session pre-seeded with saved voice profiles (name, centroid)
-    /// so returning speakers are labeled by name instead of "Speaker N".
-    pub fn with_profiles(
+    /// Seed returning speakers with their saved references.
+    pub fn with_voice_profiles(
         embedding_model_path: &Path,
-        profiles: Vec<(String, String, Vec<f32>)>,
+        profiles: Vec<super::profile_matching::VoiceProfile>,
     ) -> Result<Self, EmbeddingError> {
         let mut clusterer = SpeakerClusterer::new();
-        for (id, name, centroid) in profiles {
-            clusterer.seed_profile(&id, &name, centroid);
+        for profile in profiles {
+            clusterer.seed_profile_samples(profile);
         }
         Ok(Self {
             extractor: EmbeddingExtractor::new(embedding_model_path)?,

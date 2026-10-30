@@ -90,6 +90,45 @@ pub enum SampleRemoval {
 pub struct SpeakerProfilesRepository;
 
 impl SpeakerProfilesRepository {
+    /// Read blends and their separable meeting samples from the same snapshot.
+    /// Removed samples and incompatible model versions must not be used again.
+    pub async fn recognition_profiles(
+        pool: &SqlitePool,
+        model_version: &str,
+    ) -> Result<Vec<crate::diarization::profile_matching::VoiceProfile>, SqlxError> {
+        use crate::diarization::profile_matching::VoiceProfile;
+        let mut transaction = pool.begin().await?;
+        let rows: Vec<SpeakerProfileRow> = sqlx::query_as(
+                "SELECT id, name, embedding, model_version, sample_count, speech_seconds FROM speaker_profiles WHERE model_version = ? ORDER BY id",
+            ).bind(model_version).fetch_all(&mut *transaction).await?;
+        let samples: Vec<(String, Vec<u8>)> = sqlx::query_as(
+                "SELECT s.profile_id, s.embedding FROM speaker_profile_samples s JOIN speaker_profiles p ON p.id = s.profile_id
+                 WHERE p.model_version = ? AND s.embedding IS NOT NULL AND length(s.embedding) % 4 = 0 AND s.speech_seconds > 0
+                 ORDER BY s.profile_id, s.meeting_id, s.speaker_id",
+            ).bind(model_version).fetch_all(&mut *transaction).await?;
+        transaction.commit().await?;
+        let mut grouped = std::collections::HashMap::<String, Vec<Vec<f32>>>::new();
+        for (id, bytes) in samples {
+            grouped
+                .entry(id)
+                .or_default()
+                .push(blob_to_embedding(&bytes));
+        }
+        Ok(rows
+            .into_iter()
+            .map(|row| VoiceProfile {
+                samples: grouped.remove(&row.id).unwrap_or_default(),
+                id: row.id,
+                name: row.name,
+                embedding: if row.embedding.len() % 4 == 0 {
+                    blob_to_embedding(&row.embedding)
+                } else {
+                    Vec::new()
+                },
+            })
+            .collect())
+    }
+
     pub async fn list(pool: &SqlitePool) -> Result<Vec<SpeakerProfile>, SqlxError> {
         let rows = sqlx::query_as::<_, SpeakerProfileRow>(
             "SELECT id, name, embedding, model_version, sample_count, speech_seconds
@@ -557,6 +596,108 @@ mod tests {
             .unwrap();
         sqlx::migrate!("./speaker-migrations").run(&pool).await.unwrap();
         pool
+    }
+
+    #[tokio::test]
+    async fn recognition_reads_separate_samples_and_excludes_forgotten_or_incompatible_voices() {
+        let pool = speaker_store().await;
+        let id = SpeakerProfilesRepository::create_from_sample(
+            &pool,
+            "Alice",
+            &[1.0, 0.0],
+            "v1",
+            1,
+            10.0,
+            SampleSource {
+                meeting_id: "m1",
+                speaker_id: "s1",
+            },
+        )
+        .await
+        .unwrap();
+        SpeakerProfilesRepository::add_sample(
+            &pool,
+            &id,
+            &[0.0, 1.0],
+            "v1",
+            1,
+            10.0,
+            SampleSource {
+                meeting_id: "m2",
+                speaker_id: "s2",
+            },
+        )
+        .await
+        .unwrap();
+        SpeakerProfilesRepository::create_from_sample(
+            &pool,
+            "Old model",
+            &[1.0, 0.0],
+            "v0",
+            1,
+            10.0,
+            SampleSource {
+                meeting_id: "old",
+                speaker_id: "old",
+            },
+        )
+        .await
+        .unwrap();
+        let profiles = SpeakerProfilesRepository::recognition_profiles(&pool, "v1")
+            .await
+            .unwrap();
+        assert_eq!(profiles.len(), 1);
+        assert_eq!(profiles[0].id, id);
+        assert_eq!(profiles[0].samples, vec![vec![1.0, 0.0], vec![0.0, 1.0]]);
+        assert!((profiles[0].embedding[0] - profiles[0].embedding[1]).abs() < 1e-6);
+        SpeakerProfilesRepository::remove_sample(
+            &pool,
+            &id,
+            SampleSource {
+                meeting_id: "m1",
+                speaker_id: "s1",
+            },
+        )
+        .await
+        .unwrap();
+        let profiles = SpeakerProfilesRepository::recognition_profiles(&pool, "v1")
+            .await
+            .unwrap();
+        assert_eq!(profiles[0].samples, vec![vec![0.0, 1.0]]);
+        SpeakerProfilesRepository::delete(&pool, &id).await.unwrap();
+        assert!(SpeakerProfilesRepository::recognition_profiles(&pool, "v1")
+            .await
+            .unwrap()
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn recognition_keeps_legacy_blends_without_usable_separate_samples() {
+        let pool = speaker_store().await;
+        let id = SpeakerProfilesRepository::create_from_sample(
+            &pool,
+            "Legacy",
+            &[1.0, 0.0],
+            "v1",
+            1,
+            10.0,
+            SampleSource {
+                meeting_id: "legacy",
+                speaker_id: "speaker",
+            },
+        )
+        .await
+        .unwrap();
+        sqlx::query("UPDATE speaker_profile_samples SET embedding = NULL WHERE profile_id = ?")
+            .bind(&id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let profiles = SpeakerProfilesRepository::recognition_profiles(&pool, "v1")
+            .await
+            .unwrap();
+        assert_eq!(profiles[0].embedding, vec![1.0, 0.0]);
+        assert!(profiles[0].samples.is_empty());
     }
 
     #[tokio::test]
