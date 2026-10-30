@@ -15,24 +15,20 @@ export function runRecordingSpeakerAnalysis(meetingId: string, work: () => Promi
 export function waitForRecordingSpeakerAnalysis(
   meetingId: string,
   signal: AbortSignal,
-  timeoutMs = 10 * 60 * 1000,
-): Promise<'ready' | 'timeout' | 'cancelled'> {
+): Promise<'ready' | 'cancelled'> {
   return new Promise(resolve => {
     let finished = false;
     let pollTimer: ReturnType<typeof setTimeout> | undefined;
-    let timeout: ReturnType<typeof setTimeout> | undefined;
-    const finish = (outcome: 'ready' | 'timeout' | 'cancelled') => {
+    const finish = (outcome: 'ready' | 'cancelled') => {
       if (finished) return;
       finished = true;
       clearTimeout(pollTimer);
-      clearTimeout(timeout);
       signal.removeEventListener('abort', cancelled);
       resolve(outcome);
     };
     const cancelled = () => finish('cancelled');
     if (signal.aborted) { finish('cancelled'); return; }
     signal.addEventListener('abort', cancelled, { once: true });
-    timeout = setTimeout(() => finish('timeout'), timeoutMs);
     const inspect = async () => {
       if (finished) return;
       try {

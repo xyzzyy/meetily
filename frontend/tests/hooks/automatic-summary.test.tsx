@@ -91,10 +91,13 @@ test('an analysis that survives reload is polled until it finishes', async () =>
   expect(await result).toBe('ready');
 });
 
-test('waiting is bounded even if native analysis stalls', async () => {
+test('waiting for an unfinished analysis can be cancelled without completing it', async () => {
   const analysis = deferred();
   const task = runRecordingSpeakerAnalysis('slow', () => analysis.promise);
-  expect(await waitForRecordingSpeakerAnalysis('slow', new AbortController().signal, 1)).toBe('timeout');
+  const controller = new AbortController();
+  const result = waitForRecordingSpeakerAnalysis('slow', controller.signal);
+  controller.abort();
+  expect(await result).toBe('cancelled');
   analysis.resolve(); await task;
 });
 for (const terminal of [null, 'completed', 'failed', 'fallback_to_live', 'cancelled']) {

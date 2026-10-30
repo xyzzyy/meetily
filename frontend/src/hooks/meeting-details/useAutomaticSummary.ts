@@ -1,5 +1,4 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { toast } from 'sonner';
 import { waitForRecordingSpeakerAnalysis } from '@/lib/recording-speaker-analysis';
 
 /** Automatic generation waits; manual generation remains available. */
@@ -24,11 +23,6 @@ export function useAutomaticSummary({ meetingId, enabled, generate, onStarted }:
       const outcome = await waitForRecordingSpeakerAnalysis(meetingId, controller.signal);
       if (controller.signal.aborted || outcome === 'cancelled') return;
       setWaitingMeetingId(null);
-      if (outcome === 'timeout') {
-        toast.warning('Speaker analysis is still running', {
-          description: 'The automatic summary will use the current transcript.',
-        });
-      }
       started.current.add(meetingId);
       latest.current.onStarted?.();
       await latest.current.generate();
