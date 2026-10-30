@@ -8,6 +8,7 @@ import {
   FunAsrModelInfo,
   FunAsrModelStatus,
   funAsrProgress,
+  funAsrStorageNote,
 } from '@/lib/funasr';
 import { useModelSelection } from '@/hooks/useModelSelection';
 import { Button } from './ui/button';
@@ -234,10 +235,11 @@ export function FunAsrModelManager({
   const deletionPendingRef = useRef(false);
 
   const deleteModel = async (model: FunAsrModelInfo) => {
+    const partialOnly = Boolean(model.decoder_is_shared && model.has_partial_download);
     // A ready selected model must be replaced before it is removed. Damaged or
     // partial files of the selected model can still be deleted: that selection
     // was already unusable, and SelectedModelNote says so.
-    if (selectedModel === model.name && model.status === 'Available') {
+    if (selectedModel === model.name && model.status === 'Available' && !partialOnly) {
       toast.error('Select another model before deleting this one');
       return;
     }
@@ -247,7 +249,9 @@ export function FunAsrModelManager({
       const accepted = await confirm(
         model.has_orphaned_encoder
           ? 'Delete the unused shared FUN-ASR encoder? No model uses it. You will need to download it again to install a FUN-ASR model.'
-          : `Delete transcription model ${model.display_name}, including any partial download? The shared encoder is kept while another FUN-ASR variant needs it.`,
+          : partialOnly
+            ? `Delete partial downloads for ${model.display_name}? Installed model files stay unchanged.`
+            : `Delete the Branch files for ${model.display_name}, including partial downloads? Files from official Meetily stay unchanged. The Branch encoder can also be removed if no installed decoder needs it.`,
         {
           title: model.has_orphaned_encoder ? 'Delete unused encoder?' : 'Delete transcription model?',
           kind: 'warning',
@@ -256,10 +260,11 @@ export function FunAsrModelManager({
         }
       );
       if (!accepted) return;
-      await FunAsrAPI.deleteModel(model.name);
+      await FunAsrAPI.deleteModel(model.name, partialOnly);
       toast.success(model.has_orphaned_encoder
         ? 'Unused FUN-ASR encoder deleted'
-        : `${model.display_name} deleted`, { description: 'Model removed to free up space' });
+        : partialOnly ? `Partial downloads for ${model.display_name} deleted`
+          : `Branch files for ${model.display_name} deleted`, { description: 'Files from official Meetily stay unchanged' });
       await refresh().catch(error => toast.error('Could not refresh FUN-ASR models', { description: String(error) }));
     } catch (error) {
       toast.error(`Failed to delete ${model.display_name}`, { description: errorMessage(error) });
@@ -315,6 +320,8 @@ export function FunAsrModelManager({
           <TranscriptionModelCard
             key={model.name}
             displayName={model.display_name}
+            canDelete={!model.decoder_is_shared || model.has_partial_download}
+            storageNote={funAsrStorageNote(model)}
             description={model.description}
             details={[`${model.decoder_size_mb} MB decoder`, `${model.size_mb} MB first install`]}
             recommended={model.recommended}

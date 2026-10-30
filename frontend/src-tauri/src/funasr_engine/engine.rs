@@ -116,16 +116,20 @@ impl FunAsrEngine {
         self.owned_models_root
             .join(encoder_relative_path())
             .is_file()
-            && !MODELS.iter().any(|spec| {
-                self.resolve_for_read(&decoder_relative_path(spec))
-                    .is_file()
-                    || partial_path(&self.owned_models_root.join(decoder_relative_path(spec)))
-                        .is_file()
-            })
+            && !self.has_decoder_files()
+    }
+
+    fn has_decoder_files(&self) -> bool {
+        MODELS.iter().any(|spec| {
+            self.resolve_for_read(&decoder_relative_path(spec))
+                .is_file()
+                || partial_path(&self.owned_models_root.join(decoder_relative_path(spec))).is_file()
+        })
     }
 
     pub async fn discover_models(&self) -> Vec<ModelInfo> {
-        let encoder_ready = validate_artifact(&self.encoder_path(), ENCODER, false)
+        let encoder_path = self.encoder_path();
+        let encoder_ready = validate_artifact(&encoder_path, ENCODER, false)
             .await
             .is_ok();
         let active: HashMap<String, u8> = self
@@ -149,6 +153,8 @@ impl FunAsrEngine {
             models.push(ModelInfo {
                 name: spec.id.to_string(),
                 display_name: spec.display_name.to_string(),
+                encoder_is_shared: !encoder_path.starts_with(&self.owned_models_root),
+                decoder_is_shared: !decoder_path.starts_with(&self.owned_models_root),
                 path: decoder_path,
                 encoder_available: encoder_ready,
                 has_orphaned_encoder,
@@ -520,8 +526,15 @@ impl FunAsrEngine {
     }
 
     pub async fn delete_model(&self, model_id: &str) -> Result<()> {
-        let spec =
-            model_spec(model_id).ok_or_else(|| anyhow!("Unknown FUN-ASR model: {model_id}"))?;
+        self.delete_model_files(model_id, false).await
+    }
+
+    pub async fn delete_partial_files(&self, model_id: &str) -> Result<()> {
+        self.delete_model_files(model_id, true).await
+    }
+
+    async fn delete_model_files(&self, model_id: &str, partial_only: bool) -> Result<()> {
+        let spec = model_spec(model_id).ok_or_else(|| anyhow!("Unknown FUN-ASR model: {model_id}"))?;
         if self.cancellation_tokens.lock().await.contains_key(model_id) {
             return Err(anyhow!(
                 "Cancel the download and wait for it to stop before deleting its files."
@@ -547,7 +560,7 @@ impl FunAsrEngine {
         let encoder_partial = partial_path(&encoder);
         let encoder_only_cleanup =
             !decoder.is_file() && !decoder_partial.is_file() && !encoder_partial.is_file();
-        if encoder_only_cleanup {
+        if encoder_only_cleanup && !partial_only {
             // Recheck under both locks before removing an encoder-only orphan.
             // A new download must not register until cleanup has finished.
             if self.has_orphaned_encoder_files() {
@@ -562,7 +575,9 @@ impl FunAsrEngine {
                     || self.current_model.read().await.is_some()
                     || !self.has_orphaned_encoder_files()
                 {
-                    return Err(anyhow!("The shared encoder is in use. Try cleanup after the model or download stops."));
+                    return Err(anyhow!(
+                        "The shared encoder is in use. Try cleanup after the model or download stops."
+                    ));
                 }
                 fs::remove_file(&encoder).await?;
                 return Ok(());
@@ -574,19 +589,25 @@ impl FunAsrEngine {
                 .map(|root| root.join(decoder_relative_path(spec)));
             if official_decoder.as_ref().is_some_and(|path| path.is_file()) {
                 return Err(anyhow!(
-                    "{} is provided by the official Meetily installation and cannot be deleted from this app.",
-                    spec.display_name
-                ));
+                        "{} is provided by the official Meetily installation and cannot be deleted from this app.",
+                        spec.display_name
+                    ));
             }
             return Err(anyhow!(
                 "{} is not installed in this app's model folder.",
                 spec.display_name
             ));
         }
-        if self.current_model.read().await.as_deref() == Some(model_id) {
+        if !partial_only
+            && decoder.is_file()
+            && self.current_model.read().await.as_deref() == Some(model_id)
+        {
             self.unload_model().await;
         }
         for file in [&decoder, &decoder_partial] {
+            if partial_only && file == &decoder {
+                continue;
+            }
             if file.is_file() {
                 fs::remove_file(file).await?;
             }
@@ -596,24 +617,40 @@ impl FunAsrEngine {
         let Ok(_encoder_guard) = self.encoder_download_lock.try_lock() else {
             return Ok(());
         };
-        let any_owned_decoder = MODELS.iter().any(|candidate| {
-            let path = self
-                .owned_models_root
-                .join(decoder_relative_path(candidate));
-            path.is_file() || partial_path(&path).is_file()
-        });
         // Hold the registration lock until removal finishes. A new download
         // must see the resulting file state when it decides what to fetch.
         let downloads = self.cancellation_tokens.lock().await;
-        if !any_owned_decoder && downloads.is_empty() {
-            for file in [&encoder, &encoder_partial] {
-                if file.is_file() {
-                    fs::remove_file(file).await?;
-                }
+        if downloads.is_empty() {
+            let decoder_needs_encoder = self.has_decoder_files();
+            if !partial_only && !decoder_needs_encoder && encoder.is_file() {
+                fs::remove_file(&encoder).await?;
+            }
+            // A ready model never reads a partial artifact. Partial-only
+            // cleanup must keep both complete files and the current helper,
+            // even if a download finished after the dialog was opened.
+            let partial_is_unused = !decoder_needs_encoder
+                || (partial_only
+                    && (validate_artifact(&self.encoder_path(), ENCODER, false)
+                        .await
+                        .is_ok()
+                        || !MODELS
+                            .iter()
+                            .filter(|spec| spec.id != model_id)
+                            .any(|spec| {
+                                self.resolve_for_read(&decoder_relative_path(spec))
+                                    .is_file()
+                                    || partial_path(
+                                        &self.owned_models_root.join(decoder_relative_path(spec)),
+                                    )
+                                    .is_file()
+                            })));
+            if partial_is_unused && encoder_partial.is_file() {
+                fs::remove_file(&encoder_partial).await?;
             }
         }
         Ok(())
     }
+
 }
 
 async fn validate_artifact(path: &Path, spec: ArtifactSpec, hash: bool) -> Result<()> {
@@ -767,6 +804,58 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn discovery_reports_encoder_and_decoder_storage_independently() {
+        for encoder_shared in [false, true] {
+            for decoder_shared in [false, true] {
+                let owned = tempfile::tempdir().unwrap();
+                let official = tempfile::tempdir().unwrap();
+                let encoder_root = if encoder_shared { official.path() } else { owned.path() };
+                let decoder_root = if decoder_shared { official.path() } else { owned.path() };
+                let encoder = encoder_root.join(encoder_relative_path());
+                let decoder = decoder_root.join(decoder_relative_path(&MODELS[0]));
+                for (path, size) in [(&encoder, ENCODER.size), (&decoder, MODELS[0].decoder.size)] {
+                    write_file(path, b"GGUF");
+                    std::fs::OpenOptions::new().write(true).open(path).unwrap().set_len(size).unwrap();
+                }
+                let engine = FunAsrEngine::new(owned.path().to_path_buf(), Some(official.path().to_path_buf())).unwrap();
+                let info = engine.discover_models().await.remove(0);
+                assert!(matches!(info.status, ModelStatus::Available));
+                assert_eq!(info.encoder_is_shared, encoder_shared);
+                assert_eq!(info.decoder_is_shared, decoder_shared);
+                let deleted = engine.delete_model(MODELS[0].id).await;
+                if decoder_shared {
+                    assert!(deleted.is_err());
+                    assert!(decoder.is_file());
+                } else {
+                    deleted.unwrap();
+                    assert!(!decoder.exists());
+                }
+                if encoder_shared { assert!(encoder.is_file()); }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn discovery_keeps_shared_ownership_for_damaged_official_files() {
+        let owned = tempfile::tempdir().unwrap();
+        let official = tempfile::tempdir().unwrap();
+        let encoder = official.path().join(encoder_relative_path());
+        let decoder = official.path().join(decoder_relative_path(&MODELS[0]));
+        write_file(&encoder, b"damaged shared encoder");
+        write_file(&decoder, b"GGUF");
+        std::fs::OpenOptions::new().write(true).open(&decoder).unwrap()
+            .set_len(MODELS[0].decoder.size).unwrap();
+        let engine = FunAsrEngine::new(owned.path().to_path_buf(), Some(official.path().to_path_buf())).unwrap();
+        let info = engine.discover_models().await.remove(0);
+        assert!(matches!(info.status, ModelStatus::Missing));
+        assert!(!info.encoder_available);
+        assert!(info.encoder_is_shared);
+        assert!(info.decoder_is_shared);
+        assert_eq!(info.path, decoder);
+        assert_eq!(std::fs::read(&encoder).unwrap(), b"damaged shared encoder");
+    }
+
+    #[tokio::test]
     async fn batch_session_model_changes_and_cleanup_do_not_change_the_recording_session() {
         let owned = tempfile::tempdir().unwrap();
         let recording = FunAsrEngine::new(owned.path().to_path_buf(), None).unwrap();
@@ -873,7 +962,8 @@ mod tests {
         assert!(encoder.is_file());
         engine.delete_model(MODELS[1].id).await.unwrap();
         assert!(!second.exists());
-        assert!(!encoder.exists());
+        // The official decoder still needs an encoder from Branch.
+        assert!(encoder.exists());
         assert_eq!(std::fs::read(&official_decoder).unwrap(), b"official");
     }
 
@@ -1240,6 +1330,116 @@ mod tests {
         engine.delete_model(MODELS[1].id).await.unwrap();
         assert!(!encoder.exists());
         assert!(!second_decoder.exists());
+    }
+
+    #[tokio::test]
+    async fn deleting_an_owned_decoder_keeps_the_encoder_needed_by_a_shared_decoder() {
+        let owned = tempfile::tempdir().unwrap();
+        let official = tempfile::tempdir().unwrap();
+        let encoder = owned.path().join(encoder_relative_path());
+        let first = owned.path().join(decoder_relative_path(&MODELS[0]));
+        let shared = official.path().join(decoder_relative_path(&MODELS[1]));
+        for (path, size) in [
+            (&encoder, ENCODER.size),
+            (&first, MODELS[0].decoder.size),
+            (&shared, MODELS[1].decoder.size),
+        ] {
+            write_file(path, b"GGUF");
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(path)
+                .unwrap()
+                .set_len(size)
+                .unwrap();
+        }
+        let engine = FunAsrEngine::new(
+            owned.path().to_path_buf(),
+            Some(official.path().to_path_buf()),
+        )
+        .unwrap();
+        assert!(matches!(
+            engine.discover_models().await[1].status,
+            ModelStatus::Available
+        ));
+        engine.delete_model(MODELS[0].id).await.unwrap();
+        assert!(
+            encoder.is_file(),
+            "the shared decoder still needs the Branch encoder"
+        );
+        assert!(!first.exists());
+        assert!(matches!(
+            engine.discover_models().await[1].status,
+            ModelStatus::Available
+        ));
+        assert_eq!(
+            engine.validate_model(MODELS[1].id).await.unwrap(),
+            (encoder, shared)
+        );
+    }
+
+    #[tokio::test]
+    async fn partial_cleanup_keeps_complete_files_and_the_current_model() {
+        for encoder_shared in [false, true] {
+            for decoder_arrived in [false, true] {
+                let owned = tempfile::tempdir().unwrap();
+                let official = tempfile::tempdir().unwrap();
+                let encoder_root = if encoder_shared {
+                    official.path()
+                } else {
+                    owned.path()
+                };
+                let encoder = encoder_root.join(encoder_relative_path());
+                let shared_decoder = official.path().join(decoder_relative_path(&MODELS[0]));
+                for (path, size) in [
+                    (&encoder, ENCODER.size),
+                    (&shared_decoder, MODELS[0].decoder.size),
+                ] {
+                    write_file(path, b"GGUF");
+                    std::fs::OpenOptions::new()
+                        .write(true)
+                        .open(path)
+                        .unwrap()
+                        .set_len(size)
+                        .unwrap();
+                }
+                let decoder = owned.path().join(decoder_relative_path(&MODELS[0]));
+                let decoder_partial = partial_path(&decoder);
+                let encoder_partial = partial_path(&owned.path().join(encoder_relative_path()));
+                write_file(&decoder_partial, b"decoder part");
+                write_file(&encoder_partial, b"encoder part");
+                // Another window can finish a download while confirmation is
+                // open. A partial-only request must still keep that new file.
+                if decoder_arrived {
+                    write_file(&decoder, b"GGUF");
+                    std::fs::OpenOptions::new()
+                        .write(true)
+                        .open(&decoder)
+                        .unwrap()
+                        .set_len(MODELS[0].decoder.size)
+                        .unwrap();
+                }
+                let engine = FunAsrEngine::new(
+                    owned.path().to_path_buf(),
+                    Some(official.path().to_path_buf()),
+                )
+                .unwrap();
+                *engine.current_model.write().await = Some(MODELS[0].id.into());
+                engine.delete_partial_files(MODELS[0].id).await.unwrap();
+                assert_eq!(
+                    engine.get_current_model().await.as_deref(),
+                    Some(MODELS[0].id)
+                );
+                assert!(!decoder_partial.exists());
+                assert!(!encoder_partial.exists());
+                assert_eq!(decoder.is_file(), decoder_arrived);
+                assert!(encoder.is_file());
+                assert!(shared_decoder.is_file());
+                assert!(matches!(
+                    engine.discover_models().await[0].status,
+                    ModelStatus::Available
+                ));
+            }
+        }
     }
 
     #[tokio::test]

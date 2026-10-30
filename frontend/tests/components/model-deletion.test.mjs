@@ -33,7 +33,7 @@ function manager([file, component, name, command], options = {}) {
   }
   visit(ast);
   const model = { name, display_name: name, size_mb: 100, context_size: 100,
-    status: file === 'BuiltInModelManager' ? { type: 'available' } : 'Available' };
+    status: file === 'BuiltInModelManager' ? { type: 'available' } : 'Available', ...options.model };
   const states = new Map(Object.entries({ models: [model], loading: false, isLoading: false,
     initialized: true, hasFetched: true }));
   const refs = [];
@@ -105,7 +105,7 @@ function manager([file, component, name, command], options = {}) {
     assert.ok(control, `${component}: selected model must have a delete control`);
     return control.props.onDelete?.() ?? control.props.onClick?.({ stopPropagation() {} });
   };
-  return { click, calls, notices, selections, dialogs };
+  return { click, calls, notices, selections, dialogs, view: () => nodes(render()) };
 }
 const settle = async () => { for (let i = 0; i < 20; i++) await Promise.resolve(); };
 
@@ -171,5 +171,28 @@ for (const fixture of cases) {
     assert.equal(app.calls.length, 1);
     remove(); await settle();
     assert.deepEqual(app.selections, cleared);
+  });
+}
+
+for (const state of ['available', 'corrupted']) {
+  test(`shared summary model (${state}) explains storage and offers no delete action`, () => {
+    const app = manager(cases[0], { model: { is_shared: true, status: { type: state } } });
+    const view = app.view();
+    assert.ok(view.some(node => node.props.children === 'Shared from official Meetily. Read-only in Branch.'));
+    assert.ok(!view.some(node => node.props.title === 'Delete summary' || node.props.children?.includes?.('Delete')));
+    assert.equal(app.calls.length, 0);
+    const owned = manager(cases[0], { model: { is_shared: false, status: { type: state } } }).view();
+    assert.ok(owned.some(node => node.props.children === 'Saved in Meetily Branch.'));
+    assert.ok(owned.some(node => node.props.title === 'Delete summary' || node.props.children?.includes?.('Delete')));
+  });
+}
+
+for (const state of ['error', 'not_downloaded']) {
+  test(`summary storage remains clear in ${state} state`, () => {
+    const shared = manager(cases[0], { model: { is_shared: true, status: { type: state } } }).view();
+    assert.ok(shared.some(node => node.props.children === 'Shared from official Meetily. Read-only in Branch.'));
+    const owned = manager(cases[0], { model: { is_shared: false, status: { type: state } } }).view();
+    assert.ok(owned.some(node => node.props.children === 'Downloads are saved in Meetily Branch.'));
+    assert.ok(!owned.some(node => node.props.children === 'Saved in Meetily Branch.'));
   });
 }
