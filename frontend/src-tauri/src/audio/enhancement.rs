@@ -227,6 +227,10 @@ pub(crate) fn decode_enhancement_audio(path: &std::path::Path) -> Result<Enhance
     }
 }
 
+/// Fraction of a track's typical speech level below which audio is faint.
+/// On the checked call, echo and noise sat at 3-7%; real speech above 24%.
+const FAINT_LEVEL: f64 = 0.15;
+
 fn rms(samples: &[f32]) -> f64 {
     (samples.iter().map(|s| (*s as f64).powi(2)).sum::<f64>() / samples.len().max(1) as f64).sqrt()
 }
@@ -261,9 +265,7 @@ fn weak_cross_track_pickup(
     if level <= 0.0 || rms(&reference[..count]) < level * 10.0 {
         return false;
     }
-    // On the checked call, echo and noise sat at 3-7% of the track's speech
-    // level under a loud other track; real speech stayed above 24%.
-    if level < typical_level * 0.15 {
+    if level < typical_level * FAINT_LEVEL {
         return true;
     }
     if level >= 0.01 || count < 16000 {
@@ -329,21 +331,39 @@ pub(crate) fn recognition_inputs(
         .collect());
     }
     let mut inputs = Vec::new();
+    // Joined context includes pauses. Recovery must measure coverage by the
+    // speech a track actually holds, or a quiet row on the other track that
+    // falls in such a pause would count as covered and never be decoded.
+    let mut speech_ranges = Vec::new();
+    let mut track_levels = Vec::new();
     for (index, (source, track)) in audio.tracks.iter().enumerate() {
-        let spans = recognition_speech_segments(track, pause_ms, &[], |percent, count| {
+        let (detected, converted) = detected_speech(track, pause_ms, &[], |percent, count| {
             progress(
                 (index as u32 * 100 + percent) / audio.tracks.len() as u32,
                 count,
             )
         })?;
+        let spans = speech_context(&detected, &converted);
         let other = &audio.tracks[1 - index].1;
         // Pickup detection uses the same short analysis windows for every
         // engine. The recognizer's context size must not change that evidence.
         let typical_level = typical_speech_level(&spans);
+        track_levels.push((track.samples.as_slice(), typical_level));
         let retained: Vec<_> = spans
             .into_iter()
             .filter(|segment| !weak_cross_track_pickup(segment, other, typical_level))
             .collect();
+        speech_ranges.extend(
+            detected
+                .iter()
+                .filter(|span| {
+                    retained.iter().any(|window| {
+                        window.start_timestamp_ms <= span.start_timestamp_ms
+                            && span.end_timestamp_ms <= window.end_timestamp_ms
+                    })
+                })
+                .map(|span| (span.start_timestamp_ms, span.end_timestamp_ms)),
+        );
         inputs.extend(
             speech_context_with_target(&retained, &track.samples, policy.context_target_ms)
                 .into_iter()
@@ -366,13 +386,8 @@ pub(crate) fn recognition_inputs(
             || start < 0.0
             || end <= start
             || !row.transcript.chars().any(char::is_alphanumeric)
-            || uncovered_ms(
-                start * 1000.0,
-                end * 1000.0,
-                inputs
-                    .iter()
-                    .map(|input| (input.start_timestamp_ms, input.end_timestamp_ms)),
-            ) < MIN_RECOVERY_MS
+            || uncovered_ms(start * 1000.0, end * 1000.0, speech_ranges.iter().copied())
+                < MIN_RECOVERY_MS
         {
             continue;
         }
@@ -387,18 +402,27 @@ pub(crate) fn recognition_inputs(
             });
         }
     }
-    // The recovery padding and joined context can reach a track input. The
-    // mix contains both tracks, so decode only the audio no input covers.
-    let taken: Vec<_> = inputs
+    // The recovery padding and joined context can reach track speech. The mix
+    // contains both tracks, so decode only the audio no track speech covers.
+    let input_ranges: Vec<_> = inputs
         .iter()
         .map(|input| (input.start_timestamp_ms, input.end_timestamp_ms))
         .collect();
     inputs.extend(
         speech_context_with_target(&missed, &mixed, policy.context_target_ms)
             .iter()
-            .flat_map(|segment| outside_inputs(segment, &taken, &mixed))
+            .flat_map(|segment| outside_inputs(segment, &speech_ranges, &mixed))
             // Clipping can leave slivers of padding next to a track input.
             .filter(|piece| piece.end_timestamp_ms - piece.start_timestamp_ms >= MIN_RECOVERY_MS)
+            // A piece inside a track's joined input is a pause of that track.
+            // Live row times are estimates, so decode it only if some track
+            // is audible there; recognizers invent text for silence.
+            .filter(|piece| {
+                !input_ranges
+                    .iter()
+                    .any(|(a, b)| *a < piece.end_timestamp_ms && *b > piece.start_timestamp_ms)
+                    || audible(piece, &track_levels)
+            })
             .map(RecognitionInput::mixed),
     );
     inputs.sort_by(|a, b| {
@@ -428,6 +452,18 @@ fn uncovered_ms(start_ms: f64, end_ms: f64, spans: impl IntoIterator<Item = (f64
         cursor = cursor.max(b);
     }
     free + (end_ms - cursor).max(0.0)
+}
+
+/// Some track reaches the level below which pickup counts as faint.
+fn audible(piece: &super::vad::SpeechSegment, tracks: &[(&[f32], f64)]) -> bool {
+    let from = (piece.start_timestamp_ms * 16.0).round() as usize;
+    let to = (piece.end_timestamp_ms * 16.0).round() as usize;
+    tracks.iter().any(|(samples, typical)| {
+        samples
+            .get(from..to.min(samples.len()))
+            .filter(|window| !window.is_empty())
+            .is_some_and(|window| rms(window) >= typical * FAINT_LEVEL)
+    })
 }
 
 /// Remove the time ranges in `taken` from a 16 kHz span of `audio`.
@@ -485,8 +521,24 @@ fn recognition_speech_segments_with_context(
     pause_ms: u32,
     known_speech: &[Transcript],
     context_target_ms: f64,
-    mut progress: impl FnMut(u32, usize) -> bool,
+    progress: impl FnMut(u32, usize) -> bool,
 ) -> Result<Vec<super::vad::SpeechSegment>> {
+    let (spans, converted) = detected_speech(decoded, pause_ms, known_speech, progress)?;
+    Ok(speech_context_with_target(
+        &spans,
+        &converted,
+        context_target_ms,
+    ))
+}
+
+/// Detected speech spans, without joined context, and the 16 kHz audio they
+/// were cut from.
+fn detected_speech(
+    decoded: &super::decoder::DecodedAudio,
+    pause_ms: u32,
+    known_speech: &[Transcript],
+    mut progress: impl FnMut(u32, usize) -> bool,
+) -> Result<(Vec<super::vad::SpeechSegment>, Vec<f32>)> {
     let converted = decoded.to_whisper_format();
     let mut spans = super::vad::batch_speech_segments(&converted, pause_ms, &mut progress)?;
     for row in known_speech {
@@ -540,11 +592,7 @@ fn recognition_speech_segments_with_context(
         }
         distinct.push(span);
     }
-    Ok(speech_context_with_target(
-        &distinct,
-        &converted,
-        context_target_ms,
-    ))
+    Ok((distinct, converted))
 }
 
 /// Rows without word times span their whole input. More words than the audio
@@ -1436,6 +1484,20 @@ mod tests {
             uncovered_ms(4000.0, 6000.0, [(3000.0, 5000.0), (4500.0, 6500.0)]),
             0.0
         );
+    }
+
+    #[test]
+    fn a_recovered_pause_needs_audio_on_some_track() {
+        let piece = speech_segment(1000.0, 2000.0, 16_000);
+        let speech: Vec<f32> = (0..48_000).map(|i| 0.1 * (i as f32 * 0.05).sin()).collect();
+        let quiet: Vec<f32> = speech.iter().map(|s| s * 0.05).collect();
+        assert!(audible(&piece, &[(&speech, 0.07)]));
+        assert!(
+            !audible(&piece, &[(&quiet, 0.07)]),
+            "noise-floor audio is a pause"
+        );
+        assert!(audible(&piece, &[(&quiet, 0.07), (&speech, 0.07)]));
+        assert!(!audible(&piece, &[(&[], 0.07)]));
     }
 
     #[test]
