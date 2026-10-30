@@ -10,10 +10,10 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use sqlx::Connection;
 use tauri::{AppHandle, Emitter, Manager, Runtime};
-use tokio::{io::AsyncWriteExt, process::Command};
+use tokio::{io::{AsyncReadExt, AsyncWriteExt}, process::Command};
 use uuid::Uuid;
 
-use crate::{audio::decoder::decode_audio_file, database::models::Transcript, state::AppState};
+use crate::{audio::ffmpeg::find_ffmpeg_path, database::models::Transcript, state::AppState};
 
 static CANCEL_REQUESTED: AtomicBool = AtomicBool::new(false);
 
@@ -407,8 +407,9 @@ async fn run_inner<R: Runtime>(
     }
 
     check_cancelled()?;
-    let audio = load_source_audio(&sidecar_request.sources).await?;
-    let profile_labels = recognize_final_profiles(app, &mut windows, &audio).await;
+    let profile_labels = recognize_final_profiles(
+        app, &mut windows, &sidecar_request.sources, &CANCEL_REQUESTED,
+    ).await?;
     let labels = speaker_labels(&windows, live_speakers, &profile_labels);
     // Speaker identification must not rewrite, remove, or renumber transcript text.
     let transcripts = label_existing_transcripts(live_transcripts, &windows, &labels);
@@ -508,9 +509,7 @@ pub(crate) async fn prepare_enhancement<R: Runtime>(
         quality_flags.push("overlap_detected".into());
     }
     check_cancelled_flag(cancelled)?;
-    let audio = load_source_audio(&request.sources).await?;
-    check_cancelled_flag(cancelled)?;
-    let names = recognize_final_profiles(app, &mut windows, &audio).await;
+    let names = recognize_final_profiles(app, &mut windows, &request.sources, cancelled).await?;
     check_cancelled_flag(cancelled)?;
     let labels = speaker_labels(&windows, &old_speakers, &names);
     Ok(EnhancementSpeakerAnalysis {
@@ -1089,8 +1088,9 @@ fn speaker_labels(
 async fn recognize_final_profiles<R: Runtime>(
     app: &AppHandle<R>,
     windows: &mut [FinalWindow],
-    audio: &HashMap<String, Vec<f32>>,
-) -> HashMap<String, String> {
+    sources: &[SidecarSource],
+    cancelled: &AtomicBool,
+) -> Result<HashMap<String, String>> {
     let state = app.state::<AppState>();
     let profiles = crate::database::repositories::speaker_profile::SpeakerProfilesRepository::list(
         state.speaker_store.pool(),
@@ -1101,18 +1101,20 @@ async fn recognize_final_profiles<R: Runtime>(
     .filter(|profile| profile.model_version == crate::diarization::models::EMBEDDING_MODEL_VERSION)
     .collect::<Vec<_>>();
     if profiles.is_empty() {
-        return HashMap::new();
+        return Ok(HashMap::new());
     }
     let Ok(model_path) = crate::diarization::models::embedding_model_path(app) else {
-        return HashMap::new();
+        return Ok(HashMap::new());
     };
     if crate::diarization::models::validate_model_file(&model_path).is_err() {
-        return HashMap::new();
+        return Ok(HashMap::new());
     }
     let Ok(mut extractor) = crate::diarization::embedding::EmbeddingExtractor::new(&model_path)
     else {
-        return HashMap::new();
+        return Ok(HashMap::new());
     };
+
+    let ffmpeg = find_ffmpeg_path().context("FFmpeg is needed to read voice samples")?;
 
     let speaker_ids: BTreeSet<String> = windows
         .iter()
@@ -1123,17 +1125,8 @@ async fn recognize_final_profiles<R: Runtime>(
     let mut names = HashMap::new();
     let mut matches_by_speaker = HashMap::new();
     for speaker_id in speaker_ids {
-        let mut samples = Vec::new();
-        for window in windows.iter().filter(|window| {
-            !window.is_overlap && window.speaker_id.as_deref() == Some(speaker_id.as_str())
-        }) {
-            if let Some(window_samples) = slice_window(audio, window) {
-                samples.extend(window_samples);
-                if samples.len() >= 30 * 16_000 {
-                    break;
-                }
-            }
-        }
+        let samples =
+            load_profile_samples(&ffmpeg, sources, windows, &speaker_id, cancelled).await?;
         if samples.len() < 16_000 {
             continue;
         }
@@ -1171,27 +1164,122 @@ async fn recognize_final_profiles<R: Runtime>(
             }
         }
     }
-    names
+    Ok(names)
 }
 
-async fn load_source_audio(sources: &[SidecarSource]) -> Result<HashMap<String, Vec<f32>>> {
-    let mut audio = HashMap::new();
-    for source in sources {
-        let path = PathBuf::from(&source.path);
-        let decoded = tokio::task::spawn_blocking(move || decode_audio_file(&path)).await??;
-        audio.insert(source.kind.clone(), decoded.to_whisper_format());
+const PROFILE_SAMPLE_RATE: usize = 16_000;
+const MAX_PROFILE_SAMPLES: usize = 30 * PROFILE_SAMPLE_RATE;
+
+async fn load_profile_samples(
+    ffmpeg: &Path,
+    sources: &[SidecarSource],
+    windows: &[FinalWindow],
+    speaker_id: &str,
+    cancelled: &AtomicBool,
+) -> Result<Vec<f32>> {
+    let mut samples = Vec::new();
+    for window in windows
+        .iter()
+        .filter(|window| !window.is_overlap && window.speaker_id.as_deref() == Some(speaker_id))
+    {
+        check_cancelled_flag(cancelled)?;
+        if samples.len() == MAX_PROFILE_SAMPLES {
+            break;
+        }
+        if !window.start.is_finite() || !window.end.is_finite() {
+            continue;
+        }
+        let start = window.start.max(0.0);
+        let count = (((window.end - start).max(0.0) * PROFILE_SAMPLE_RATE as f64) as usize)
+            .min(MAX_PROFILE_SAMPLES - samples.len());
+        if count == 0 {
+            continue;
+        }
+        let Some(source) = sources.iter().find(|source| source.kind == window.source) else {
+            continue;
+        };
+        samples.extend(
+            read_profile_window(ffmpeg, Path::new(&source.path), start, count, cancelled).await?,
+        );
     }
-    Ok(audio)
+    Ok(samples)
 }
 
-fn slice_window(audio: &HashMap<String, Vec<f32>>, window: &FinalWindow) -> Option<Vec<f32>> {
-    let samples = audio.get(&window.source)?;
-    let start = (window.start.max(0.0) * 16_000.0) as usize;
-    let end = (window.end.max(window.start) * 16_000.0) as usize;
-    if end <= start || start >= samples.len() {
-        return None;
+/// Seek to selected speech and retain at most the remaining 30-second budget.
+async fn read_profile_window(
+    ffmpeg: &Path,
+    path: &Path,
+    start: f64,
+    sample_count: usize,
+    cancelled: &AtomicBool,
+) -> Result<Vec<f32>> {
+    check_cancelled_flag(cancelled)?;
+    let mut child = Command::new(ffmpeg)
+        .args([
+            "-nostdin",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-ss",
+            &start.to_string(),
+            "-i",
+        ])
+        .arg(path)
+        .args([
+            "-t",
+            &(sample_count as f64 / PROFILE_SAMPLE_RATE as f64).to_string(),
+            "-map",
+            "0:a:0",
+            "-vn",
+            "-ac",
+            "1",
+            "-ar",
+            "16000",
+            "-f",
+            "f32le",
+            "pipe:1",
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .context("Could not start voice sample decoder")?;
+    let byte_limit = sample_count * std::mem::size_of::<f32>();
+    let mut stdout = child
+        .stdout
+        .take()
+        .context("Voice sample decoder has no output")?
+        .take((byte_limit + 4) as u64);
+    let read = async {
+        let mut bytes = Vec::new();
+        stdout.read_to_end(&mut bytes).await?;
+        if bytes.len() > byte_limit {
+            // Stop even if a decoder emits more than the requested duration.
+            child.kill().await?;
+            bytes.truncate(byte_limit);
+        } else if !child.wait().await?.success() {
+            return Err(anyhow!("Could not decode selected voice samples"));
+        }
+        if bytes.len() % 4 != 0 {
+            return Err(anyhow!("Voice sample output is incomplete"));
+        }
+        Ok(bytes
+            .chunks_exact(4)
+            .map(|bytes| f32::from_le_bytes(bytes.try_into().unwrap()).clamp(-1.0, 1.0))
+            .collect())
+    };
+    tokio::select! {
+        result = tokio::time::timeout(std::time::Duration::from_secs(60), read) => {
+            result.context("Voice sample decoding timed out")?
+        }
+        _ = async {
+            loop {
+                if cancelled.load(Ordering::SeqCst) { break; }
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+        } => Err(anyhow!("Final speaker refinement was cancelled")),
     }
-    Some(samples[start..end.min(samples.len())].to_vec())
 }
 
 fn assignment_coverage(windows: &[FinalWindow], live: &[Transcript]) -> f64 {
@@ -1779,6 +1867,191 @@ fn quality_flags_from_json(value: Option<&str>) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::parse_macos_version;
+
+    fn profile_test_ffmpeg() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("binaries")
+            .join(format!(
+                "ffmpeg-{}{}",
+                env!("MEETILY_TARGET_TRIPLE"),
+                if cfg!(windows) { ".exe" } else { "" },
+            ))
+    }
+
+    fn profile_test_wav(path: &Path, amplitude: i16) {
+        use std::io::Write;
+        let rate = PROFILE_SAMPLE_RATE as u32;
+        let data_size = 90 * rate * 2;
+        let mut file = std::fs::File::create(path).unwrap();
+        file.write_all(b"RIFF").unwrap();
+        file.write_all(&(36 + data_size).to_le_bytes()).unwrap();
+        file.write_all(b"WAVEfmt ").unwrap();
+        file.write_all(&16u32.to_le_bytes()).unwrap();
+        file.write_all(&1u16.to_le_bytes()).unwrap();
+        file.write_all(&1u16.to_le_bytes()).unwrap();
+        file.write_all(&rate.to_le_bytes()).unwrap();
+        file.write_all(&(rate * 2).to_le_bytes()).unwrap();
+        file.write_all(&2u16.to_le_bytes()).unwrap();
+        file.write_all(&16u16.to_le_bytes()).unwrap();
+        file.write_all(b"data").unwrap();
+        file.write_all(&data_size.to_le_bytes()).unwrap();
+        for second in 0..90 {
+            let value = if second < 60 {
+                amplitude
+            } else {
+                amplitude * 2
+            };
+            let samples = value.to_le_bytes().repeat(PROFILE_SAMPLE_RATE);
+            file.write_all(&samples).unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn profile_audio_seeks_into_a_long_track_and_stops_at_thirty_seconds() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("long recording.wav");
+        profile_test_wav(&path, 4096);
+        let sources = vec![SidecarSource {
+            kind: "mixed".into(),
+            path: path.to_string_lossy().into(),
+            forced_speaker_id: None,
+        }];
+        let windows = vec![speaker_window("alice", 60.0, 500.0)];
+        let samples = load_profile_samples(
+            &profile_test_ffmpeg(),
+            &sources,
+            &windows,
+            "alice",
+            &AtomicBool::new(false),
+        )
+        .await
+        .unwrap();
+        assert_eq!(samples.len(), MAX_PROFILE_SAMPLES);
+        assert!(samples.iter().all(|sample| (*sample - 0.25).abs() < 0.0001));
+    }
+
+    #[tokio::test]
+    async fn profile_audio_uses_each_source_and_excludes_other_and_overlap_speech() {
+        let directory = tempfile::tempdir().unwrap();
+        let microphone = directory.path().join("microphone.wav");
+        let system = directory.path().join("system.wav");
+        profile_test_wav(&microphone, 4096);
+        profile_test_wav(&system, 2048);
+        let sources = vec![
+            SidecarSource {
+                kind: "microphone".into(),
+                path: microphone.to_string_lossy().into(),
+                forced_speaker_id: None,
+            },
+            SidecarSource {
+                kind: "system".into(),
+                path: system.to_string_lossy().into(),
+                forced_speaker_id: None,
+            },
+        ];
+        let mut mic = speaker_window("alice", 60.0, 61.0);
+        mic.source = "microphone".into();
+        let mut sys = speaker_window("alice", 0.0, 1.0);
+        sys.source = "system".into();
+        let mut overlap = mic.clone();
+        overlap.is_overlap = true;
+        let windows = vec![speaker_window("bob", 0.0, 30.0), overlap, mic, sys];
+        let samples = load_profile_samples(
+            &profile_test_ffmpeg(),
+            &sources,
+            &windows,
+            "alice",
+            &AtomicBool::new(false),
+        )
+        .await
+        .unwrap();
+        assert_eq!(samples.len(), 2 * PROFILE_SAMPLE_RATE);
+        assert!((samples[0] - 0.25).abs() < 0.0001);
+        assert!((samples[PROFILE_SAMPLE_RATE] - 0.0625).abs() < 0.0001);
+    }
+
+    #[tokio::test]
+    async fn profile_audio_reports_decoder_failures_and_honors_pending_cancellation() {
+        let result = read_profile_window(
+            &profile_test_ffmpeg(),
+            Path::new("/missing/recording.wav"),
+            0.0,
+            16000,
+            &AtomicBool::new(false),
+        )
+        .await;
+        assert!(result.is_err());
+        let windows = vec![speaker_window("alice", 0.0, 1.0)];
+        let result = load_profile_samples(
+            &profile_test_ffmpeg(),
+            &[],
+            &windows,
+            "alice",
+            &AtomicBool::new(true),
+        )
+        .await;
+        assert!(result.unwrap_err().to_string().contains("cancelled"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn profile_audio_caps_output_even_if_a_decoder_ignores_the_duration() {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = tempfile::tempdir().unwrap();
+        let binary = directory.path().join("fake-decoder");
+        std::fs::write(
+            &binary,
+            "#!/bin/sh\nexec dd if=/dev/zero bs=4096 count=1000 2>/dev/null\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let samples = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            read_profile_window(
+                &binary,
+                Path::new("unused"),
+                0.0,
+                16000,
+                &AtomicBool::new(false),
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(samples.len(), 16000);
+        assert!(samples.iter().all(|sample| *sample == 0.0));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cancelling_profile_audio_does_not_wait_for_the_decoder() {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = tempfile::tempdir().unwrap();
+        let binary = directory.path().join("fake-decoder");
+        let started = directory.path().join("fake-decoder.started");
+        std::fs::write(
+            &binary,
+            "#!/bin/sh\n: > \"$0.started\"\nexec /bin/sleep 30\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let cancelled = AtomicBool::new(false);
+        let cancel = async {
+            while !started.exists() {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+            cancelled.store(true, Ordering::SeqCst);
+        };
+        let (result, ()) = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            tokio::join!(
+                read_profile_window(&binary, Path::new("unused"), 0.0, 16000, &cancelled),
+                cancel
+            )
+        })
+        .await
+        .expect("cancellation must not wait for the 30-second decoder");
+        assert!(result.unwrap_err().to_string().contains("cancelled"));
+    }
 
     #[test]
     fn microphone_stems_do_not_imply_one_local_speaker() {
