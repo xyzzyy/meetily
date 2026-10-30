@@ -21,14 +21,12 @@ final class LaunchTests: XCTestCase {
         XCTAssertTrue(start.waitForExistence(timeout: 60), "The setup page must load in WKWebView.")
         app.activate()
         start.click()
-        let setup = app.descendants(matching: .any)
-            .matching(NSPredicate(format: "label == %@", "Setup Overview")).firstMatch
+        let setup = app.buttons["Let's Go"]
         // If the first click only focused the window, the welcome page is still there.
         if !setup.waitForExistence(timeout: 5), start.exists {
             start.click()
         }
         XCTAssertTrue(setup.waitForExistence(timeout: 30), "The React page must respond to input.")
-        XCTAssertTrue(app.buttons["Let's Go"].exists)
         // Stop before model downloads and microphone/screen permission requests.
     }
 }

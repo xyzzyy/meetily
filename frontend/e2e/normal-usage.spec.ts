@@ -66,6 +66,7 @@ test('normal session: record, pause, save, summarize, edit, reopen, search, and 
     await page.getByRole('button', { name: 'Delete meeting', exact: true }).click();
     await expect(page.getByRole('heading', { name: 'Confirm Delete' })).toBeVisible();
     await page.getByRole('button', { name: 'Delete', exact: true }).click();
+    await expect(page).toHaveURL('https://meetily.test/');
     await expect(page.getByText('Friday planning', { exact: true })).toHaveCount(0);
     expect((await readDesktopState(page)).meeting).toBeNull();
     await page.reload();

@@ -26,10 +26,13 @@ export async function installUsageDesktop(page: Page) {
     const store = new Map<string, unknown>([
       ['analyticsOptedIn', false], ['analyticsDefaultOffMigrationV1', true],
     ]);
-    const metadata = () => ({
-      id: meetingId, title: state.meeting.title, folder_path: null,
-      created_at: '2026-10-28T10:00:00Z', updated_at: '2026-10-28T10:00:00Z',
-    });
+    const metadata = () => {
+      if (!state.meeting) throw new Error(`Meeting not found: ${meetingId}`);
+      return {
+        id: meetingId, title: state.meeting.title, folder_path: null,
+        created_at: '2026-10-28T10:00:00Z', updated_at: '2026-10-28T10:00:00Z',
+      };
+    };
     const fixture = {
       emitTranscript() {
         if (!state.recording || state.paused) throw new Error('Recording must be active.');
@@ -128,7 +131,7 @@ export async function installUsageDesktop(page: Page) {
             case 'api_get_meeting_metadata': return metadata();
             case 'api_get_meeting': return { ...metadata(), transcripts: state.meeting.transcripts };
             case 'api_get_meeting_transcripts': {
-              const transcripts = state.meeting.transcripts;
+              const transcripts = state.meeting?.transcripts ?? [];
               const offset = args.offset ?? 0;
               const limit = args.limit ?? transcripts.length;
               return {
@@ -153,7 +156,9 @@ export async function installUsageDesktop(page: Page) {
               start: state.summary ? 'fixture-summary-process' : null, end: null, error: null,
             };
             case 'api_save_meeting_summary': state.summary = args.summary; save(); return null;
-            case 'api_save_meeting_title': state.meeting.title = args.title; save(); return null;
+            case 'api_save_meeting_title':
+              if (!state.meeting) throw new Error(`No meeting found with id ${meetingId}`);
+              state.meeting.title = args.title; save(); return null;
             case 'api_search_transcripts': return state.meeting && transcriptText.includes(args.query)
               ? [{ id: meetingId, title: state.meeting.title, matchContext: transcriptText }] : [];
             case 'api_delete_meeting': state.meeting = null; state.summary = null; save(); return null;
