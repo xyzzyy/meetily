@@ -27,6 +27,7 @@ import { ImportDialogProvider } from '@/contexts/ImportDialogContext'
 import { isAudioExtension, getAudioFormatsDisplayList } from '@/constants/audioFormats'
 import { ThemeProvider, useTheme } from '@/contexts/ThemeContext'
 import { themeInitScript } from '@/lib/theme'
+import { TrayNavigation } from '@/components/TrayNavigation'
 
 
 const sourceSans3 = Source_Sans_3({
@@ -254,6 +255,7 @@ export default function RootLayout({
                         <SidebarProvider>
                           <TooltipProvider>
                             <RecordingPostProcessingProvider>
+                              <TrayNavigation />
                               <ImportDialogProvider onOpen={handleOpenImportDialog}>
                                 {/* Download progress toast provider - listens for background downloads */}
                                 <DownloadProgressToastProvider />

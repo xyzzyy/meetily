@@ -23,6 +23,28 @@ interface RecordingStopSession {
   transcripts?: Transcript[];
   folderPath?: string | null;
   meetingName?: string | null;
+  saveToken?: string;
+}
+
+async function completeRecordingSave(saveToken: string): Promise<void> {
+  const toastId = `recording-save-status-${saveToken}`;
+  try {
+    await invoke('complete_recording_save', { saveToken });
+    toast.dismiss(toastId);
+  } catch (error) {
+    console.error('Could not release recording save guard:', error);
+    toast.error('Could not finish the recording save status', {
+      id: toastId,
+      duration: Infinity,
+      dismissible: false,
+      closeButton: false,
+      description: 'Quit is still blocked. Retry to update the save status.',
+      action: { label: 'Retry', onClick: event => {
+        event.preventDefault();
+        void completeRecordingSave(saveToken);
+      } },
+    });
+  }
 }
 
 /** Merge transcript snapshots by sequence ID. Later copies win; ids stay stable. */
@@ -210,7 +232,8 @@ export function useRecordingStop(
         const unlisten = await listen<RecordingStoppedPayload>('recording-stopped', async (event) => {
           // Create promise that resolves when sessionStorage is set (prevents race condition)
           recordingStoppedDataRef.current = (async () => {
-            const { folder_path, meeting_name, save_error, transcript_warning } = event.payload;
+            const { folder_path, meeting_name, save_error, transcript_warning, save_token } = event.payload;
+            stopSessionRef.current.saveToken = save_token;
             stopSessionRef.current.saveError = save_error ?? null;
             stopSessionRef.current.transcriptWarning = transcript_warning ?? null;
             stopSessionRef.current.folderPath = folder_path ?? null;
@@ -593,6 +616,8 @@ export function useRecordingStop(
       // isRecording already set to false at function start
       if (isMountedRef.current) setIsRecordingDisabled(false);
     } finally {
+      // Release only this stop's token, after SQLite save or reported failure.
+      if (stopSession.saveToken) await completeRecordingSave(stopSession.saveToken);
       unlistenComplete?.();
       // Navigation can unmount the page while the shared recording state lives on.
       if (!isMountedRef.current && isCurrent() && savedToSQLite) {

@@ -18,6 +18,8 @@ async function loadHook({
   deferNavigation = false,
   deferDelayMs,
   loadStored = async () => [],
+  acknowledge = async () => {},
+  trayNavigation = false,
 } = {}) {
   const listeners = new Map();
   const statuses = [];
@@ -33,8 +35,14 @@ async function loadHook({
     toasts.push(args);
     activeToasts.set(args[1]?.id ?? Symbol('toast'), args);
   };
-  const calls = { save: 0, clear: 0, markSaved: 0, flush: 0, poll: 0, transcriptionSuccess: 0, meetingsCompleted: 0, markedIds: [], savedMeetings: [], recoveryReads: [], refreshes: 0, navigation: [], recording: [], disabled: [], active: [] };
+  const calls = { saveAcks: [], save: 0, clear: 0, markSaved: 0, flush: 0, poll: 0, transcriptionSuccess: 0, meetingsCompleted: 0, markedIds: [], savedMeetings: [], recoveryReads: [], refreshes: 0, navigation: [], recording: [], disabled: [], active: [] };
   const storage = new Map([['indexeddb_current_meeting_id', 'old-recording']]);
+  let pathname = '/';
+  const window = new EventTarget();
+  window.location = { assign: () => { throw new Error('Tray navigation must not reload the save context'); } };
+  let directStarts = 0;
+  window.addEventListener('start-recording-from-sidebar', () => directStarts++);
+  const router = { push: path => { calls.navigation.push(path); pathname = path; } };
   const recordingStatus = Object.fromEntries([
     'IDLE', 'STOPPING', 'PROCESSING_TRANSCRIPTS', 'SAVING', 'ERROR', 'COMPLETED', 'RECORDING',
   ].map(value => [value, value]));
@@ -44,7 +52,7 @@ async function loadHook({
   };
   const require = (name) => {
     if (name === 'react') return React;
-    if (name === 'next/navigation') return { useRouter: () => ({ push: path => calls.navigation.push(path) }) };
+    if (name === 'next/navigation') return { useRouter: () => router, usePathname: () => pathname };
     if (name === '@tauri-apps/api/event') return { listen: (event, callback) => {
       subscriptions.set(event, (subscriptions.get(event) || 0) + 1);
       listeners.set(event, callback);
@@ -92,7 +100,13 @@ async function loadHook({
     if (name === '@/lib/summary-language-preferences') return {
       applyPinnedSummaryLanguageToMeeting: async () => true,
     };
-    if (name === '@tauri-apps/api/core') return { invoke: async () => ({ enabled: false }) };
+    if (name === '@tauri-apps/api/core') return { invoke: async (command, args) => {
+      if (command === 'complete_recording_save') {
+        calls.saveAcks.push(args.saveToken);
+        return acknowledge(args.saveToken);
+      }
+      return { enabled: false };
+    } };
     if (name === '@/lib/analytics') return { default: {
       trackTranscriptionSuccess: () => calls.transcriptionSuccess++,
       trackPageView() {}, getMeetingsCountToday: async () => 1,
@@ -109,8 +123,8 @@ async function loadHook({
   const source = fs.readFileSync(new URL('../../src/hooks/useRecordingStop.ts', import.meta.url), 'utf8');
   const compiled = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS } });
   const module = { exports: {} };
-  vm.runInNewContext(compiled.outputText, {
-    module, exports: module.exports, require, window: {}, console: { log() {}, warn() {}, error() {} },
+  const sandbox = vm.createContext({
+    module, exports: module.exports, require, window, CustomEvent, console: { log() {}, warn() {}, error() {} },
     sessionStorage: {
       setItem: (key, value) => storage.set(key, value),
       getItem: key => storage.get(key), removeItem: key => storage.delete(key),
@@ -121,6 +135,18 @@ async function loadHook({
       else fn();
     },
   });
+  vm.runInContext(compiled.outputText, sandbox);
+  let TrayNavigation;
+  if (trayNavigation) {
+    const traySource = fs.readFileSync(new URL('../../src/components/TrayNavigation.tsx', import.meta.url), 'utf8');
+    const trayModule = { exports: {} };
+    const trayCompiled = ts.transpileModule(traySource, { compilerOptions: { module: ts.ModuleKind.CommonJS } });
+    vm.runInNewContext(trayCompiled.outputText, {
+      module: trayModule, exports: trayModule.exports, require, window, CustomEvent,
+      sessionStorage: sandbox.sessionStorage,
+    });
+    TrayNavigation = trayModule.exports.TrayNavigation;
+  }
   let hook;
   let renderer;
   function View() {
@@ -130,11 +156,27 @@ async function loadHook({
     );
     return null;
   }
-  await act(async () => { renderer = create(React.createElement(View)); });
+  const view = () => trayNavigation
+    ? React.createElement(React.Fragment, null,
+      React.createElement(TrayNavigation), pathname === '/' ? React.createElement(View) : null)
+    : React.createElement(View);
+  await act(async () => { renderer = create(view()); });
   return {
     get hook() { return hook; },
     listeners, statuses, toasts, activeToasts, calls, storage, transcriptsRef, navigationTimers, delayedWaits, context, subscriptions, removals, pendingRegistrations,
-    render: () => act(async () => { renderer.update(React.createElement(View)); }),
+    get directStarts() { return directStarts; },
+    runTrayAction: action => act(async () => {
+      // Execute the actual native eval scripts, including the navigation bridge.
+      const native = fs.readFileSync(new URL('../../src-tauri/src/tray.rs', import.meta.url), 'utf8');
+      const section = action === 'settings'
+        ? native.slice(native.indexOf('"settings" => {'), native.indexOf('"check_updates" =>'))
+        : native.slice(native.indexOf('// Immediately show starting state'), native.indexOf('fn pause_recording_handler'));
+      const scripts = [...section.matchAll(/window\.eval\(("(?:[^"\\]|\\.)*")\)/g)];
+      assert.ok(scripts.length > 0, 'native tray action must reach the webview');
+      for (const [, literal] of scripts) vm.runInContext(JSON.parse(literal), sandbox);
+      renderer.update(view());
+    }),
+    render: () => act(async () => { renderer.update(view()); }),
     unmount: () => act(async () => { renderer.unmount(); }),
   };
 }
@@ -385,20 +427,23 @@ test('an older stop cannot block or release the newer stop guard', async t => {
   const finishSaves = [];
   const state = await loadHook({ allowSuccess: true, save: () => new Promise(resolve => finishSaves.push(resolve)) });
   t.after(state.unmount);
-  await state.listeners.get('recording-stopped')({ payload: { transcript_warning: transcriptWarning } });
+  await state.listeners.get('recording-stopped')({ payload: { transcript_warning: transcriptWarning, save_token: 'old-token' } });
   const first = state.hook.handleRecordingStop(true);
   await new Promise(setImmediate);
   state.listeners.get('recording-started')({ payload: {} });
-  await state.listeners.get('recording-stopped')({ payload: {} });
+  await state.listeners.get('recording-stopped')({ payload: { save_token: 'new-token' } });
   const second = state.hook.handleRecordingStop(true);
   await new Promise(setImmediate);
   assert.equal(finishSaves.length, 2);
+  assert.deepEqual(state.calls.saveAcks, []);
   finishSaves[0]({ meeting_id: 'first-meeting' });
   await first;
+  assert.deepEqual(state.calls.saveAcks, ['old-token']);
   await state.hook.handleRecordingStop(true);
   assert.equal(state.calls.save, 2);
   finishSaves[1]({ meeting_id: 'second-meeting' });
   await second;
+  assert.deepEqual(state.calls.saveAcks, ['old-token', 'new-token']);
   assert.equal(state.calls.transcriptionSuccess, 1);
   assert.equal(state.activeToasts.has('recording-transcript-incomplete'), false);
 });
@@ -723,4 +768,82 @@ test('a recovery read failure keeps the original transcript snapshot for saving'
   await stopping;
   assert.equal(state.calls.save, 1);
   assert.equal(state.calls.savedMeetings[0][1][0].text, 'Keep this transcript');
+});
+
+
+test('a reported save failure releases only its own exit token after keeping recovery data', async t => {
+  const state = await loadHook({ save: async () => { throw new Error('Database unavailable'); } });
+  t.after(state.unmount);
+  await state.listeners.get('recording-stopped')({ payload: { save_token: 'failed-token' } });
+  assert.deepEqual(state.calls.saveAcks, []);
+  await state.hook.handleRecordingStop(true);
+  assert.deepEqual(state.calls.saveAcks, ['failed-token']);
+  assert.equal(state.calls.markSaved, 0);
+  assert.equal(state.calls.clear, 0);
+  assert.equal(state.statuses.at(-1).status, 'ERROR');
+});
+
+test('a failed save acknowledgement keeps a persistent retry until it succeeds', async t => {
+  let attempts = 0;
+  const state = await loadHook({ allowSuccess: true, acknowledge: async () => {
+    if (++attempts === 1) throw new Error('Temporary IPC failure');
+  } });
+  t.after(state.unmount);
+  await state.listeners.get('recording-stopped')({ payload: { save_token: 'retry-token' } });
+  await state.hook.handleRecordingStop(true);
+  const options = state.toasts.find(([title]) => title === 'Could not finish the recording save status')[1];
+  assert.equal(options.duration, Infinity);
+  assert.equal(options.dismissible, false);
+  assert.equal(options.closeButton, false);
+  assert.equal(state.activeToasts.has(options.id), true);
+  options.action.onClick({ preventDefault() {} });
+  await new Promise(setImmediate);
+  assert.equal(attempts, 2);
+  assert.equal(state.activeToasts.has(options.id), false);
+});
+
+for (const action of ['settings', 'start']) {
+  test(`tray ${action} during a pending save keeps its handler and acknowledges its token`, async t => {
+    let finishPoll;
+    const state = await loadHook({
+      trayNavigation: true,
+      allowSuccess: true,
+      poll: () => new Promise(resolve => { finishPoll = resolve; }),
+    });
+    t.after(state.unmount);
+    await state.listeners.get('recording-stopped')({ payload: { save_token: 'pending-token' } });
+    const stopping = state.hook.handleRecordingStop(true);
+    await new Promise(setImmediate);
+    assert.equal(typeof finishPoll, 'function');
+    await state.runTrayAction(action);
+    assert.deepEqual(state.calls.saveAcks, []);
+    if (action === 'settings') assert.equal(state.calls.navigation.at(-1), '/settings');
+    else assert.equal(state.directStarts, 1, 'Start on the home page reaches the existing recording control');
+    finishPoll({ is_processing: false, chunks_in_queue: 0 });
+    await stopping;
+    assert.equal(state.calls.save, 1);
+    assert.deepEqual(state.calls.saveAcks, ['pending-token']);
+  });
+}
+
+test('tray Settings then Start preserves the save-status Retry after an acknowledgement failure', async t => {
+  let attempts = 0;
+  const state = await loadHook({ trayNavigation: true, allowSuccess: true, acknowledge: async () => {
+    if (++attempts === 1) throw new Error('Temporary IPC failure');
+  } });
+  t.after(state.unmount);
+  await state.listeners.get('recording-stopped')({ payload: { save_token: 'retry-token' } });
+  await state.hook.handleRecordingStop(true);
+  const options = state.toasts.find(([title]) => title === 'Could not finish the recording save status')[1];
+  await state.runTrayAction('settings');
+  assert.equal(state.activeToasts.has(options.id), true);
+  await state.runTrayAction('start');
+  assert.equal(state.calls.navigation.at(-1), '/');
+  assert.equal(state.storage.get('autoStartRecording'), 'true', 'Start from Settings is handed to the home page');
+  assert.equal(state.activeToasts.has(options.id), true);
+  options.action.onClick({ preventDefault() {} });
+  await new Promise(setImmediate);
+  assert.equal(attempts, 2);
+  assert.deepEqual(state.calls.saveAcks, ['retry-token', 'retry-token']);
+  assert.equal(state.activeToasts.has(options.id), false);
 });
