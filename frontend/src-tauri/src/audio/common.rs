@@ -50,7 +50,7 @@ impl BatchEngine {
                 max_input_samples: 60 * 16_000,
             },
             // Native Nemotron supplies word times and bounds its own requests
-            // to five minutes, with shorter retries if alignment fails.
+            // to one minute, with shorter retries if alignment fails.
             Self::Nemotron => EnhancementInputPolicy {
                 context_target_ms: 8_000.0,
                 max_input_samples: 300 * 16_000,
