@@ -158,7 +158,10 @@ fn macos_version_at_least(major: u32, minor: u32) -> bool {
 }
 
 /// Parse `sw_vers -productVersion` output such as `14.4.1` or `15`.
-#[cfg_attr(not(all(target_os = "macos", target_arch = "aarch64")), allow(dead_code))]
+#[cfg_attr(
+    not(all(target_os = "macos", target_arch = "aarch64")),
+    allow(dead_code)
+)]
 fn parse_macos_version(text: &str) -> Option<(u32, u32)> {
     let mut parts = text.trim().split('.');
     let major = parts.next()?.parse().ok()?;
@@ -521,15 +524,16 @@ pub(crate) async fn prepare_enhancement<R: Runtime>(
 }
 
 impl EnhancementSpeakerAnalysis {
-    pub(crate) fn speaker_key(&self, start: f64, end: f64) -> Option<String> {
+    pub(crate) fn speaker_key(&self, start: f64, end: f64, source: Option<&str>) -> Option<String> {
         self.windows
             .iter()
+            .filter(|window| source.map_or(true, |source| window.source == source))
             .filter_map(|window| {
                 let overlap = (end.min(window.end) - start.max(window.start)).max(0.0);
                 (overlap > 0.0).then(|| {
                     (
                         overlap,
-                        if window.is_overlap {
+                        if window.is_overlap && (source.is_none() || window.speaker_id.is_none()) {
                             format!("overlap:{}", window.candidate_speaker_ids.join(","))
                         } else {
                             window.speaker_id.clone().unwrap_or_default()
@@ -565,8 +569,80 @@ impl EnhancementSpeakerAnalysis {
         cuts
     }
 
+    /// The recognizer knows which capture track supplied each row. Do not
+    /// assign a system row to a microphone speaker at an overlapping time.
+    pub(crate) fn label_with_sources(
+        self,
+        rows: &[Transcript],
+        sources: &[Option<String>],
+    ) -> Result<EnhancementSpeakerLabels> {
+        if rows.len() != sources.len() {
+            return Err(anyhow!("Transcript source metadata is incomplete"));
+        }
+        if sources.iter().all(Option::is_none) {
+            return self.label(rows);
+        }
+        let mut transcripts = Vec::new();
+        let mut covered = 0.0;
+        let mut duration = 0.0;
+        for (row, source) in rows.iter().zip(sources) {
+            let windows: Vec<_> = self
+                .windows
+                .iter()
+                .filter(|w| source.as_deref().map_or(true, |s| w.source == s))
+                .cloned()
+                .collect();
+            let source_overlap = source.is_some()
+                && windows.iter().any(|w| {
+                    w.is_overlap
+                        && w.end > row.audio_start_time.unwrap_or(0.0)
+                        && w.start < row.audio_end_time.unwrap_or(0.0)
+                });
+            let windows: Vec<_> = windows
+                .into_iter()
+                .map(|mut w| {
+                    // A different capture input can overlap this input without
+                    // making the isolated text ambiguous. Within-input overlap
+                    // still has no single speaker ID and remains ambiguous.
+                    if source.is_some() && w.speaker_id.is_some() {
+                        w.is_overlap = false;
+                        w.candidate_speaker_ids = w.speaker_id.iter().cloned().collect();
+                    }
+                    w
+                })
+                .collect();
+            let seconds =
+                (row.audio_end_time.unwrap_or(0.0) - row.audio_start_time.unwrap_or(0.0)).max(0.0);
+            covered += enhancement_coverage(&windows, std::slice::from_ref(row)) * seconds;
+            duration += seconds;
+            let mut labeled =
+                label_existing_transcripts(std::slice::from_ref(row), &windows, &self.labels);
+            if source_overlap {
+                // Keep the existing restriction on automatic voice enrollment.
+                for label in &mut labeled {
+                    label.confidence = 0.0;
+                }
+            }
+            transcripts.extend(labeled);
+        }
+        let coverage = if duration > 0.0 {
+            covered / duration
+        } else {
+            0.0
+        };
+        if !passes_quality_gates(coverage, 1.0) {
+            return Err(anyhow!("Speaker analysis covered {:.1}% of the new transcript; at least 75% is required. The saved transcript was kept.",coverage*100.0));
+        }
+        Ok(EnhancementSpeakerLabels {
+            windows: self.windows,
+            transcripts,
+            quality_flags: self.quality_flags,
+            coverage,
+        })
+    }
+
     pub(crate) fn label(self, rows: &[Transcript]) -> Result<EnhancementSpeakerLabels> {
-        let coverage = assignment_coverage(&self.windows, rows);
+        let coverage = enhancement_coverage(&self.windows, rows);
         if !passes_quality_gates(coverage, 1.0) {
             return Err(anyhow!("Speaker analysis covered {:.1}% of the new transcript; at least 75% is required. The saved transcript was kept.", coverage * 100.0));
         }
@@ -587,9 +663,14 @@ impl EnhancementSpeakerLabels {
         meeting_id: &str,
     ) -> Result<()> {
         let run_id = format!("diarization-run-{}", Uuid::new_v4());
-        sqlx::query("INSERT INTO main.diarization_runs (id, meeting_id, status, method, progress)
-            VALUES (?, ?, 'prepared', 'fluid_audio_offline_0.12.4', 95)")
-            .bind(&run_id).bind(meeting_id).execute(&mut *connection).await?;
+        sqlx::query(
+            "INSERT INTO main.diarization_runs (id, meeting_id, status, method, progress)
+            VALUES (?, ?, 'prepared', 'fluid_audio_offline_0.12.4', 95)",
+        )
+        .bind(&run_id)
+        .bind(meeting_id)
+        .execute(&mut *connection)
+        .await?;
         write_speaker_rows(
             connection,
             "main",
@@ -788,7 +869,9 @@ async fn invoke_sidecar_with_cancellation(
     request: &SidecarRequest,
     cancelled: &AtomicBool,
 ) -> Result<SidecarResponse> {
-    if request.action == "process" { check_cancelled_flag(cancelled)?; }
+    if request.action == "process" {
+        check_cancelled_flag(cancelled)?;
+    }
     let binary = resolve_sidecar_binary()?;
     invoke_sidecar_process(&binary, request, cancelled).await
 }
@@ -798,7 +881,9 @@ async fn invoke_sidecar_process(
     request: &SidecarRequest,
     cancelled: &AtomicBool,
 ) -> Result<SidecarResponse> {
-    if request.action == "process" { check_cancelled_flag(cancelled)?; }
+    if request.action == "process" {
+        check_cancelled_flag(cancelled)?;
+    }
     let mut child = Command::new(binary)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -1195,6 +1280,27 @@ fn slice_window(audio: &HashMap<String, Vec<f32>>, window: &FinalWindow) -> Opti
 }
 
 fn assignment_coverage(windows: &[FinalWindow], live: &[Transcript]) -> f64 {
+    coverage_bridging_pauses(windows, live, 0.0)
+}
+
+/// Enhance joins speech across short pauses so each recognizer input keeps
+/// its context. Rows without word times then span those pauses, and speaker
+/// analysis correctly finds no voice there. Count a pause no longer than
+/// `bridge_seconds` between two analyzed ranges as covered. Uncovered speech
+/// at a row's edges and longer holes still lower the coverage.
+fn enhancement_coverage(windows: &[FinalWindow], rows: &[Transcript]) -> f64 {
+    coverage_bridging_pauses(
+        windows,
+        rows,
+        crate::audio::enhancement::CONTEXT_MAX_GAP_MS / 1000.0,
+    )
+}
+
+fn coverage_bridging_pauses(
+    windows: &[FinalWindow],
+    live: &[Transcript],
+    bridge_seconds: f64,
+) -> f64 {
     if live.is_empty() {
         return (!windows.is_empty()) as u8 as f64;
     }
@@ -1224,9 +1330,16 @@ fn assignment_coverage(windows: &[FinalWindow], live: &[Transcript]) -> f64 {
             ranges.sort_by(|a, b| a.0.total_cmp(&b.0));
             let mut covered = 0.0;
             let mut cursor = start;
+            let mut analyzed = false;
             for (range_start, range_end) in ranges {
-                covered += (range_end - cursor.max(range_start)).max(0.0);
+                let from = if analyzed && range_start - cursor <= bridge_seconds {
+                    cursor
+                } else {
+                    cursor.max(range_start)
+                };
+                covered += (range_end - from).max(0.0);
                 cursor = cursor.max(range_end);
+                analyzed = true;
             }
             covered
         })
@@ -1789,7 +1902,9 @@ mod tests {
         std::fs::write(stems.join("system.flac"), []).unwrap();
         let (sources, _) = discover_sources(directory.path()).unwrap();
         assert_eq!(sources.len(), 2);
-        assert!(sources.iter().all(|source| source.forced_speaker_id.is_none()));
+        assert!(sources
+            .iter()
+            .all(|source| source.forced_speaker_id.is_none()));
     }
 
     #[test]
@@ -1843,10 +1958,19 @@ mod tests {
 
     #[test]
     fn enhancement_checks_fresh_rows_instead_of_old_chunk_times() {
-        let windows = vec![speaker_window("a", 1.0, 2.0), speaker_window("b", 15.0, 16.0)];
+        let windows = vec![
+            speaker_window("a", 1.0, 2.0),
+            speaker_window("b", 15.0, 16.0),
+        ];
         let old = vec![live_row("old", 0.0, 88.0)];
-        assert!(!passes_quality_gates(assignment_coverage(&windows, &old), 1.0));
-        let fresh = vec![live_row("fresh-a", 1.25, 1.41), live_row("fresh-b", 15.5, 15.66)];
+        assert!(!passes_quality_gates(
+            assignment_coverage(&windows, &old),
+            1.0
+        ));
+        let fresh = vec![
+            live_row("fresh-a", 1.25, 1.41),
+            live_row("fresh-b", 15.5, 15.66),
+        ];
         let analysis = EnhancementSpeakerAnalysis {
             windows,
             labels: HashMap::from([("a".into(), "Alice".into()), ("b".into(), "Bob".into())]),
@@ -2061,12 +2185,23 @@ mod tests {
     }
 
     fn enhancement_analysis(intervals: &[SidecarInterval]) -> EnhancementSpeakerAnalysis {
-        EnhancementSpeakerAnalysis { windows: rebuild_windows(intervals), labels: HashMap::new(), quality_flags: vec![] }
+        EnhancementSpeakerAnalysis {
+            windows: rebuild_windows(intervals),
+            labels: HashMap::new(),
+            quality_flags: vec![],
+        }
     }
 
     fn source_interval(source: &str, speaker: &str, start: f64, end: f64) -> SidecarInterval {
-        SidecarInterval { source: source.into(), speaker_id: speaker.into(), start, end,
-            confidence: 1.0, is_overlap: false, candidate_speaker_ids: vec![] }
+        SidecarInterval {
+            source: source.into(),
+            speaker_id: speaker.into(),
+            start,
+            end,
+            confidence: 1.0,
+            is_overlap: false,
+            candidate_speaker_ids: vec![],
+        }
     }
 
     #[test]
@@ -2075,7 +2210,10 @@ mod tests {
             source_interval("microphone", "you", 0.0, 2.0),
             source_interval("system", "remote", 1.0, 3.0),
         ]);
-        assert!(analysis.turn_boundaries().is_empty(), "overlap is not a turn at 1.5 seconds");
+        assert!(
+            analysis.turn_boundaries().is_empty(),
+            "overlap is not a turn at 1.5 seconds"
+        );
     }
 
     #[test]
@@ -2098,8 +2236,13 @@ mod tests {
     }
 
     fn process_request() -> SidecarRequest {
-        SidecarRequest { action: "process".into(), meeting_id: "test".into(),
-            model_cache_path: "unused".into(), output_path: "unused".into(), sources: vec![] }
+        SidecarRequest {
+            action: "process".into(),
+            meeting_id: "test".into(),
+            model_cache_path: "unused".into(),
+            output_path: "unused".into(),
+            sources: vec![],
+        }
     }
 
     #[tokio::test]
@@ -2117,7 +2260,11 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let binary = directory.path().join("fake-sidecar");
         let started = directory.path().join("fake-sidecar.started");
-        std::fs::write(&binary, "#!/bin/sh\ncat > /dev/null\n: > \"$0.started\"\nexec /bin/sleep 30\n").unwrap();
+        std::fs::write(
+            &binary,
+            "#!/bin/sh\ncat > /dev/null\n: > \"$0.started\"\nexec /bin/sleep 30\n",
+        )
+        .unwrap();
         std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700)).unwrap();
         let cancelled = AtomicBool::new(false);
         let request = process_request();
@@ -2128,8 +2275,13 @@ mod tests {
             cancelled.store(true, Ordering::SeqCst);
         };
         let (result, ()) = tokio::time::timeout(std::time::Duration::from_secs(5), async {
-            tokio::join!(invoke_sidecar_process(&binary, &request, &cancelled), cancel)
-        }).await.expect("cancellation must not wait for the 30-second helper");
+            tokio::join!(
+                invoke_sidecar_process(&binary, &request, &cancelled),
+                cancel
+            )
+        })
+        .await
+        .expect("cancellation must not wait for the 30-second helper");
         assert!(result.unwrap_err().to_string().contains("cancelled"));
         assert!(cancelled.load(Ordering::SeqCst));
     }
@@ -2469,6 +2621,119 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(status, "needs_review");
+    }
+
+    #[test]
+    fn token_rows_ignore_turns_on_the_other_capture_track() {
+        let analysis = EnhancementSpeakerAnalysis {
+            windows: rebuild_windows(&[
+                source_interval("system", "remote", 0.0, 4.0),
+                source_interval("microphone", "local-a", 0.0, 2.0),
+                source_interval("microphone", "local-b", 2.0, 4.0),
+            ]),
+            labels: HashMap::new(),
+            quality_flags: vec![],
+        };
+        assert_eq!(
+            analysis.speaker_key(0.5, 1.0, Some("system")),
+            Some("remote".into())
+        );
+        assert_eq!(
+            analysis.speaker_key(2.5, 3.0, Some("system")),
+            Some("remote".into())
+        );
+        assert_eq!(
+            analysis.speaker_key(0.5, 1.0, Some("microphone")),
+            Some("local-a".into())
+        );
+        assert_eq!(
+            analysis.speaker_key(2.5, 3.0, Some("microphone")),
+            Some("local-b".into())
+        );
+    }
+
+    #[test]
+    fn enhancement_coverage_counts_joined_pauses_but_not_missing_speech() {
+        let analysis = |intervals: &[SidecarInterval]| EnhancementSpeakerAnalysis {
+            windows: rebuild_windows(intervals),
+            labels: HashMap::new(),
+            quality_flags: vec![],
+        };
+        // Recognition joined speech at 0-4 s and 8-12 s into one 12 s row.
+        let row = vec![live_row("joined", 0.0, 12.0)];
+        let result = analysis(&[
+            source_interval("system", "remote", 0.0, 4.0),
+            source_interval("system", "remote", 8.0, 12.0),
+        ])
+        .label_with_sources(&row, &[Some("system".into())])
+        .unwrap();
+        assert_eq!(result.coverage, 1.0, "a joined pause is not missing speech");
+        // Speech analysis that missed most of the row still fails the gate.
+        assert!(analysis(&[source_interval("system", "remote", 0.0, 4.0)])
+            .label_with_sources(&row, &[Some("system".into())])
+            .is_err());
+        // Holes longer than recognition joins across still count as gaps.
+        let error = analysis(&[
+            source_interval("system", "remote", 0.0, 2.0),
+            source_interval("system", "remote", 10.0, 12.0),
+        ])
+        .label_with_sources(&row, &[Some("system".into())])
+        .err()
+        .unwrap();
+        assert!(error.to_string().contains("33.3%"), "{error}");
+        // Live speaker finalization keeps its strict measure.
+        assert!(
+            assignment_coverage(
+                &rebuild_windows(&[
+                    source_interval("system", "remote", 0.0, 4.0),
+                    source_interval("system", "remote", 8.0, 12.0),
+                ]),
+                &row,
+            ) < 0.7
+        );
+    }
+
+    #[test]
+    fn enhancement_labels_keep_simultaneous_capture_sources_separate() {
+        let windows = rebuild_windows(&[
+            source_interval("microphone", "local", 0.0, 5.0),
+            source_interval("system", "remote", 0.0, 5.0),
+        ]);
+        let rows = vec![
+            live_row("local-row", 0.0, 5.0),
+            live_row("remote-row", 0.0, 5.0),
+        ];
+        let result = EnhancementSpeakerAnalysis {
+            windows,
+            labels: HashMap::new(),
+            quality_flags: vec![],
+        }
+        .label_with_sources(&rows, &[Some("microphone".into()), Some("system".into())])
+        .unwrap();
+        assert_eq!(result.transcripts[0].speaker_id.as_deref(), Some("local"));
+        assert_eq!(result.transcripts[1].speaker_id.as_deref(), Some("remote"));
+        assert_eq!(result.transcripts[0].source, "microphone");
+        assert_eq!(result.transcripts[1].source, "system");
+        assert_eq!(result.coverage, 1.0);
+        assert!(
+            result.transcripts.iter().all(|r| r.confidence == 0.0),
+            "cross-source overlap must not create automatic voice samples"
+        );
+        let result = EnhancementSpeakerAnalysis {
+            windows: rebuild_windows(&[
+                source_interval("system", "a", 0.0, 5.0),
+                source_interval("system", "b", 0.0, 5.0),
+            ]),
+            labels: HashMap::new(),
+            quality_flags: vec![],
+        }
+        .label_with_sources(&rows[..1], &[Some("system".into())])
+        .unwrap();
+        assert!(
+            result.transcripts[0].is_overlap,
+            "two voices on the same input remain ambiguous"
+        );
+        assert!(result.transcripts[0].speaker_id.is_none());
     }
 
     #[test]

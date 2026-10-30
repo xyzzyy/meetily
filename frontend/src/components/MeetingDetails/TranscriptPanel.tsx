@@ -213,6 +213,10 @@ export function TranscriptPanel({
         if (event.payload.status === 'completed') {
           void onRefetchTranscripts?.();
           void loadSpeakers();
+          // Apply and Undo can restore a different status, method, and quality flags.
+          void invoke<DiarizationStatus | null>('get_meeting_diarization_status', { meetingId })
+            .then(setDiarizationStatus)
+            .catch(error => console.warn('Failed to reload speaker refinement status:', error));
         }
       }
     ).then(cleanup => { if (disposed) cleanup(); else unlisten = cleanup; });

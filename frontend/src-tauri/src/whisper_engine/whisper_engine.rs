@@ -15,6 +15,17 @@ use tokio::io::AsyncWriteExt;
 use crate::config::WHISPER_MODEL_CATALOG;
 use super::acceleration::{whisper_context_acceleration_for, WhisperCompiledBackend};
 
+#[cfg(test)]
+#[derive(Default, Deserialize)]
+pub(crate) struct DiagnosticDecodeOptions {
+    pub beam_size: Option<i32>,
+    pub temperature: Option<f32>,
+    pub temperature_increment: Option<f32>,
+    pub no_timestamps: Option<bool>,
+    pub token_timestamps: Option<bool>,
+    pub suppress_non_speech: Option<bool>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ModelStatus {
     Available,
@@ -560,6 +571,32 @@ impl WhisperEngine {
     
     /// Transcribe audio with streaming support for partial results and adaptive quality
     pub async fn transcribe_audio_with_confidence(&self, audio_data: Vec<f32>, language: Option<String>) -> Result<(String, f32, bool)> {
+        self.transcribe_with_options(audio_data, language, false).await
+    }
+
+    /// Saved recordings have no live latency limit. Use a broader beam search
+    /// with a zero starting temperature; whisper.cpp can still use its fallback.
+    pub async fn transcribe_batch_audio_with_confidence(&self, audio_data: Vec<f32>, language: Option<String>) -> Result<(String, f32, bool)> {
+        self.transcribe_with_options(audio_data, language, true).await
+    }
+
+    async fn transcribe_with_options(&self, audio_data: Vec<f32>, language: Option<String>, batch: bool) -> Result<(String, f32, bool)> {
+        self.transcribe_with_param_overrides(audio_data,language,batch,None,|_|{}).await
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn transcribe_diagnostic(&self, audio: Vec<f32>,language: Option<String>,batch:bool,options:DiagnosticDecodeOptions) -> Result<(String,f32,bool)> {
+        self.transcribe_with_param_overrides(audio,language,batch,options.beam_size,move |params| {
+            if let Some(value)=options.temperature {params.set_temperature(value);}
+            if let Some(value)=options.temperature_increment {params.set_temperature_inc(value);}
+            if let Some(value)=options.no_timestamps {params.set_no_timestamps(value);}
+            if let Some(value)=options.token_timestamps {params.set_token_timestamps(value);}
+            if let Some(value)=options.suppress_non_speech {params.set_suppress_non_speech_tokens(value);}
+        }).await
+    }
+
+    async fn transcribe_with_param_overrides(&self,audio_data:Vec<f32>,language:Option<String>,batch:bool,
+        beam_override:Option<i32>,configure:impl FnOnce(&mut FullParams<'_, '_>)) -> Result<(String,f32,bool)> {
         let ctx_lock = self.current_context.read().await;
         let ctx = ctx_lock.as_ref()
             .ok_or_else(|| anyhow!("No model loaded. Please load a model first."))?;
@@ -570,7 +607,7 @@ impl WhisperEngine {
 
         // ADAPTIVE parameters - optimized for current hardware
         let mut params = FullParams::new(SamplingStrategy::BeamSearch {
-            beam_size: adaptive_config.beam_size as i32,
+            beam_size: beam_override.unwrap_or(if batch { 5 } else { adaptive_config.beam_size as i32 }),
             patience: 1.0
         });
 
@@ -602,7 +639,7 @@ impl WhisperEngine {
         // Additional suppression to reduce C library verbosity
         params.set_suppress_blank(true);
         params.set_suppress_non_speech_tokens(true);
-        params.set_temperature(adaptive_config.temperature);
+        params.set_temperature(if batch { 0.0 } else { adaptive_config.temperature });
         params.set_max_initial_ts(1.0);
         params.set_entropy_thold(2.4);
         params.set_logprob_thold(-1.0);
@@ -610,8 +647,11 @@ impl WhisperEngine {
         // Previous value was too aggressive and rejected valid quiet speech
         // 0.55 is balanced - prevents hallucinations while preserving quiet speech
         params.set_no_speech_thold(0.55);
-        params.set_max_len(200);
+        // Batch decoding must not inherit the live display's character limit.
+        params.set_max_len(if batch { 0 } else { 200 });
         params.set_single_segment(false);
+
+        configure(&mut params);
 
         // Set thread count based on hardware (if supported by whisper.cpp)
         if let Some(_max_threads) = adaptive_config.max_threads {

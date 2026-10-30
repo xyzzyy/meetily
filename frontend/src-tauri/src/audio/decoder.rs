@@ -1,6 +1,6 @@
 // Audio file decoder for retranscription feature
-// Uses Symphonia to decode MP4/AAC audio files, with ffmpeg fallback for
-// formats Symphonia can't handle (MKV, WebM, WMA)
+// Uses FFmpeg for AAC and formats that need its demuxers. Other formats use
+// Symphonia directly.
 
 use anyhow::{anyhow, Result};
 use log::{debug, error, info, warn};
@@ -19,8 +19,8 @@ use symphonia::core::probe::Hint;
 use super::audio_processing::{audio_to_mono, resample, resample_audio};
 use super::ffmpeg::find_ffmpeg_path;
 
-/// Extensions requiring ffmpeg pre-conversion (Symphonia lacks these demuxers/codecs)
-const FFMPEG_ONLY_EXTENSIONS: &[&str] = &["mkv", "webm", "wma"];
+/// Use FFmpeg for AAC containers too, preserving packet timing and SBR audio.
+const FFMPEG_ONLY_EXTENSIONS: &[&str] = &["mkv", "webm", "wma", "mp4", "m4a", "aac"];
 
 /// Progress callback for long-running operations
 /// Returns current progress (0-100) and a message
@@ -269,7 +269,7 @@ fn needs_ffmpeg_conversion(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
-/// Convert an audio file to WAV using ffmpeg for formats Symphonia can't decode.
+/// Decode to float WAV on the container timeline, including gaps and drift.
 ///
 /// Returns a `TempPath` that auto-deletes the temporary WAV file when dropped.
 /// The caller must keep the `TempPath` alive until decoding of the WAV is complete.
@@ -321,9 +321,11 @@ fn convert_to_wav_with_ffmpeg(
     let mut command = Command::new(&ffmpeg_path);
     command
         .args([
+            "-copyts",             // Keep the container's recording timeline
             "-i", input_str,
             "-vn",                  // Strip video tracks
-            "-acodec", "pcm_s16le", // Output PCM WAV (Symphonia handles natively)
+            "-af", "aresample=async=1000:first_pts=0",
+            "-acodec", "pcm_f32le", // Keep float precision through conversion
             "-y",                   // Overwrite without prompt
             output_str,
         ])
@@ -399,9 +401,8 @@ pub fn decode_audio_file_with_progress(
 ) -> Result<DecodedAudio> {
     info!("Decoding audio file: {}", path.display());
 
-    // FFmpeg pre-conversion for unsupported formats (MKV, WebM, WMA).
-    // If the file is in a format Symphonia can't decode, use ffmpeg to convert
-    // it to a temporary WAV file first, then decode the WAV with Symphonia.
+    // FFmpeg preserves AAC features and packet timing that the native path
+    // cannot reproduce. Decode its temporary float WAV with Symphonia.
     // The _temp_wav_guard keeps the temp file alive until decoding completes,
     // then auto-deletes it when dropped (even on error/panic).
     let (_temp_wav_guard, decode_path): (Option<tempfile::TempPath>, Cow<'_, Path>) =
@@ -632,19 +633,34 @@ mod tests {
     }
 
     #[test]
-    fn test_decode_he_aac_uses_decoded_rate_not_container_rate() {
-        // HE-AAC (SBR) fixture: the container declares 48 kHz stereo, but
-        // Symphonia has no SBR support and decodes only the AAC-LC core at
-        // 24 kHz. Trusting the container rate halves the duration and makes
-        // the audio play at 2x speed, which truncated long imported
-        // recordings to half their length.
+    fn aac_decode_keeps_the_container_timeline() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("delayed.m4a");
+        let output = Command::new(find_ffmpeg_path().expect("ffmpeg is required for this test"))
+            .args(["-v", "error", "-f", "lavfi", "-i", "sine=frequency=440:duration=1",
+                "-af", "asetpts=PTS+0.5/TB", "-c:a", "aac"])
+            .arg(&source).output().unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        let decoded = decode_audio_file(&source).unwrap();
+        let rate = decoded.sample_rate as usize;
+        assert!((decoded.duration_seconds - 1.5).abs() < 0.06,
+            "the half-second lead must remain on the recording timeline: {}", decoded.duration_seconds);
+        let rms = |samples: &[f32]| (samples.iter().map(|s| s * s).sum::<f32>() / samples.len() as f32).sqrt();
+        assert!(rms(&decoded.samples[..rate * 4 / 10]) < 0.001, "the lead must be silent");
+        assert!(rms(&decoded.samples[rate * 6 / 10..rate * 9 / 10]) > 0.01, "speech time must retain the signal");
+    }
+
+    #[test]
+    fn test_decode_he_aac_preserves_full_bandwidth_and_duration() {
+        // The native AAC decoder omits SBR and produces only the 24 kHz
+        // core. Enhance must keep the full 48 kHz signal and its duration.
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("tests/fixtures/he_aac_48k_5s.m4a");
         let decoded = decode_audio_file(&path).expect("failed to decode HE-AAC fixture");
 
         assert_eq!(
-            decoded.sample_rate, 24000,
-            "sample_rate must come from the decoder output, not container metadata"
+            decoded.sample_rate, 48000,
+            "HE-AAC must retain its SBR bandwidth"
         );
         assert!(
             (decoded.duration_seconds - 5.16).abs() < 0.5,
@@ -893,13 +909,13 @@ mod tests {
         assert!(needs_ffmpeg_conversion(Path::new("audio.WMA")));
         assert!(needs_ffmpeg_conversion(Path::new("audio.WebM")));
         // Symphonia-native formats should NOT need ffmpeg
-        assert!(!needs_ffmpeg_conversion(Path::new("audio.mp4")));
+        assert!(needs_ffmpeg_conversion(Path::new("audio.mp4")));
         assert!(!needs_ffmpeg_conversion(Path::new("audio.wav")));
         assert!(!needs_ffmpeg_conversion(Path::new("audio.mp3")));
         assert!(!needs_ffmpeg_conversion(Path::new("audio.flac")));
         assert!(!needs_ffmpeg_conversion(Path::new("audio.ogg")));
-        assert!(!needs_ffmpeg_conversion(Path::new("audio.aac")));
-        assert!(!needs_ffmpeg_conversion(Path::new("audio.m4a")));
+        assert!(needs_ffmpeg_conversion(Path::new("audio.aac")));
+        assert!(needs_ffmpeg_conversion(Path::new("audio.m4a")));
         // No extension
         assert!(!needs_ffmpeg_conversion(Path::new("noext")));
     }

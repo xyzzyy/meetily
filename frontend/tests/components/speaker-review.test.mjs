@@ -30,6 +30,7 @@ function makePanel(overrides = {}, command = async () => undefined, extraProps =
   const effects = [];
   const calls = [];
   const notices = [];
+  const listeners = new Map();
   const mutationRef = { current: false };
   const jsx = (type, props) => ({ type, props: props || {} });
   const hooks = {
@@ -55,7 +56,9 @@ function makePanel(overrides = {}, command = async () => undefined, extraProps =
     if (name === '@tauri-apps/api/core') return {
       invoke: async (name, args) => { calls.push({ name, args }); return command(name, args); },
     };
-    if (name === '@tauri-apps/api/event') return { listen: async () => () => {} };
+    if (name === '@tauri-apps/api/event') return { listen: async (event, handler) => {
+      listeners.set(event, handler); return () => listeners.delete(event);
+    } };
     if (name === '@tauri-apps/plugin-dialog') return { confirm: async () => true };
     if (name === 'sonner') return { toast: new Proxy({}, {
       get: (_, kind) => (...args) => notices.push({ kind, args }),
@@ -79,7 +82,7 @@ function makePanel(overrides = {}, command = async () => undefined, extraProps =
     ...extraProps,
   };
   const render = () => { cursor = 0; effects.length = 0; return module.exports.TranscriptPanel(props); };
-  return { states, effects, calls, notices, settings, render };
+  return { states, effects, calls, notices, settings, render, listeners };
 }
 function nodes(node) {
   if (!node || typeof node !== 'object') return [];
@@ -101,6 +104,34 @@ async function settle() { for (let i = 0; i < 15; i++) await Promise.resolve(); 
 const alice = { speakerId: 'alice', speakerLabel: 'Alice', segmentCount: 1 };
 
 const attribute = tree => nodes(tree).find(node => node.type === 'SpeakerAttributeButton');
+
+// Publication refreshes both the speakers and the saved status, including Undo.
+{
+  let savedStatus = { currentStatus: 'final', method: 'post-call', qualityFlags: ['new'] };
+  let savedSpeakers = [alice];
+  let refetches = 0;
+  const panel = makePanel({}, async name => name === 'get_meeting_diarization_status'
+    ? savedStatus : name === 'get_meeting_speakers' ? savedSpeakers : [], {
+    onRefetchTranscripts: () => { refetches++; },
+  });
+  panel.render();
+  for (const effect of panel.effects) effect();
+  await settle();
+  const handler = panel.listeners.get('diarization-progress');
+  handler({ payload: { meetingId: 'another-meeting', status: 'completed', progress: 100 } });
+  assert.equal(refetches, 0);
+  handler({ payload: { meetingId: 'meeting', status: 'completed', progress: 100 } });
+  await settle();
+  assert.equal(panel.states.get('diarizationStatus'), savedStatus);
+  assert.equal(panel.states.get('speakers'), savedSpeakers);
+  savedStatus = { currentStatus: 'provisional', method: 'live', qualityFlags: ['restored'] };
+  savedSpeakers = [{ speakerId: 'restored', speakerLabel: 'Original', segmentCount: 1 }];
+  handler({ payload: { meetingId: 'meeting', status: 'completed', progress: 100 } });
+  await settle();
+  assert.equal(panel.states.get('diarizationStatus'), savedStatus);
+  assert.equal(panel.states.get('speakers'), savedSpeakers);
+  assert.equal(refetches, 2);
+}
 
 // Attributing shows pending state, prevents duplicate commands, and permits a
 // retry after a failure. It never goes through the old rename path.
