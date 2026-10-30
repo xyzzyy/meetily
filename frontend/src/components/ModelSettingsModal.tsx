@@ -132,9 +132,7 @@ export function ModelSettingsModal({
   const [showApiKey, setShowApiKey] = useState<boolean>(false);
   const [isApiKeyLocked, setIsApiKeyLocked] = useState<boolean>(!!modelConfig.apiKey?.trim());
   const [isRemovingApiKey, setIsRemovingApiKey] = useState(false);
-  const isRemovingApiKeyRef = useRef(false);
   const [isSavingSettings, setIsSavingSettings] = useState(false);
-  const isSavingSettingsRef = useRef(false);
   const [isLoadingInitialModelConfig, setIsLoadingInitialModelConfig] = useState(!skipInitialFetch);
   const [isLockButtonVibrating, setIsLockButtonVibrating] = useState<boolean>(false);
   const { serverAddress } = useSidebar();
@@ -258,7 +256,7 @@ export function ModelSettingsModal({
     !customOpenAIModel.trim()
   );
 
-  const isSettingsBusy = isRemovingApiKey || isSavingSettings || configContext.isModelSettingsBusy;
+  const isSettingsBusy = configContext.isModelSettingsBusy;
   const isDoneDisabled =
     isSettingsBusy ||
     (requiresApiKey && (!apiKey || (typeof apiKey === 'string' && !apiKey.trim()))) ||
@@ -643,12 +641,10 @@ export function ModelSettingsModal({
   }, [models, openRouterModels, builtinAiModels, openaiModels, claudeModels, groqModels, modelConfig.provider]);
 
   const handleRemoveApiKey = async () => {
-    if (!requiresApiKey || !storedApiKey?.trim() || isLoadingInitialModelConfig ||
-        isRemovingApiKeyRef.current || isSavingSettingsRef.current) return;
+    if (!requiresApiKey || !storedApiKey?.trim() || isLoadingInitialModelConfig) return;
 
     const provider = modelConfig.provider;
     await configContext.runModelSettingsOperation(async () => {
-      isRemovingApiKeyRef.current = true;
       setIsRemovingApiKey(true);
       try {
         const accepted = await confirm(
@@ -668,7 +664,6 @@ export function ModelSettingsModal({
         console.error('Failed to remove summary API key:', error);
         toast.error('Could not remove the saved API key');
       } finally {
-        isRemovingApiKeyRef.current = false;
         setIsRemovingApiKey(false);
       }
     });
@@ -730,9 +725,8 @@ export function ModelSettingsModal({
 
   // A pending save can otherwise write the old key after it is removed.
   const saveSettings = async () => {
-    if (isDoneDisabled || isSavingSettingsRef.current || isRemovingApiKeyRef.current) return;
+    if (isDoneDisabled) return;
     await configContext.runModelSettingsOperation(async () => {
-      isSavingSettingsRef.current = true;
       setIsSavingSettings(true);
       try {
         await handleSave();
@@ -740,7 +734,6 @@ export function ModelSettingsModal({
         console.error('Failed to save model settings:', error);
         toast.error('Failed to save model settings');
       } finally {
-        isSavingSettingsRef.current = false;
         setIsSavingSettings(false);
       }
     });
