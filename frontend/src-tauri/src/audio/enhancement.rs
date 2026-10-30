@@ -363,9 +363,16 @@ pub(crate) fn recognition_inputs(
             });
         }
     }
+    // The recovery padding and joined context can reach a track input. The
+    // mix contains both tracks, so decode only the audio no input covers.
+    let taken: Vec<_> = inputs
+        .iter()
+        .map(|input| (input.start_timestamp_ms, input.end_timestamp_ms))
+        .collect();
     inputs.extend(
         speech_context_with_target(&missed, &mixed, policy.context_target_ms)
-            .into_iter()
+            .iter()
+            .flat_map(|segment| outside_inputs(segment, &taken, &mixed))
             .map(RecognitionInput::mixed),
     );
     inputs.sort_by(|a, b| {
@@ -374,6 +381,45 @@ pub(crate) fn recognition_inputs(
             .then(a.source.cmp(&b.source))
     });
     Ok(inputs)
+}
+
+/// Remove the time ranges in `taken` from a 16 kHz span of `audio`.
+fn outside_inputs(
+    segment: &super::vad::SpeechSegment,
+    taken: &[(f64, f64)],
+    audio: &[f32],
+) -> Vec<super::vad::SpeechSegment> {
+    let mut covered: Vec<_> = taken
+        .iter()
+        .copied()
+        .filter(|(start, end)| {
+            *end > segment.start_timestamp_ms && *start < segment.end_timestamp_ms
+        })
+        .collect();
+    covered.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let mut free = Vec::new();
+    let mut cursor = segment.start_timestamp_ms;
+    for (start, end) in covered {
+        if start > cursor {
+            free.push((cursor, start));
+        }
+        cursor = cursor.max(end);
+    }
+    if cursor < segment.end_timestamp_ms {
+        free.push((cursor, segment.end_timestamp_ms));
+    }
+    free.into_iter()
+        .filter_map(|(start, end)| {
+            let from = (start * 16.0).round() as usize;
+            let to = ((end * 16.0).round() as usize).min(audio.len());
+            (from < to).then(|| super::vad::SpeechSegment {
+                samples: audio[from..to].to_vec(),
+                start_timestamp_ms: start,
+                end_timestamp_ms: end,
+                confidence: segment.confidence,
+            })
+        })
+        .collect()
 }
 
 /// Use the full-quality batch conversion for every engine. Capture-rate audio
@@ -1265,6 +1311,31 @@ mod tests {
                 "{engine:?}: cancellation must stop input preparation"
             );
         }
+    }
+
+    #[test]
+    fn recovered_mixed_speech_never_repeats_audio_from_a_track_input() {
+        let audio: Vec<f32> = (0..20 * 16_000).map(|i| i as f32).collect();
+        // Two padded recoveries joined across a 4-8 s system-track input.
+        let joined = super::super::vad::SpeechSegment {
+            samples: audio[16_000..10 * 16_000].to_vec(),
+            start_timestamp_ms: 1000.0,
+            end_timestamp_ms: 10_000.0,
+            confidence: 0.0,
+        };
+        let pieces = outside_inputs(&joined, &[(4000.0, 8000.0), (12_000.0, 14_000.0)], &audio);
+        let spans: Vec<_> = pieces
+            .iter()
+            .map(|p| (p.start_timestamp_ms, p.end_timestamp_ms))
+            .collect();
+        assert_eq!(spans, [(1000.0, 4000.0), (8000.0, 10_000.0)]);
+        assert_eq!(pieces[0].samples, audio[16_000..4 * 16_000]);
+        assert_eq!(pieces[1].samples, audio[8 * 16_000..10 * 16_000]);
+        assert!(outside_inputs(&joined, &[(0.0, 11_000.0)], &audio).is_empty());
+        assert_eq!(
+            outside_inputs(&joined, &[], &audio)[0].samples,
+            joined.samples
+        );
     }
 
     #[test]

@@ -13,13 +13,18 @@ def load_rows(path):
     rows = data.get('segments', []) if isinstance(data, dict) else data
     if not isinstance(rows, list):
         raise ValueError('Expected transcript rows or a segments array')
-    return sorted(rows, key=lambda r: r.get('audio_start_time', r.get('start', 0)))
+    return sorted(rows, key=lambda r: first_present(r, 'audio_start_time', 'start') or 0)
+
+
+def first_present(row, *keys):
+    # Saved transcripts store missing values as null, not as absent keys.
+    return next((row[key] for key in keys if row.get(key) is not None), None)
 
 
 def words(rows):
     result = []
     for index, row in enumerate(rows):
-        text = unicodedata.normalize('NFKC', row.get('text', row.get('transcript', ''))).lower().replace('’', "'")
+        text = unicodedata.normalize('NFKC', first_present(row, 'text', 'transcript') or '').lower().replace('’', "'")
         result.extend((word, index) for word in re.findall(r"\w+(?:'\w+)*", text))
     return result
 
@@ -62,7 +67,7 @@ def compare(reference, candidate):
         row = reference[index] if reference else {}
         changes.append({
             'reference_row': index,
-            'reference_start': row.get('audio_start_time', row.get('start')),
+            'reference_start': first_present(row, 'audio_start_time', 'start'),
             'reference_text': row.get('text', row.get('transcript', '')),
             'edits': [{'type': kind, 'before': before, 'after': after}
                       for kind, at, before, after in reversed(edits) if at == index],

@@ -1,5 +1,7 @@
 import importlib.util
+import json
 from pathlib import Path
+import tempfile
 import unittest
 
 spec = importlib.util.spec_from_file_location('comparison', Path(__file__).parents[1] / 'compare_transcripts.py')
@@ -25,6 +27,17 @@ class ComparisonTests(unittest.TestCase):
         self.assertEqual(result['edits']['insertion'], 1)
         self.assertEqual(comparison.compare([{'text': 'hello'}], [])['edits']['deletion'], 1)
         self.assertEqual(comparison.compare([], [{'text': 'hello'}])['edits']['insertion'], 1)
+
+    def test_null_times_and_text_from_saved_transcripts(self):
+        rows = [{'transcript': 'stay', 'audio_start_time': 5.0},
+                {'transcript': 'Andrew', 'audio_start_time': None, 'text': None}]
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        path = Path(folder.name) / 'rows.json'
+        path.write_text(json.dumps(rows))
+        loaded = comparison.load_rows(path)
+        self.assertEqual([row['transcript'] for row in loaded], ['Andrew', 'stay'])
+        self.assertEqual(comparison.compare([{'text': 'Andrew stay'}], loaded)['word_difference_rate'], 0)
 
     def test_regression_gate_requires_checked_words(self):
         with self.assertRaisesRegex(ValueError, 'human-checked'):
