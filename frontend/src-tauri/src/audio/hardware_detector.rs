@@ -105,16 +105,21 @@ impl HardwareProfile {
         (false, GpuType::None)
     }
 
-    /// Detect available system memory in GB
+    /// Detect total RAM in GiB, preserving the existing MEMORY_GB override.
     fn detect_memory_gb() -> u8 {
-        // Simple memory detection - could be enhanced with system-specific calls
         match std::env::var("MEMORY_GB") {
-            Ok(mem_str) => mem_str.parse().unwrap_or(8),
+            Ok(value) => value.parse().unwrap_or(8),
             Err(_) => {
-                // Default estimates based on common configurations
-                8 // Conservative default
+                let mut system = sysinfo::System::new();
+                system.refresh_memory();
+                Self::memory_gb_from_bytes(system.total_memory())
             }
         }
+    }
+
+    fn memory_gb_from_bytes(total_bytes: u64) -> u8 {
+        if total_bytes == 0 { return 8; }
+        (total_bytes / (1024 * 1024 * 1024)).min(u8::MAX as u64) as u8
     }
 
     /// Calculate performance tier based on hardware
@@ -283,6 +288,25 @@ mod tests {
         assert!(profile.cpu_cores > 0);
         // Performance optimization: remove println! from tests
         log::debug!("Detected profile: {:?}", profile);
+    }
+
+    #[test]
+    fn measured_ram_reaches_the_existing_hardware_tiers() {
+        let gib = 1024u64 * 1024 * 1024;
+        let memory = HardwareProfile::memory_gb_from_bytes(16 * gib);
+        assert_eq!(memory, 16);
+        assert_eq!(HardwareProfile::calculate_performance_tier(8, &GpuType::Metal, memory), PerformanceTier::Ultra);
+        assert_eq!(HardwareProfile::calculate_performance_tier(8, &GpuType::None, memory), PerformanceTier::Medium);
+        assert_eq!(HardwareProfile::memory_gb_from_bytes(4 * gib), 4);
+    }
+
+    #[test]
+    fn ram_conversion_does_not_overstate_capacity_or_overflow() {
+        let gib = 1024u64 * 1024 * 1024;
+        assert_eq!(HardwareProfile::memory_gb_from_bytes(16 * gib - 1), 15);
+        assert_eq!(HardwareProfile::memory_gb_from_bytes(512 * gib), 255);
+        assert_eq!(HardwareProfile::memory_gb_from_bytes(u64::MAX), 255);
+        assert_eq!(HardwareProfile::memory_gb_from_bytes(0), 8);
     }
 
     #[test]
