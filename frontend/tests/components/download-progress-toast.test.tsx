@@ -281,7 +281,7 @@ test('speaker polling recovers a failed download after a lost terminal event', a
 
 test('summary polling recovers a missed write-error event', async () => {
   await send('builtin-ai-download-progress', { model: 'model', progress: 99, status: 'downloading' });
-  responses.builtin_ai_list_models = [{ name: 'model', status: { type: 'error', error: 'Error writing to file: disk full' } }];
+  responses.builtin_ai_list_models = [{ name: 'model', status: { type: 'error', Error: 'Error writing to file: disk full' } }];
   await act(async () => checkStatus());
   expect(current().props.download.status).toBe('error');
   await act(async () => cleanups.get(11000)!());
