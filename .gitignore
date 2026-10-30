@@ -80,3 +80,7 @@ diarization-sidecar/.build/
 diarization-sidecar/.swiftpm/
 
 frontend/src-tauri/binaries/
+
+# Python bytecode
+__pycache__/
+*.pyc
