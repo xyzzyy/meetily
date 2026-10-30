@@ -2,10 +2,11 @@
 
 import React, { useEffect, useState, useCallback } from 'react';
 import { listen } from '@tauri-apps/api/event';
+import { invoke } from '@tauri-apps/api/core';
 import { toast } from 'sonner';
-import { X, Download, Check, Loader2, ArrowBigDownDash } from 'lucide-react';
+import { X, Check, ArrowBigDownDash } from 'lucide-react';
 import { getDownloadTotalMb } from '@/lib/onboarding-summary-model';
-import type { ParakeetDownloadProgressEvent } from '@/lib/parakeet';
+import type { ParakeetDownloadProgressEvent, ParakeetModelInfo } from '@/lib/parakeet';
 
 interface DownloadProgress {
   modelName: string;
@@ -84,6 +85,10 @@ function DownloadToastContent({
           <p className="text-sm font-medium text-gray-900 dark:text-ink-100 truncate">
             {download.displayName}
           </p>
+          <button type="button" onClick={onDismiss} aria-label="Close download notice"
+            className="shrink-0 text-gray-500 dark:text-ink-400">
+            <X className="h-4 w-4" />
+          </button>
         </div>
 
         {hasError ? (
@@ -149,6 +154,7 @@ export function useDownloadProgressToast() {
   const cleanupDownload = useCallback((modelName: string, delay: number = 4000) => {
     // Remove download from map after delay (allows toast to show and auto-dismiss)
     setTimeout(() => {
+      toast.dismiss(`download-${modelName}`);
       setDownloads((prev) => {
         const updated = new Map(prev);
         updated.delete(modelName);
@@ -156,6 +162,35 @@ export function useDownloadProgressToast() {
       });
     }, delay);
   }, []);
+
+  // Events can be missed. Confirm idle download notices against engine state.
+  useEffect(() => {
+    const pending = [...downloads.values()].filter(download =>
+      download.displayName === 'Transcription Model (Parakeet)' && download.status === 'downloading');
+    if (!pending.length) return;
+    let disposed = false;
+    let checking = false;
+    const timer = setInterval(async () => {
+      if (checking) return;
+      checking = true;
+      try {
+        const models = await invoke<ParakeetModelInfo[]>('parakeet_get_available_models');
+        if (disposed) return;
+        for (const download of pending) {
+          const model = models.find(model => model.name === download.modelName);
+          if (model?.status === 'Available') {
+            updateDownload(download.modelName, { status: 'completed', progress: 100, speedMbps: 0 });
+            cleanupDownload(download.modelName);
+          }
+        }
+      } catch (error) {
+        console.warn('Could not check Parakeet download status', error);
+      } finally {
+        checking = false;
+      }
+    }, 2000);
+    return () => { disposed = true; clearInterval(timer); };
+  }, [downloads, updateDownload, cleanupDownload]);
 
   const showDownloadToast = useCallback((download: DownloadProgress) => {
     const toastId = `download-${download.modelName}`;
@@ -241,7 +276,9 @@ export function useDownloadProgressToast() {
         };
 
         updateDownload(modelName, downloadData);
-        if (downloadData.status === 'cancelled') {
+        if (downloadData.status === 'completed') {
+          cleanupDownload(modelName);
+        } else if (downloadData.status === 'cancelled') {
           cleanupDownload(modelName, 6000);
         }
       }
@@ -251,12 +288,10 @@ export function useDownloadProgressToast() {
       'parakeet-model-download-complete',
       (event) => {
         const { modelName } = event.payload;
-        const downloadData: DownloadProgress = {
+        const downloadData: Partial<DownloadProgress> = {
           modelName,
           displayName: 'Transcription Model (Parakeet)',
           progress: 100,
-          downloadedMb: 670,
-          totalMb: 670,
           speedMbps: 0,
           status: 'completed',
         };
