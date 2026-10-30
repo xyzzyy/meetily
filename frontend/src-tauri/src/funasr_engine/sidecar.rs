@@ -120,7 +120,9 @@ impl FunAsrSidecar {
         language: &str,
         audio: &[f32],
     ) -> std::result::Result<String, SidecarRequestError> {
-        self.request(OP_TRANSCRIBE, language, audio).await
+        self.request(OP_TRANSCRIBE, language, audio)
+            .await
+            .map(without_silence_marker)
     }
 
     #[cfg(test)]
@@ -330,8 +332,32 @@ fn resolve_helper_binary() -> Result<PathBuf> {
         })
 }
 
+/// FUN-ASR returns its silence token as text when an input holds no speech.
+/// It is not a word, so it must not reach a transcript.
+fn without_silence_marker(text: String) -> String {
+    if !text.contains(SILENCE_MARKER) {
+        return text;
+    }
+    text.split_whitespace()
+        .filter(|word| *word != SILENCE_MARKER)
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+const SILENCE_MARKER: &str = "/sil";
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_silence_marker_is_not_transcript_text() {
+        use super::without_silence_marker as clean;
+        assert_eq!(clean("/sil".into()), "");
+        assert_eq!(clean(" /sil ".into()), "");
+        assert_eq!(clean("okay /sil thanks".into()), "okay thanks");
+        assert_eq!(clean("Sure, thanks.".into()), "Sure, thanks.");
+        assert_eq!(clean("嗯。".into()), "嗯。");
+    }
+
     use super::*;
     use std::io::Write;
 
