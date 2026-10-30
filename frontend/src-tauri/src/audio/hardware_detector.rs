@@ -105,16 +105,26 @@ impl HardwareProfile {
         (false, GpuType::None)
     }
 
-    /// Detect available system memory in GB
+    /// Detect total system RAM in GiB. This is capacity, not currently free RAM.
     fn detect_memory_gb() -> u8 {
-        // Simple memory detection - could be enhanced with system-specific calls
-        match std::env::var("MEMORY_GB") {
-            Ok(mem_str) => mem_str.parse().unwrap_or(8),
-            Err(_) => {
-                // Default estimates based on common configurations
-                8 // Conservative default
+        let override_gb = std::env::var("MEMORY_GB").ok();
+        let mut system = sysinfo::System::new();
+        system.refresh_memory();
+        Self::memory_gb_from(override_gb.as_deref(), system.total_memory())
+    }
+
+    fn memory_gb_from(override_gb: Option<&str>, total_bytes: u64) -> u8 {
+        if let Some(value) = override_gb.and_then(|value| value.trim().parse::<u64>().ok()) {
+            if value > 0 {
+                return value.min(u8::MAX as u64) as u8;
             }
         }
+        if total_bytes == 0 {
+            return 8; // Keep the previous fallback if the OS cannot report RAM.
+        }
+        // OS reservations can put a nominal 16 GiB machine just below 16 GiB.
+        // Round capacity up to a whole GiB before applying the existing tiers.
+        total_bytes.div_ceil(1024 * 1024 * 1024).min(u8::MAX as u64) as u8
     }
 
     /// Calculate performance tier based on hardware
@@ -283,6 +293,36 @@ mod tests {
         assert!(profile.cpu_cores > 0);
         // Performance optimization: remove println! from tests
         log::debug!("Detected profile: {:?}", profile);
+    }
+
+    #[test]
+    fn measured_ram_reaches_the_existing_hardware_tiers() {
+        let gib = 1024u64 * 1024 * 1024;
+        let memory = HardwareProfile::memory_gb_from(None, 16 * gib);
+        assert_eq!(memory, 16);
+        assert_eq!(HardwareProfile::calculate_performance_tier(8, &GpuType::Metal, memory), PerformanceTier::Ultra);
+        assert_eq!(HardwareProfile::calculate_performance_tier(8, &GpuType::None, memory), PerformanceTier::Medium);
+        assert_eq!(HardwareProfile::memory_gb_from(None, 4 * gib), 4);
+    }
+
+    #[test]
+    fn ram_capacity_handles_os_reservations_and_large_machines() {
+        let gib = 1024u64 * 1024 * 1024;
+        assert_eq!(HardwareProfile::memory_gb_from(None, 16 * gib - 128 * 1024 * 1024), 16);
+        assert_eq!(HardwareProfile::memory_gb_from(None, 512 * gib), 255);
+        assert_eq!(HardwareProfile::memory_gb_from(None, u64::MAX), 255);
+        assert_eq!(HardwareProfile::memory_gb_from(None, 0), 8);
+    }
+
+    #[test]
+    fn valid_ram_override_is_preserved_and_invalid_override_uses_detection() {
+        let measured = 32u64 * 1024 * 1024 * 1024;
+        assert_eq!(HardwareProfile::memory_gb_from(Some("4"), measured), 4);
+        assert_eq!(HardwareProfile::memory_gb_from(Some(" 16 "), measured), 16);
+        assert_eq!(HardwareProfile::memory_gb_from(Some("512"), measured), 255);
+        for value in ["0", "-1", "", "invalid", "18446744073709551616"] {
+            assert_eq!(HardwareProfile::memory_gb_from(Some(value), measured), 32, "{value}");
+        }
     }
 
     #[test]
