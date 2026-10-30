@@ -18,6 +18,7 @@ async function loadHook({
   deferNavigation = false,
   deferDelayMs,
   loadStored = async () => [],
+  globalStop = false,
 } = {}) {
   const listeners = new Map();
   const statuses = [];
@@ -44,6 +45,7 @@ async function loadHook({
   };
   const require = (name) => {
     if (name === 'react') return React;
+    if (name === '@/hooks/useRecordingStop') return { useRecordingStop: module.exports.useRecordingStop };
     if (name === 'next/navigation') return { useRouter: () => ({ push: path => calls.navigation.push(path) }) };
     if (name === '@tauri-apps/api/event') return { listen: (event, callback) => {
       subscriptions.set(event, (subscriptions.get(event) || 0) + 1);
@@ -123,7 +125,20 @@ async function loadHook({
   });
   let hook;
   let renderer;
+  let Provider;
+  if (globalStop) {
+    const providerSource = fs.readFileSync(new URL('../../src/contexts/RecordingPostProcessingProvider.tsx', import.meta.url), 'utf8');
+    const providerModule = { exports: {} };
+    const providerCode = ts.transpileModule(providerSource, {
+      compilerOptions: { module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.React, esModuleInterop: true },
+    }).outputText;
+    vm.runInNewContext(providerCode, {
+      module: providerModule, exports: providerModule.exports, require, console: { log() {}, error() {} },
+    });
+    Provider = providerModule.exports.RecordingPostProcessingProvider;
+  }
   function View() {
+    if (globalStop) return React.createElement(Provider);
     // Match callers whose callback props change on every render.
     hook = module.exports.useRecordingStop(
       value => calls.recording.push(value), value => calls.disabled.push(value)
@@ -138,6 +153,42 @@ async function loadHook({
     unmount: () => act(async () => { renderer.unmount(); }),
   };
 }
+
+test('an automatic worker stop saves its partial transcript through the global provider', async t => {
+  const state = await loadHook({ globalStop: true });
+  t.after(state.unmount);
+  const warning = 'The final transcript may be incomplete. Use Enhance to transcribe the saved audio again.';
+  await state.listeners.get('recording-stopped')({ payload: {
+    folder_path: '/recordings/Interrupted', meeting_name: 'Interrupted meeting',
+    transcript_warning: warning, save_error: null,
+  } });
+  await act(async () => {
+    state.listeners.get('recording-stop-complete')({ payload: true });
+    await new Promise(setImmediate);
+  });
+  assert.equal(state.calls.save, 1);
+  assert.equal(state.calls.savedMeetings[0][0], 'Interrupted meeting');
+  assert.equal(state.calls.savedMeetings[0][1][0].text, 'Keep this transcript');
+  assert.equal(state.calls.savedMeetings[0][2], '/recordings/Interrupted');
+  assert.equal(state.calls.markSaved, 1);
+  assert.equal(state.calls.refreshes, 1);
+  assert.equal(state.calls.transcriptionSuccess, 0);
+  assert.ok(state.toasts.some(([, options]) => options?.description === warning));
+});
+
+test('startup rollback can reset the global interface without saving a meeting', async t => {
+  const state = await loadHook({ globalStop: true });
+  t.after(state.unmount);
+  await state.listeners.get('recording-stopped')({ payload: {} });
+  await act(async () => {
+    state.listeners.get('recording-stop-complete')({ payload: false });
+    await new Promise(setImmediate);
+  });
+  assert.equal(state.calls.save, 0);
+  assert.equal(state.calls.markSaved, 0);
+  assert.equal(state.calls.transcriptionSuccess, 0);
+  assert.equal(state.statuses.at(-1).status, 'IDLE');
+});
 
 test('a save error shows the recovery folder and keeps the transcript recovery copy', async t => {
   const state = await loadHook();

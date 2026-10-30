@@ -44,7 +44,7 @@ export function RecordingPostProcessingProvider({ children }: { children: React.
           console.log('[RecordingPostProcessing] Received recording-stop-complete event:', event.payload);
 
           // Call the post-processing handler
-          // event.payload is the callApi boolean (true for normal stops)
+          // The payload requests database persistence, including partial transcripts.
           stopHandlerRef.current(event.payload);
         });
         if (cancelled) unlistenFn();
