@@ -187,6 +187,13 @@ export function RememberedVoices() {
         )}
       </div>
 
+      {profiles.some(profile => profile.recognitionReady === false) && (
+        <p role="status" className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900 dark:border-amber-800 dark:bg-amber-950 dark:text-amber-100">
+          Some saved voices need a new sample for automatic recognition. You can still use their names.
+          {' '}To enable recognition, forget the old voice, then remember it again from a clear recording.
+          Existing transcript names are kept.
+        </p>
+      )}
       {profiles.length === 0 ? (
         <p className="rounded-lg border border-dashed border-border p-4 text-sm text-muted-foreground">
           No remembered voices yet. Open a meeting, then use Attribute on a speaker and type their name.
@@ -224,6 +231,9 @@ export function RememberedVoices() {
                       <span className="block text-xs text-muted-foreground">
                         {formatSeconds(profile.speechSeconds)} of speech · {plural(profile.recordingCount, 'meeting')}
                       </span>
+                      {profile.recognitionReady === false && (
+                        <span className="block text-xs text-amber-700 dark:text-amber-300">Name only · needs a new voice sample</span>
+                      )}
                     </span>
                   </button>
                   <Button
