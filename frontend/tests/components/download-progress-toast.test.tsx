@@ -201,3 +201,33 @@ test('progress updates do not recreate the polling timer', async () => {
   for (let progress = 11; progress < 30; progress++) await send('model-download-progress', { modelName: 'model', progress });
   expect(intervalSpy).toHaveBeenCalledTimes(1);
 });
+
+test('a summary write error remains terminal when cached status still says downloading', async () => {
+  responses.builtin_ai_list_models = [{ name: 'model', status: { type: 'downloading', progress: 40 } }];
+  await send('builtin-ai-download-progress', { model: 'model', progress: 40, status: 'downloading' });
+  await send('builtin-ai-download-progress', { model: 'model', status: 'error', error: 'Error writing to file: disk full' });
+  expect(current().props.download.status).toBe('error');
+  expect(invoke).not.toHaveBeenCalled();
+  await act(async () => cleanups.get(11000)!());
+  expect(dismiss).toHaveBeenCalledWith('download-builtin:model');
+});
+
+for (const provider of ['parakeet', 'builtin']) {
+  test(`${provider}: a confirmed resumed retry can replace an error above zero percent`, async () => {
+    const event = provider === 'parakeet' ? 'parakeet-model-download-progress' : 'builtin-ai-download-progress';
+    const identity = provider === 'parakeet' ? { modelName: 'model' } : { model: 'model' };
+    await send(event, { ...identity, progress: 40, status: 'downloading' });
+    await send(provider === 'parakeet' ? 'parakeet-model-download-error' : event,
+      { ...identity, status: 'error', error: 'Download failed' });
+    expect(current().props.download.status).toBe('error');
+    responses[provider === 'parakeet' ? 'parakeet_get_available_models' : 'builtin_ai_list_models'] = [{
+      name: 'model', status: provider === 'parakeet' ? { Downloading: { progress: 45 } } : { type: 'downloading', progress: 45 },
+    }];
+    await send(event, { ...identity, progress: 45, status: 'downloading' });
+    expect(current().props.download.status).toBe('downloading');
+    expect(current().props.download.progress).toBe(45);
+    await send(provider === 'parakeet' ? 'parakeet-model-download-complete' : event,
+      { ...identity, status: 'completed' });
+    expect(current().props.download.status).toBe('completed');
+  });
+}

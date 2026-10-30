@@ -148,9 +148,7 @@ export function useDownloadProgressToast() {
     const key = `${provider.id}:${modelName}`;
     const status = eventStatus(event, fallback);
     const old = current.current.get(key);
-    const restart = old && old.status !== 'downloading' && status === 'downloading' && (event.progress ?? event.percent) === 0;
-    // Ignore late progress after a terminal event. A new attempt starts at zero.
-    if (old && old.status !== 'downloading' && status === 'downloading' && !restart) return;
+    const restart = old && old.status !== 'downloading' && status === 'downloading';
     if (restart || !old) {
       generations.current.set(key, ++generationCounter.current);
       dismissed.current.delete(key);
@@ -208,14 +206,22 @@ export function useDownloadProgressToast() {
           const key = `${provider.id}:${modelName}`;
           const active = current.current.get(key);
           const attempt = generations.current.get(key);
-          // A rejected duplicate request does not terminate the worker that owns the files.
-          if (active?.status === 'downloading' && eventStatus(event.payload, status) === 'error') {
+          const nextStatus = eventStatus(event.payload, status);
+          const duplicateError = active?.status === 'downloading' && nextStatus === 'error'
+            && /already (?:in progress|downloading|running|being downloaded)/i.test(event.payload.error ?? '');
+          const resumedRetry = active && active.status !== 'downloading' && nextStatus === 'downloading'
+            && (event.payload.progress ?? event.payload.percent) !== 0;
+          // Only duplicate-request errors need worker checks. A real error is terminal.
+          // Nonzero progress after a terminal notice needs an active worker to confirm a retry.
+          if (duplicateError || resumedRetry) {
             try {
               const states = await checkDownloads(provider, [active]);
-              if (disposed || generations.current.get(key) !== attempt || current.current.get(key)?.status !== 'downloading') return;
-              if (states.get(active.modelName) === 'downloading') return;
+              if (disposed || generations.current.get(key) !== attempt || current.current.get(key) !== active) return;
+              const downloading = states.get(active.modelName) === 'downloading';
+              if (resumedRetry ? !downloading : downloading) return;
             } catch (error) {
-              console.warn(`Could not verify ${provider.id} download error`, error);
+              console.warn(`Could not verify ${provider.id} download event`, error);
+              if (resumedRetry) return;
             }
           }
           if (!disposed) updateDownload(provider, event.payload, status);
