@@ -22,10 +22,7 @@ async function openMeeting(page: Page, {
       const listeners = new Map<number, { event: string; handler: number }>();
       let modelsReady = false;
       let downloadQueries = 0;
-      const store = new Map<string, unknown>([
-        ['analyticsOptedIn', false],
-        ['analyticsDefaultOffMigrationV1', true],
-      ]);
+      const store = new Map<string, unknown>();
       Object.assign(window, {
         __downloadTest: {
           setReady(value: boolean) { modelsReady = value; },

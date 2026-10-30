@@ -78,10 +78,9 @@ macro_rules! perf_debug {
 **Impact:** Reduces recording operation logging spam
 
 ### 6. println! Statement Elimination ✅
-**Files Modified:** `analytics/analytics.rs`, `audio/hardware_detector.rs`
+**Files Modified:** `audio/hardware_detector.rs`
 
 **Changes:**
-- Replaced `eprintln!` with `log::warn!` in analytics
 - Converted test `println!` to `log::debug!`
 - Preserved build.rs cargo directives (not actual logging)
 

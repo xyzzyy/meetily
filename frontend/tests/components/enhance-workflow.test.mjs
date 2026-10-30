@@ -35,7 +35,6 @@ function dialog(provider, loading = false, selected = true, supported = true, ch
     if (name === '@/hooks/useTranscriptionModels') return { useTranscriptionModels: () => ({ availableModels: [model],
       selectedModelKey: selected ? `${provider}:${model.name}` : '', loadingModels: loading,
       setSelectedModelKey() {}, fetchModels() {}, resetSelection() {} }) };
-    if (name === '@/lib/analytics') return { default: { track: async () => {}, trackError: async () => {} } };
     if (name === '@/lib/transcript-comparison') {
       const helper = { exports: {} };
       const helperSource = fs.readFileSync(new URL('../../src/lib/transcript-comparison.ts', import.meta.url), 'utf8');

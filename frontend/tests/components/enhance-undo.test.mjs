@@ -22,7 +22,6 @@ function render(id) {
     if(name==='@/contexts/ConfigContext')return {useConfig:()=>({betaFeatures:{importAndRetranscribe:false}})};
     if(name==='@tauri-apps/api/core')return {invoke:async(command,args)=>{calls.push({command,args});return null;}};
     if(name==='sonner')return {toast:{success(){},warning(){},error(){}}};
-    if(name==='@/lib/analytics')return {default:{trackButtonClick(){}}};
     return new Proxy({},{get:(_,key)=>String(key)});
   };
   const module={exports:{}};

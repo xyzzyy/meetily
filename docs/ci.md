@@ -27,11 +27,11 @@ settings.
 
 The existing frontend tests cover model deletion commands, setup model
 selection, transcription provider selection, summary state recovery,
-transcript request handling, language preferences, summary parsing, Markdown
-conversion error handling, and analytics event limits. They use simulated
-native responses. They do not record audio, run model inference, remove real
-model files, or start the desktop app. The summary parser accepts a summary
-object or its JSON encoding and rejects malformed JSON.
+transcript request handling, language preferences, summary parsing, and
+Markdown conversion error handling. They use simulated native responses. They
+do not record audio, run model inference, remove real model files, or start
+the desktop app. The summary parser accepts a summary object or its JSON
+encoding and rejects malformed JSON.
 
 The diarization benchmark tests use Python's unittest runner. They cover the
 scorer's speaker mapping and overlap calculations and do not call the

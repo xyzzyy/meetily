@@ -8,7 +8,6 @@ use tauri_plugin_notification::NotificationExt;
 // Declare audio module
 pub mod audio;
 pub mod ollama;
-pub mod analytics;
 pub mod api;
 pub mod utils;
 pub mod console_utils;
@@ -22,7 +21,6 @@ use audio::{
 };
 use audio::vad::extract_speech_16k;
 use ollama::{OllamaModel};
-use analytics::{AnalyticsClient, AnalyticsConfig};
 use utils::format_timestamp;
 use tauri::{Runtime, AppHandle, Emitter};
 use tauri_plugin_store::StoreExt;
@@ -44,7 +42,6 @@ static mut IS_RUNNING: Option<Arc<AtomicBool>> = None;
 static mut RECORDING_START_TIME: Option<std::time::Instant> = None;
 static mut TRANSCRIPTION_TASK: Option<tokio::task::JoinHandle<()>> = None;
 static mut AUDIO_COLLECTION_TASK: Option<tokio::task::JoinHandle<()>> = None;
-static mut ANALYTICS_CLIENT: Option<Arc<AnalyticsClient>> = None;
 static mut ERROR_EVENT_EMITTED: bool = false;
 static mut WHISPER_ENGINE: Option<Arc<WhisperEngine>> = None;
 static LAST_TRANSCRIPTION_ACTIVITY: AtomicU64 = AtomicU64::new(0);
@@ -1811,257 +1808,6 @@ async fn save_transcript(file_path: String, content: String) -> Result<(), Strin
     Ok(())
 }
 
-// Analytics commands
-#[tauri::command]
-async fn init_analytics() -> Result<(), String> {
-    let config = AnalyticsConfig {
-        api_key:"phc_cohhHPgfQfnNWl33THRRpCftuRtWx2k5svtKrkpFb04".to_string(),
-        host: Some("https://us.i.posthog.com".to_string()),
-        enabled: true ,
-    };
-    
-    let client = Arc::new(AnalyticsClient::new(config).await);
-    
-    unsafe {
-        ANALYTICS_CLIENT = Some(client);
-    }
-    
-    Ok(())
-}
-
-#[tauri::command]
-async fn disable_analytics() -> Result<(), String> {
-    unsafe {
-        ANALYTICS_CLIENT = None;
-    }
-    Ok(())
-}
-
-
-#[tauri::command]
-async fn track_event(event_name: String, properties: Option<std::collections::HashMap<String, String>>) -> Result<(), String> {
-    unsafe {
-        if let Some(client) = &ANALYTICS_CLIENT {
-            client.track_event(&event_name, properties).await
-        } else {
-            Err("Analytics client not initialized".to_string())
-        }
-    }
-}
-
-#[tauri::command]
-async fn identify_user(user_id: String, properties: Option<std::collections::HashMap<String, String>>) -> Result<(), String> {
-    unsafe {
-        if let Some(client) = &ANALYTICS_CLIENT {
-            client.identify(user_id, properties).await
-        } else {
-            Err("Analytics client not initialized".to_string())
-        }
-    }
-}
-
-#[tauri::command]
-async fn track_meeting_started(meeting_id: String) -> Result<(), String> {
-    unsafe {
-        if let Some(client) = &ANALYTICS_CLIENT {
-            client.track_meeting_started(&meeting_id).await
-        } else {
-            Err("Analytics client not initialized".to_string())
-        }
-    }
-}
-
-#[tauri::command]
-async fn track_recording_started(meeting_id: String) -> Result<(), String> {
-    unsafe {
-        if let Some(client) = &ANALYTICS_CLIENT {
-            client.track_recording_started(&meeting_id).await
-        } else {
-            Err("Analytics client not initialized".to_string())
-        }
-    }
-}
-
-#[tauri::command]
-async fn track_recording_stopped(meeting_id: String, duration_seconds: Option<u64>) -> Result<(), String> {
-    unsafe {
-        if let Some(client) = &ANALYTICS_CLIENT {
-            client.track_recording_stopped(&meeting_id, duration_seconds).await
-        } else {
-            Err("Analytics client not initialized".to_string())
-        }
-    }
-}
-
-#[tauri::command]
-async fn track_meeting_deleted(meeting_id: String) -> Result<(), String> {
-    unsafe {
-        if let Some(client) = &ANALYTICS_CLIENT {
-            client.track_meeting_deleted(&meeting_id).await
-        } else {
-            Err("Analytics client not initialized".to_string())
-        }
-    }
-}
-
-#[tauri::command]
-async fn track_search_performed(query: String, results_count: usize) -> Result<(), String> {
-    unsafe {
-        if let Some(client) = &ANALYTICS_CLIENT {
-            client.track_search_performed(&query, results_count).await
-        } else {
-            Err("Analytics client not initialized".to_string())
-        }
-    }
-}
-
-#[tauri::command]
-async fn track_settings_changed(setting_type: String, new_value: String) -> Result<(), String> {
-    unsafe {
-        if let Some(client) = &ANALYTICS_CLIENT {
-            client.track_settings_changed(&setting_type, &new_value).await
-        } else {
-            Err("Analytics client not initialized".to_string())
-        }
-    }
-}
-
-#[tauri::command]
-async fn track_feature_used(feature_name: String) -> Result<(), String> {
-    unsafe {
-        if let Some(client) = &ANALYTICS_CLIENT {
-            client.track_feature_used(&feature_name).await
-        } else {
-            Err("Analytics client not initialized".to_string())
-        }
-    }
-}
-
-#[tauri::command]
-async fn is_analytics_enabled() -> bool {
-    unsafe {
-        if let Some(client) = &ANALYTICS_CLIENT {
-            client.is_enabled()
-        } else {
-            false
-        }
-    }
-}
-
-// Enhanced analytics commands for Phase 1
-#[tauri::command]
-async fn start_analytics_session(user_id: String) -> Result<String, String> {
-    unsafe {
-        if let Some(client) = &ANALYTICS_CLIENT {
-            client.start_session(user_id).await
-        } else {
-            Err("Analytics client not initialized".to_string())
-        }
-    }
-}
-
-#[tauri::command]
-async fn end_analytics_session() -> Result<(), String> {
-    unsafe {
-        if let Some(client) = &ANALYTICS_CLIENT {
-            client.end_session().await
-        } else {
-            Err("Analytics client not initialized".to_string())
-        }
-    }
-}
-
-
-
-#[tauri::command]
-async fn track_daily_active_user() -> Result<(), String> {
-    unsafe {
-        if let Some(client) = &ANALYTICS_CLIENT {
-            client.track_daily_active_user().await
-        } else {
-            Err("Analytics client not initialized".to_string())
-        }
-    }
-}
-
-#[tauri::command]
-async fn track_user_first_launch() -> Result<(), String> {
-    unsafe {
-        if let Some(client) = &ANALYTICS_CLIENT {
-            client.track_user_first_launch().await
-        } else {
-            Err("Analytics client not initialized".to_string())
-        }
-    }
-}
-
-// Summary generation analytics commands
-#[tauri::command]
-async fn track_summary_generation_started(model_provider: String, model_name: String, transcript_length: usize) -> Result<(), String> {
-    unsafe {
-        if let Some(client) = &ANALYTICS_CLIENT {
-            client.track_summary_generation_started(&model_provider, &model_name, transcript_length).await
-        } else {
-            Err("Analytics client not initialized".to_string())
-        }
-    }
-}
-
-#[tauri::command]
-async fn track_summary_generation_completed(model_provider: String, model_name: String, success: bool, duration_seconds: Option<u64>, error_message: Option<String>) -> Result<(), String> {
-    unsafe {
-        if let Some(client) = &ANALYTICS_CLIENT {
-            client.track_summary_generation_completed(&model_provider, &model_name, success, duration_seconds, error_message.as_deref()).await
-        } else {
-            Err("Analytics client not initialized".to_string())
-        }
-    }
-}
-
-#[tauri::command]
-async fn track_summary_regenerated(model_provider: String, model_name: String) -> Result<(), String> {
-    unsafe {
-        if let Some(client) = &ANALYTICS_CLIENT {
-            client.track_summary_regenerated(&model_provider, &model_name).await
-        } else {
-            Err("Analytics client not initialized".to_string())
-        }
-    }
-}
-
-#[tauri::command]
-async fn track_model_changed(old_provider: String, old_model: String, new_provider: String, new_model: String) -> Result<(), String> {
-    unsafe {
-        if let Some(client) = &ANALYTICS_CLIENT {
-            client.track_model_changed(&old_provider, &old_model, &new_provider, &new_model).await
-        } else {
-            Err("Analytics client not initialized".to_string())
-        }
-    }
-}
-
-#[tauri::command]
-async fn track_custom_prompt_used(prompt_length: usize) -> Result<(), String> {
-    unsafe {
-        if let Some(client) = &ANALYTICS_CLIENT {
-            client.track_custom_prompt_used(prompt_length).await
-        } else {
-            Err("Analytics client not initialized".to_string())
-        }
-    }
-}
-
-#[tauri::command]
-async fn is_analytics_session_active() -> bool {
-    unsafe {
-        if let Some(client) = &ANALYTICS_CLIENT {
-            client.is_session_active().await
-        } else {
-            false
-        }
-    }
-}
-
 // Helper function to convert stereo to mono
 fn stereo_to_mono(stereo: &[i16]) -> Vec<i16> {
     let mut mono = Vec::with_capacity(stereo.len() / 2);
@@ -2108,28 +1854,6 @@ pub fn run() {
             get_transcription_status,
             read_audio_file,
             save_transcript,
-            init_analytics,
-            disable_analytics,
-            track_event,
-            identify_user,
-            track_meeting_started,
-            track_recording_started,
-            track_recording_stopped,
-            track_meeting_deleted,
-            track_search_performed,
-            track_settings_changed,
-            track_feature_used,
-            is_analytics_enabled,
-            start_analytics_session,
-            end_analytics_session,
-            track_daily_active_user,
-            track_user_first_launch,
-            is_analytics_session_active,
-            track_summary_generation_started,
-            track_summary_generation_completed,
-            track_summary_regenerated,
-            track_model_changed,
-            track_custom_prompt_used,
             
             whisper_init,
             whisper_get_available_models,
