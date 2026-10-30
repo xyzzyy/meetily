@@ -37,10 +37,13 @@ static INSTALL_LOCK: Mutex<()> = Mutex::const_new(());
 
 /// A connection that sends nothing for this long has failed.
 const STALL_TIMEOUT: Duration = Duration::from_secs(30);
-/// Nemotron drops punctuation and casing on long requests: a 13.6 minute
-/// meeting came back with none, while 5 minute pieces kept them throughout.
-const MAX_TEXT_SAMPLES: usize = 300 * 16000;
-const RETRY_TEXT_SAMPLES: usize = 60 * 16000;
+/// Nemotron writes text nobody said on long requests. On a 17 minute meeting,
+/// one 5 minute piece came back as an invented talk about database sharding,
+/// and with a language hint another became a Python tutorial. Its alignment
+/// still reported success. Every 1 minute piece of that meeting and another
+/// matched the saved transcript.
+const MAX_TEXT_SAMPLES: usize = 60 * 16000;
+const RETRY_TEXT_SAMPLES: usize = 20 * 16000;
 /// Speaker turns cover up to one hour per request, the server's limit, so
 /// speaker numbers stay the same across a meeting.
 const MAX_SPEAKER_SAMPLES: usize = 3600 * 16000;
@@ -531,6 +534,13 @@ enum Job {
     Words,
     Speakers,
 }
+fn max_request_samples(job: Job) -> usize {
+    if job == Job::Speakers {
+        MAX_SPEAKER_SAMPLES
+    } else {
+        MAX_TEXT_SAMPLES
+    }
+}
 
 /// Why a request failed, and whether its server can take the next request.
 enum RequestError {
@@ -783,11 +793,6 @@ impl NemotronProvider {
         job: Job,
         cancel: Option<&AtomicBool>,
     ) -> Result<Vec<(Reply, f64)>, TranscriptionError> {
-        let max_samples = if job == Job::Speakers {
-            MAX_SPEAKER_SAMPLES
-        } else {
-            MAX_TEXT_SAMPLES
-        };
         if audio.len() < MIN_SAMPLES {
             return Err(TranscriptionError::AudioTooShort {
                 samples: audio.len(),
@@ -802,7 +807,7 @@ impl NemotronProvider {
         let mut guard = self.server.lock().await;
         let mut parts = Vec::new();
         let mut pending: std::collections::VecDeque<_> =
-            crate::audio::transcription::funasr_provider::request_ranges(audio, max_samples).into();
+            crate::audio::transcription::funasr_provider::request_ranges(audio, max_request_samples(job)).into();
         while let Some(range) = pending.pop_front() {
             let offset = range.start as f64 / 16000.0;
             // Taken out so a failed or cancelled request drops, and stops, its server.
@@ -871,7 +876,7 @@ impl NemotronProvider {
         let text = self.requests(audio, Job::Words, Some(cancel)).await?;
         Ok(MeetingTranscript {
             words: words_on_timeline(text, audio.len() as f64 / 16.0),
-            turns: turns_on_timeline(speakers),
+            turns: bridge_turn_gaps(turns_on_timeline(speakers)),
         })
     }
 }
@@ -910,6 +915,30 @@ fn turns_on_timeline(parts: Vec<(Reply, f64)>) -> Vec<(String, f64, f64)> {
                 };
                 turns.push((key, offset + turn.start, offset + turn.end));
             }
+        }
+    }
+    turns
+}
+
+/// Word times and speaker turns come from different heads. A turn's first or
+/// last word often ends exactly where the turn begins, or sits in the short
+/// pause beside it, so it matched no speaker and became a row of its own.
+/// Each pause goes to the turns on either side, up to one second each.
+fn bridge_turn_gaps(mut turns: Vec<(String, f64, f64)>) -> Vec<(String, f64, f64)> {
+    const MAX_BRIDGE: f64 = 1.0;
+    turns.sort_by(|a, b| a.1.total_cmp(&b.1));
+    let mut latest: Option<usize> = None;
+    for index in 0..turns.len() {
+        if let Some(previous) = latest {
+            let gap = turns[index].1 - turns[previous].2;
+            if gap > 0.0 {
+                let bridge = (gap / 2.0).min(MAX_BRIDGE);
+                turns[previous].2 += bridge;
+                turns[index].1 -= bridge;
+            }
+        }
+        if latest.map_or(true, |previous| turns[index].2 > turns[previous].2) {
+            latest = Some(index);
         }
     }
     turns
@@ -1331,6 +1360,45 @@ mod tests {
         if let Ok(path) = std::env::var("NEMOTRON_TEST_TRANSCRIPT") {
             std::fs::write(path, json!({"text": text, "words": meeting.words, "turns": meeting.turns}).to_string()).unwrap();
         }
+    }
+
+    #[test]
+    fn a_word_at_the_edge_of_a_turn_gets_the_nearest_speaker() {
+        let turn = |speaker: &str, start, end| (speaker.to_string(), start, end);
+        let turns = bridge_turn_gaps(vec![
+            turn("2", 21.5, 26.0),
+            turn("1", 3.3, 6.2),
+            // Overlapping speech keeps both turns as they are.
+            turn("1", 6.0, 20.0),
+            turn("3", 30.0, 31.0),
+        ]);
+        assert_eq!(
+            turns,
+            vec![
+                turn("1", 3.3, 6.2),
+                turn("1", 6.0, 20.75),
+                turn("2", 20.75, 27.0),
+                turn("3", 29.0, 31.0),
+            ]
+        );
+    }
+
+    #[test]
+    fn text_requests_stay_short_enough_to_follow_the_audio() {
+        let audio = vec![0.1f32; 17 * 60 * 16000];
+        for job in [Job::Text, Job::Words] {
+            let ranges = crate::audio::transcription::funasr_provider::request_ranges(
+                &audio,
+                max_request_samples(job),
+            );
+            assert!(ranges.iter().all(|range| range.len() <= 60 * 16000));
+            assert_eq!(ranges.last().unwrap().end, audio.len());
+        }
+        let speakers = crate::audio::transcription::funasr_provider::request_ranges(
+            &audio,
+            max_request_samples(Job::Speakers),
+        );
+        assert_eq!(speakers, vec![0..audio.len()], "speaker numbers must hold across the meeting");
     }
 
     #[test]

@@ -25,12 +25,12 @@ The Download button fetches the runtime archive, the encoder and the chosen deco
 
 Finish or cancel any Nemotron download in Settings before you start transcription. If a download or another model load is in progress, Meetily shows an error instead of waiting at "Loading Nemotron".
 
-Meetily starts `nemo-speech serve` on a free loopback port with a random API key in its environment, and stops it when transcription ends. Audio goes to `/v1/chat/completions` as 16 kHz mono WAV. One request covers up to one hour.
+Meetily starts `nemo-speech serve` on a free loopback port with a random API key in its environment, and stops it when transcription ends. Audio goes to `/v1/chat/completions` as 16 kHz mono WAV. One text request covers up to one minute, cut at a quiet point. Longer requests can come back with fluent text that nobody said, and the runtime still reports it as aligned: on a 17 minute meeting, one 5 minute request returned an invented talk about database sharding.
 
 - Live recording and import send each speech segment and use the text.
 - Enhance without speaker labels sends sentence-length segments and builds rows from the model's word times.
-- Enhance with speaker labels on (the app's speaker setting) sends the whole recording, up to one hour per request, and uses the model's own speakers. Their turns go through Meetily's speaker matching, so remembered voices are still named. Rows end where the speaker changes. Speaker numbers start again in each hour of a longer recording.
+- Enhance with speaker labels on (the app's speaker setting) sends the whole recording for speakers, up to one hour per request, and the text in one minute pieces. It uses the model's own speakers. Their turns go through Meetily's speaker matching, so remembered voices are still named. Rows end where the speaker changes. Speaker numbers start again in each hour of a longer recording.
 
 The server log is `models/nemotron/server.log`.
 
-The runtime can report a successful alignment but return no word times for a nonempty transcript. Meetily checks that the timed words retain all returned text. It retries a failed long section in pieces of up to one minute. If a shorter section still has incomplete times, Enhance reports an error and keeps the saved transcript.
+The runtime can report a successful alignment but return no word times for a nonempty transcript. Meetily checks that the timed words retain all returned text. It retries a failed section in pieces of up to 20 seconds. If a shorter section still has incomplete times, Enhance reports an error and keeps the saved transcript.
