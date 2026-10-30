@@ -145,6 +145,7 @@ export async function installUsageDesktop(page: Page) {
             case 'api_detect_transcript_summary_language': return { language: 'en', reason: 'detected' };
             case 'get_meeting_speakers':
             case 'list_speaker_profiles': return [];
+            case 'get_enhancement_review': return null;
             case 'api_list_templates': return [{ id: 'standard_meeting', name: 'Standard meeting', description: 'Meeting notes' }];
             case 'api_process_transcript':
               state.summary = { markdown: summaryText };
