@@ -11,7 +11,6 @@ import { indexedDBService } from '@/services/indexedDBService';
 import type { Transcript } from '@/types';
 import type { RecordingStoppedPayload } from '@/services/recordingService';
 import { transcriptService } from '@/services/transcriptService';
-import Analytics from '@/lib/analytics';
 import {
   applyPinnedSummaryLanguageToMeeting,
   detectAndCacheSummaryLanguage,
@@ -39,63 +38,6 @@ function mergeTranscripts(base: Transcript[], updates: Transcript[]): Transcript
   );
 }
 
-/** Record a saved meeting, even after the page unmounts or a new recording starts. */
-async function trackMeetingCompletion(meetingId: string, transcripts: Transcript[], transcriptComplete: boolean) {
-  try {
-    if (transcriptComplete) {
-      Analytics.trackTranscriptionSuccess();
-    }
-
-    // Calculate meeting duration from transcript timestamps
-    let durationSeconds = 0;
-    if (transcripts.length > 0 && transcripts[0].audio_start_time !== undefined) {
-      // Use audio_end_time of last transcript if available
-      const lastTranscript = transcripts[transcripts.length - 1];
-      durationSeconds = lastTranscript.audio_end_time || lastTranscript.audio_start_time || 0;
-    }
-
-    // Calculate word count
-    const transcriptWordCount = transcripts
-      .map(t => t.text.split(/\s+/).length)
-      .reduce((a, b) => a + b, 0);
-
-    // Calculate words per minute
-    const wordsPerMinute = durationSeconds > 0 ? transcriptWordCount / (durationSeconds / 60) : 0;
-
-    // Get meetings count today
-    const meetingsToday = await Analytics.getMeetingsCountToday();
-
-    // Track meeting completed
-    await Analytics.trackMeetingCompleted(meetingId, {
-      duration_seconds: durationSeconds,
-      transcript_segments: transcripts.length,
-      transcript_word_count: transcriptWordCount,
-      words_per_minute: wordsPerMinute,
-      meetings_today: meetingsToday
-    });
-
-    // Update meeting count in analytics.json
-    await Analytics.updateMeetingCount();
-
-    // Check for activation (first meeting)
-    const { Store } = await import('@tauri-apps/plugin-store');
-    const store = await Store.load('analytics.json');
-    const totalMeetings = await store.get<number>('total_meetings');
-
-    if (totalMeetings === 1) {
-      const daysSinceInstall = await Analytics.calculateDaysSince('first_launch_date');
-      await Analytics.track('user_activated', {
-        meetings_count: '1',
-        days_since_install: daysSinceInstall?.toString() || 'null',
-        first_meeting_duration_seconds: durationSeconds.toString()
-      });
-    }
-  } catch (analyticsError) {
-    console.error('Failed to track meeting completion analytics:', analyticsError);
-    // Don't block user flow on analytics errors
-  }
-}
-
 type SummaryStatus = 'idle' | 'processing' | 'summarizing' | 'regenerating' | 'completed' | 'error';
 
 interface UseRecordingStopReturn {
@@ -115,7 +57,6 @@ interface UseRecordingStopReturn {
  * - Transcription completion polling (60s max, 500ms interval)
  * - Transcript buffer flush coordination
  * - SQLite meeting save with folder_path from sessionStorage
- * - Comprehensive analytics tracking (duration, word count, activation)
  * - Auto-navigation to meeting details
  * - Toast notifications for success/error
  * - Window exposure for Rust callbacks
@@ -440,8 +381,6 @@ export function useRecordingStop(
           // SQLite is committed. Mark that recording even if a new one has started.
           await markMeetingAsSaved(recoveryMeetingId);
           savedToSQLite = true;
-          // Record success only after the final transcript result is known.
-          void trackMeetingCompletion(meetingId, freshTranscripts, !stopSession.transcriptWarning);
 
           let shouldDetectSummaryLanguage = false;
           try {
@@ -525,10 +464,7 @@ export function useRecordingStop(
             description: stopSession.transcriptWarning ?? `${freshTranscripts.length} transcript segments saved.`,
             action: {
               label: 'View Meeting',
-              onClick: () => {
-                router.push(`/meeting-details?id=${meetingId}`);
-                Analytics.trackButtonClick('view_meeting_from_toast', 'recording_complete');
-              }
+              onClick: () => router.push(`/meeting-details?id=${meetingId}`)
             },
             duration: stopSession.transcriptWarning ? 20000 : 10000,
           });
@@ -541,7 +477,6 @@ export function useRecordingStop(
               // Navigate only from the page the user is still on.
               if (isMountedRef.current) {
                 router.push(`/meeting-details?id=${meetingId}&source=recording`);
-                Analytics.trackPageView('meeting_details');
               }
               clearTranscripts();
 
