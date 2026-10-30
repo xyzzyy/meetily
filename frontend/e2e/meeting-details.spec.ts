@@ -29,10 +29,10 @@ async function openMeeting(page: Page, {
       Object.assign(window, {
         __downloadTest: {
           setReady(value: boolean) { modelsReady = value; },
-          startMeasurement(available = true) {
+          startMeasurement(available = true, modelName?: string) {
             const timing = { started: performance.now(), completed: null as number | null, removed: null as number | null };
             const observer = new MutationObserver(() => {
-              const notices = [...document.querySelectorAll('[data-sonner-toast]')];
+              const notices = [...document.querySelectorAll('[data-sonner-toast]')].filter(notice => !modelName || notice.textContent?.includes(modelName));
               if (timing.completed === null && notices.some(notice => notice.textContent?.includes('Download complete'))) timing.completed = performance.now();
               if (timing.completed !== null && notices.length === 0) { timing.removed = performance.now(); observer.disconnect(); }
             });
@@ -343,20 +343,26 @@ test('a completion event updates the notice without waiting for the status poll'
   const errors = await openMeeting(page);
   const download = downloadCases[0];
   await page.waitForFunction(event => (window as any).__downloadTest.listenerCount(event) > 0, download.event);
-  await page.evaluate(download => (window as any).__downloadTest.emit(download.event, download.payload), download);
-  const notice = page.locator('[data-sonner-toast]').filter({ has: page.getByRole('button', { name: 'Close download notice' }) });
-  await expect(notice).toContainText('99%');
-  await page.evaluate(() => {
-    (window as any).__noticeTiming = (window as any).__downloadTest.startMeasurement(false);
-    (window as any).__downloadTest.emit('parakeet-model-download-complete', { modelName: 'notice-test-model' });
-  });
-  await expect(notice).toContainText('Download complete');
-  const timing = await page.evaluate(() => (window as any).__noticeTiming);
-  expect(timing.completed).not.toBeNull();
-  await info.attach('download-notice-latency', { body: JSON.stringify({
-    provider: 'Parakeet', browser: info.project.name, kind: 'completion-event',
-    event_to_complete_ms: timing.completed - timing.started,
-    boundary: 'Production DOM and Sonner; desktop event injected; no network transfer',
-  }), contentType: 'application/json' });
+  for (let sample = 0; sample < 20; sample++) {
+    const modelName = `notice-event-sample-${sample}`;
+    await page.evaluate(({ event, modelName }) => (window as any).__downloadTest.emit(event,
+      { modelName, progress: 99, status: 'downloading' }), { event: download.event, modelName });
+    const notice = page.locator('[data-sonner-toast]').filter({ hasText: modelName });
+    await expect(notice).toContainText('99%');
+    await page.evaluate(modelName => {
+      (window as any).__noticeTiming = (window as any).__downloadTest.startMeasurement(false, modelName);
+      (window as any).__downloadTest.emit('parakeet-model-download-complete', { modelName });
+    }, modelName);
+    await expect(notice).toContainText('Download complete');
+    const timing = await page.evaluate(() => (window as any).__noticeTiming);
+    expect(timing.completed).not.toBeNull();
+    await info.attach('download-notice-latency', { body: JSON.stringify({
+      provider: 'Parakeet', browser: info.project.name, kind: 'completion-event', sample,
+      event_to_complete_ms: timing.completed - timing.started,
+      boundary: 'Production DOM and Sonner; desktop event injected; no network transfer',
+    }), contentType: 'application/json' });
+    await notice.getByRole('button', { name: 'Close download notice' }).click();
+    await expect(notice).toHaveCount(0);
+  }
   expect(errors).toEqual([]);
 });

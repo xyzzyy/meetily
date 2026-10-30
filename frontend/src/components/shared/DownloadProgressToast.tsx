@@ -197,6 +197,8 @@ export function useDownloadProgressToast() {
   useEffect(() => {
     let disposed = false;
     const subscriptions: Promise<() => void>[] = [];
+    const ownedCleanupTimers = cleanupTimers.current;
+    const renderedNotices = shown.current;
     for (const provider of downloadProviders) {
       const subscribe = (name: string | undefined, status: DownloadStatus) => {
         if (!name) return;
@@ -232,10 +234,10 @@ export function useDownloadProgressToast() {
     return () => {
       disposed = true;
       subscriptions.forEach(subscription => { void subscription.then(unlisten => unlisten()).catch(error => console.warn('Could not remove download listener', error)); });
-      cleanupTimers.current.forEach(clearTimeout);
-      cleanupTimers.current.clear();
+      ownedCleanupTimers.forEach(clearTimeout);
+      ownedCleanupTimers.clear();
       current.current.forEach((_, key) => toast.dismiss(`download-${key}`));
-      shown.current.clear();
+      renderedNotices.clear();
     };
   }, [updateDownload]);
 
