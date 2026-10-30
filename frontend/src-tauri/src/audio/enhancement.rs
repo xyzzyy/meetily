@@ -528,14 +528,19 @@ fn speech_context_with_target(
     let mut grouped: Vec<super::vad::SpeechSegment> = Vec::new();
     for segment in segments {
         if let Some(previous) = grouped.last_mut() {
-            if previous.end_timestamp_ms - previous.start_timestamp_ms < context_target_ms
-                && segment.start_timestamp_ms - previous.end_timestamp_ms <= CONTEXT_MAX_GAP_MS
+            // Overlapping spans always merge, so no audio is decoded twice.
+            // Recovered baseline regions can overlap or contain each other.
+            let overlaps = segment.start_timestamp_ms <= previous.end_timestamp_ms;
+            if overlaps
+                || (previous.end_timestamp_ms - previous.start_timestamp_ms < context_target_ms
+                    && segment.start_timestamp_ms - previous.end_timestamp_ms <= CONTEXT_MAX_GAP_MS)
             {
+                let end_ms = previous.end_timestamp_ms.max(segment.end_timestamp_ms);
                 let start = (previous.start_timestamp_ms.max(0.0) * 16.0).round() as usize;
-                let end = (segment.end_timestamp_ms.max(0.0) * 16.0).round() as usize;
+                let end = (end_ms.max(0.0) * 16.0).round() as usize;
                 if let Some(samples) = audio.get(start..end) {
                     previous.samples = samples.to_vec();
-                    previous.end_timestamp_ms = segment.end_timestamp_ms;
+                    previous.end_timestamp_ms = end_ms;
                     previous.confidence = previous.confidence.min(segment.confidence);
                     continue;
                 }
@@ -1390,6 +1395,26 @@ mod tests {
             audio[..175_840],
             "keep the pause and every source sample"
         );
+    }
+
+    #[test]
+    fn speech_context_never_shrinks_or_repeats_overlapping_spans() {
+        let audio: Vec<f32> = (0..30 * 16_000).map(|i| i as f32).collect();
+        let span = |a: usize, b: usize| super::super::vad::SpeechSegment {
+            samples: audio[a * 16_000..b * 16_000].to_vec(),
+            start_timestamp_ms: (a * 1000) as f64,
+            end_timestamp_ms: (b * 1000) as f64,
+            confidence: 0.0,
+        };
+        // A contained span must not cut the tail off the group.
+        let grouped = speech_context(&[span(9, 21), span(11, 14)], &audio);
+        assert_eq!(grouped.len(), 1);
+        assert_eq!(grouped[0].end_timestamp_ms, 21_000.0);
+        assert_eq!(grouped[0].samples, audio[9 * 16_000..21 * 16_000]);
+        // A group past its context target still absorbs an overlap.
+        let grouped = speech_context(&[span(0, 12), span(11, 15)], &audio);
+        assert_eq!(grouped.len(), 1);
+        assert_eq!(grouped[0].samples, audio[..15 * 16_000]);
     }
 
     #[test]
