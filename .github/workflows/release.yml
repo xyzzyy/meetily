@@ -1,197 +1,130 @@
-name: "Release"
+name: Release
 
 on:
+  push:
+    tags: ['v*']
   workflow_dispatch:
 
-# Prevent duplicate releases
+permissions:
+  contents: read
+
+# Manual runs and tag pushes must not publish the same version at once.
 concurrency:
-  group: release-${{ github.ref }}
-  cancel-in-progress: false  # Don't cancel releases, fail instead
+  group: release
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  NEXT_TELEMETRY_DISABLED: '1'
 
 jobs:
-  # STEP 1: Create draft release first
-  create-release:
+  macos-app:
+    name: Release macOS DMG (Apple Silicon)
+    runs-on: macos-latest
+    timeout-minutes: 90
     permissions:
       contents: write
-    runs-on: ubuntu-latest
-    outputs:
-      release-id: ${{ steps.create-release.outputs.result }}
-      version: ${{ steps.get-version.outputs.version }}
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
-          fetch-depth: 0  # Fetch all tags
+          persist-credentials: false
+          fetch-depth: 0
 
-      - name: Get version from tauri.conf.json and check for existing tags
-        id: get-version
-        shell: bash
-        run: |
-          BASE_VERSION=$(grep -o '"version": "[^"]*"' frontend/src-tauri/tauri.conf.json | cut -d'"' -f4)
-          echo "Base version from tauri.conf.json: $BASE_VERSION"
-
-          # Fetch all tags
-          git fetch --tags
-
-          # Check if base version tag exists
-          if git tag -l "v${BASE_VERSION}" | grep -q .; then
-            echo "Tag v${BASE_VERSION} already exists, looking for minor updates..."
-
-            # Find all existing minor versions (e.g., 0.1.1.1, 0.1.1.2, etc.)
-            LATEST_MINOR=0
-            for i in $(seq 1 100); do
-              if git tag -l "v${BASE_VERSION}.${i}" | grep -q .; then
-                LATEST_MINOR=$i
-              else
-                break
-              fi
-            done
-
-            # Increment to next minor version
-            NEXT_MINOR=$((LATEST_MINOR + 1))
-
-            if [ $NEXT_MINOR -gt 100 ]; then
-              echo "ERROR: Maximum minor version (100) reached for ${BASE_VERSION}"
-              echo "Please update the version in tauri.conf.json"
-              exit 1
-            fi
-
-            VERSION="${BASE_VERSION}.${NEXT_MINOR}"
-            echo "Using minor update version: $VERSION"
-          else
-            VERSION="${BASE_VERSION}"
-            echo "Using base version: $VERSION"
-          fi
-
-          echo "Final version: $VERSION"
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-
-      - name: Create Draft Release
-        id: create-release
+      - name: Check release version and tag
+        id: release
         uses: actions/github-script@v7
         with:
           script: |
-            const { data } = await github.rest.repos.createRelease({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              tag_name: `v${{ steps.get-version.outputs.version }}`,
-              name: `Meetily v${{ steps.get-version.outputs.version }}`,
-              draft: true,
-              prerelease: false,
-              generate_release_notes: true
-            })
-            console.log(`Created draft release with ID: ${data.id}`)
-            return data.id
+            const fs = require('node:fs');
+            const { execFileSync } = require('node:child_process');
+            const config = JSON.parse(fs.readFileSync('frontend/src-tauri/tauri.conf.json', 'utf8'));
+            const version = config.version;
+            if (!/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.test(version)) {
+              throw new Error('Set a stable X.Y.Z version in tauri.conf.json before release.');
+            }
+            const tag = `v${version}`;
+            const sha = execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
+            if (context.ref.startsWith('refs/tags/') && context.ref !== `refs/tags/${tag}`) {
+              throw new Error(`The tag must match the app version: ${tag}`);
+            }
+            const repo = { owner: context.repo.owner, repo: context.repo.repo };
+            try {
+              const existing = await github.rest.repos.getCommit({ ...repo, ref: `tags/${tag}` });
+              if (existing.data.sha !== sha) {
+                throw new Error(`${tag} points to a different commit. Update the app version.`);
+              }
+            } catch (error) {
+              if (error.status !== 404) throw error;
+            }
+            try {
+              await github.rest.repos.getReleaseByTag({ ...repo, tag });
+              throw new Error(`Release ${tag} already exists. Remove an incomplete draft before retrying.`);
+            } catch (error) {
+              if (error.status !== 404) throw error;
+            }
+            core.setOutput('tag', tag);
+            core.setOutput('sha', sha);
+            core.setOutput('title', `${config.productName} ${tag}`);
 
-  # STEP 2: Build all platforms and upload directly to release
-  # Note: Linux builds are excluded from release (only macOS and Windows)
-  build-all-platforms:
-    needs: create-release
-    permissions:
-      contents: write
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - platform: "macos-latest" # for Apple Silicon only (M1 and above)
-            args: "--target aarch64-apple-darwin"
-            target: "aarch64-apple-darwin"
-          - platform: "windows-latest"
-            args: ""
-            target: "x86_64-pc-windows-msvc"
+      - uses: ./.github/actions/setup-frontend
+      - uses: ./.github/actions/setup-native
 
-    uses: ./.github/workflows/build.yml
-    with:
-      platform: ${{ matrix.platform }}
-      target: ${{ matrix.target }}
-      build-args: ${{ matrix.args }}
-      sign-binaries: true
-      asset-prefix: "meetily"
-      upload-artifacts: false  # tauri-action uploads directly to release
-      release-id: ${{ needs.create-release.outputs.release-id }}
-    secrets: inherit
-
-  # STEP 3: Show release summary
-  release-summary:
-    needs: [create-release, build-all-platforms]
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - name: Get release assets and latest.json
-        id: release-info
+      - name: Build llama helper with Metal
         run: |
-          VERSION="${{ needs.create-release.outputs.version }}"
-          RELEASE_ID="${{ needs.create-release.outputs.release-id }}"
+          cargo build --locked --release -p llama-helper --features metal
+          mkdir -p frontend/src-tauri/binaries
+          cp target/release/llama-helper frontend/src-tauri/binaries/llama-helper-aarch64-apple-darwin
 
-          echo "## Release Assets" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
+      - name: Build app and DMG
+        working-directory: frontend
+        # beforeBuildCommand builds the diarization and FUN-ASR helpers and the UI.
+        run: pnpm exec tauri build --ci --bundles app,dmg -- --locked
 
-          # List all release assets
-          echo "### Files in Release" >> $GITHUB_STEP_SUMMARY
-          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
-          gh api repos/${{ github.repository }}/releases/${RELEASE_ID}/assets --jq '.[] | "\(.name) (\(.size / 1048576 | floor)MB)"' >> $GITHUB_STEP_SUMMARY
-          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-
-          # Download and show latest.json
-          echo "### latest.json content" >> $GITHUB_STEP_SUMMARY
-          gh release download "v${VERSION}" --pattern "latest.json" --dir . 2>/dev/null || echo "latest.json not yet available"
-          if [ -f latest.json ]; then
-            echo "\`\`\`json" >> $GITHUB_STEP_SUMMARY
-            cat latest.json >> $GITHUB_STEP_SUMMARY
-            echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+      - name: Verify app and DMG
+        env:
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          app="target/release/bundle/macos/Meetily Branch.app"
+          test -d "$app"
+          lipo "$app/Contents/MacOS/meetily" -verify_arch arm64
+          codesign --verify --deep --strict "$app"
+          for helper in llama-helper ffmpeg meetily-diarization funasr-helper; do
+            test -x "$app/Contents/MacOS/$helper"
+          done
+          shopt -s nullglob
+          dmgs=(target/release/bundle/dmg/*.dmg)
+          if [[ ${#dmgs[@]} -ne 1 ]]; then
+            echo 'Expected one DMG.' >&2
+            exit 1
           fi
-          echo "" >> $GITHUB_STEP_SUMMARY
+          hdiutil verify "${dmgs[0]}"
+          mkdir -p dist
+          cp "${dmgs[0]}" "dist/Meetily-Branch-${RELEASE_TAG}-macos-arm64.dmg"
+          cd dist
+          shasum -a 256 ./*.dmg > SHA256SUMS
 
-          # Download links
-          echo "### Download Links" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "**Release page:** https://github.com/${{ github.repository }}/releases/tag/v${VERSION}" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "**Download all as ZIP:** https://github.com/${{ github.repository }}/archive/refs/tags/v${VERSION}.zip" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "**Manual S3 upload:** Download latest.json from release and upload to \`s3://meetily-updates/latest.json\`" >> $GITHUB_STEP_SUMMARY
+      - name: Save release files
+        uses: actions/upload-artifact@v4
+        with:
+          name: meetily-branch-macos-arm64
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Publish GitHub release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Release Summary
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
+          RELEASE_SHA: ${{ steps.release.outputs.sha }}
+          RELEASE_TITLE: ${{ steps.release.outputs.title }}
         run: |
-          echo "============================================"
-          echo "=== Release Created Successfully ==="
-          echo "============================================"
-          echo "Version: v${{ needs.create-release.outputs.version }}"
-          echo "Release URL: https://github.com/${{ github.repository }}/releases/tag/v${{ needs.create-release.outputs.version }}"
-          echo ""
-          echo "Uploaded assets (via tauri-action):"
-          echo "  - macOS: DMG installer + app.tar.gz (for updater) + .sig"
-          echo "  - Windows: MSI + NSIS installers (SIGNED via signCommand) + .sig files"
-          echo "  - Updater manifest: latest.json (auto-generated by tauri-action)"
-          echo ""
-          echo "Next steps:"
-          echo "  1. Review the draft release"
-          echo "  2. Edit release notes if needed"
-          echo "  3. Publish the release when ready"
-          echo "============================================"
-
-          # Add to GitHub Step Summary
-          echo "## Release Created Successfully" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "**Version:** v${{ needs.create-release.outputs.version }}" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "**Release URL:** [View Release](https://github.com/${{ github.repository }}/releases/tag/v${{ needs.create-release.outputs.version }})" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### Uploaded Assets" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "| Platform | Assets |" >> $GITHUB_STEP_SUMMARY
-          echo "|----------|--------|" >> $GITHUB_STEP_SUMMARY
-          echo "| **macOS** | DMG installer, app.tar.gz (updater), .sig |" >> $GITHUB_STEP_SUMMARY
-          echo "| **Windows** | MSI installer (SIGNED), NSIS installer (SIGNED), .sig files |" >> $GITHUB_STEP_SUMMARY
-          echo "| **Updater** | latest.json manifest (auto-generated by tauri-action) |" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### Next Steps" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "1. [Review the draft release](https://github.com/${{ github.repository }}/releases/tag/v${{ needs.create-release.outputs.version }})" >> $GITHUB_STEP_SUMMARY
-          echo "2. Edit release notes if needed" >> $GITHUB_STEP_SUMMARY
-          echo "3. Publish the release when ready" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
+          # Keep the release in draft until all files have been uploaded.
+          gh release create "$RELEASE_TAG" dist/* \
+            --target "$RELEASE_SHA" \
+            --title "$RELEASE_TITLE" \
+            --notes 'Apple Silicon Macs with macOS 14.4 or later. This app has an ad hoc signature. It is not notarized by Apple; macOS can block the first launch.' \
+            --generate-notes --draft
+          gh release edit "$RELEASE_TAG" --draft=false
+          release_url=$(gh release view "$RELEASE_TAG" --json url --jq .url)
+          echo "Release: $release_url" >> "$GITHUB_STEP_SUMMARY"

@@ -56,7 +56,7 @@ More updates coming soon.
 
 ## Getting started
 
-Meetily Branch does not publish prebuilt installers, so you need to build it from source.
+Download the Apple Silicon DMG from [GitHub Releases](https://github.com/xyzzyy/meetily/releases). The installer requires macOS 14.4 or later. It has an ad hoc signature and is not notarized by Apple, so macOS can block the first launch. You can also build the app from source with the steps below.
 
 ### Prerequisites
 
@@ -91,6 +91,10 @@ These scripts pick a GPU backend for your hardware. They also build the `llama-h
 The repository root is a Cargo workspace, so the finished bundle is written to `target/release/bundle/` at the **repository root**, not under `frontend/`.
 
 For detailed platform instructions, see [docs/BUILDING.md](docs/BUILDING.md).
+
+To publish a macOS release, set the app version in `frontend/src-tauri/tauri.conf.json` to a new stable `X.Y.Z` version. Keep `frontend/package.json` and `frontend/src-tauri/Cargo.toml` at the same version, and update the lockfiles. Commit the changes, then push the matching tag, for example `v0.4.2`. You can also run **Release** from the Actions page on the commit to release; that run creates the version tag on that commit.
+
+The workflow builds the app and all helpers on Apple Silicon, checks the app signature and DMG, and publishes a GitHub release with the DMG, SHA-256 checksum, and release notes. It uses the built-in `GITHUB_TOKEN`; no Apple signing secrets are required. An existing release or a version tag on another commit stops the run. If an upload fails and leaves a draft release, remove that draft before you run the workflow again. Build files are also kept as workflow artifacts for 14 days.
 
 ### First launch on macOS
 
