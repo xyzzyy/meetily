@@ -14,7 +14,7 @@ use tokio::io::{AsyncWriteExt, BufWriter};
 use tokio::sync::RwLock;
 use tokio::time::timeout;
 
-use super::models::{get_available_models, get_model_by_name};
+use super::models::{get_available_models, get_model_by_name, ModelDef};
 
 // ============================================================================
 // Model Status Types
@@ -72,7 +72,7 @@ pub enum ModelStatus {
     Corrupted { file_size: u64, expected_min_size: u64 },
 
     /// Error occurred with the model
-    Error(String),
+    Error { #[serde(rename = "Error")] message: String },
 }
 
 /// Model information for UI display
@@ -273,7 +273,7 @@ impl ModelManager {
                             model_def.name,
                             e
                         );
-                        ModelStatus::Error(format!("Failed to read metadata: {}", e))
+                        ModelStatus::Error { message: format!("Failed to read metadata: {}", e) }
                     }
                 }
             } else {
@@ -365,25 +365,21 @@ impl ModelManager {
         model_name: &str,
         progress_callback: Option<Box<dyn Fn(DownloadProgress) + Send>>,
     ) -> Result<()> {
-        log::info!("Starting download for model: {}", model_name);
-
-        // Check if already downloading
-        {
-            let active = self.active_downloads.read().await;
-            if active.contains(model_name) {
-                log::warn!("Download already in progress for model: {}", model_name);
-                return Err(anyhow!("Download already in progress"));
-            }
-        }
-
-        // Get model definition
         let model_def = get_model_by_name(model_name)
             .ok_or_else(|| anyhow!("Unknown model: {}", model_name))?;
+        self.download_model_from_definition(&model_def, progress_callback).await
+    }
 
-        // Add to active downloads
-        {
-            let mut active = self.active_downloads.write().await;
-            active.insert(model_name.to_string());
+    async fn download_model_from_definition(
+        &self,
+        model_def: &ModelDef,
+        progress_callback: Option<Box<dyn Fn(DownloadProgress) + Send>>,
+    ) -> Result<()> {
+        let model_name = model_def.name.as_str();
+        log::info!("Starting download for model: {}", model_name);
+        // Only the request that acquires the active entry may clean it up.
+        if !self.active_downloads.write().await.insert(model_name.to_string()) {
+            return Err(anyhow!("Download already in progress"));
         }
 
         // Clear cancellation flag
@@ -400,6 +396,16 @@ impl ModelManager {
             }
         }
 
+        let result = self.download_model_file(model_def, progress_callback).await;
+        self.finish_download(model_name, result).await
+    }
+
+    async fn download_model_file(
+        &self,
+        model_def: &ModelDef,
+        progress_callback: Option<Box<dyn Fn(DownloadProgress) + Send>>,
+    ) -> Result<()> {
+        let model_name = model_def.name.as_str();
         let file_path = self.models_dir.join(&model_def.gguf_file);
 
         // Check if model already exists and is valid (skip re-download)
@@ -422,12 +428,6 @@ impl ModelManager {
                         if let Some(model_info) = models.get_mut(model_name) {
                             model_info.status = ModelStatus::Available;
                         }
-                    }
-
-                    // Remove from active downloads
-                    {
-                        let mut active = self.active_downloads.write().await;
-                        active.remove(model_name);
                     }
 
                     // Report 100% progress
@@ -519,8 +519,6 @@ impl ModelManager {
             }
             (response.content_length().unwrap_or(0), false)
         } else {
-            let mut active = self.active_downloads.write().await;
-            active.remove(model_name);
             return Err(anyhow!("Download failed with status: {}", response.status()));
         };
 
@@ -579,17 +577,6 @@ impl ModelManager {
                     let _ = writer.flush().await;
                     drop(writer);
 
-                    // Remove from active downloads
-                    let mut active = self.active_downloads.write().await;
-                    active.remove(model_name);
-
-                    // Update status
-                    {
-                        let mut models = self.available_models.write().await;
-                        if let Some(model_info) = models.get_mut(model_name) {
-                            model_info.status = ModelStatus::NotDownloaded;
-                        }
-                    }
 
                     // Use special marker prefix to distinguish cancellation from other errors
                     return Err(anyhow!("CANCELLED: Download cancelled by user"));
@@ -598,6 +585,11 @@ impl ModelManager {
 
             // Add per-chunk timeout (30 seconds) to detect stalled connections
             let next_result = timeout(Duration::from_secs(30), stream.next()).await;
+            // Cancellation can arrive while a chunk or timeout is pending.
+            if self.cancel_download_flag.read().await.as_deref() == Some(model_name) {
+                let _ = writer.flush().await;
+                return Err(anyhow!("CANCELLED: Download cancelled by user"));
+            }
 
             let chunk = match next_result {
                 // Timeout - no data received for 30 seconds
@@ -605,17 +597,6 @@ impl ModelManager {
                     log::warn!("Download timeout for {}: no data received for 30 seconds", model_name);
                     let _ = writer.flush().await;
 
-                    // Cleanup: Remove from active downloads
-                    let mut active = self.active_downloads.write().await;
-                    active.remove(model_name);
-
-                    // Set model status to Error (NOT NotDownloaded) so UI can show retry button
-                    {
-                        let mut models = self.available_models.write().await;
-                        if let Some(model_info) = models.get_mut(model_name) {
-                            model_info.status = ModelStatus::Error("Download timeout - No data received for 30 seconds".to_string());
-                        }
-                    }
 
                     return Err(anyhow!("Download timeout - No data received for 30 seconds"));
                 },
@@ -630,10 +611,6 @@ impl ModelManager {
                             log::error!("Download error for {}: {:?}", model_name, e);
                             let _ = writer.flush().await;
 
-                            // Cleanup: Remove from active downloads
-                            let mut active = self.active_downloads.write().await;
-                            active.remove(model_name);
-
                             // Categorize error for user-friendly message
                             let error_msg = if e.is_timeout() {
                                 "Connection timeout - Check your internet"
@@ -645,24 +622,13 @@ impl ModelManager {
                                 "Download error"
                             };
 
-                            // Set model status to Error (NOT NotDownloaded) so UI can show retry button
-                            {
-                                let mut models = self.available_models.write().await;
-                                if let Some(model_info) = models.get_mut(model_name) {
-                                    model_info.status = ModelStatus::Error(error_msg.to_string());
-                                }
-                            }
-
                             return Err(anyhow!("{}: {}", error_msg, e));
                         }
                     }
                 }
             };
             let chunk_len = chunk.len() as u64;
-            writer
-                .write_all(&chunk)
-                .await
-                .map_err(|e| anyhow!("Error writing to file: {}", e))?;
+            writer.write_all(&chunk).await.map_err(|error| anyhow!("Error writing to file: {}", error))?;
 
             downloaded += chunk_len;
             bytes_since_last_report += chunk_len;
@@ -702,7 +668,6 @@ impl ModelManager {
                     speed_mbps
                 );
 
-                // Update status
                 {
                     let mut models = self.available_models.write().await;
                     if let Some(model_info) = models.get_mut(model_name) {
@@ -723,7 +688,7 @@ impl ModelManager {
             }
         }
 
-        writer.flush().await?;
+        writer.flush().await.map_err(|error| anyhow!("Error writing to file: {}", error))?;
         drop(writer);
 
         log::info!("Download completed for model: {}", model_name);
@@ -748,17 +713,6 @@ impl ModelManager {
             // Clean up invalid file
             let _ = fs::remove_file(&file_path).await;
 
-            // Update status
-            {
-                let mut models = self.available_models.write().await;
-                if let Some(model_info) = models.get_mut(model_name) {
-                    model_info.status = ModelStatus::Error(format!("Validation failed: {}", e));
-                }
-            }
-
-            // Remove from active downloads
-            let mut active = self.active_downloads.write().await;
-            active.remove(model_name);
 
             return Err(anyhow!("File validation failed: {}", e));
         }
@@ -772,13 +726,29 @@ impl ModelManager {
             }
         }
 
-        // Remove from active downloads
-        {
-            let mut active = self.active_downloads.write().await;
-            active.remove(model_name);
-        }
-
         Ok(())
+    }
+
+    // Every worker exit must leave a status that polling can read, even without an event.
+    async fn finish_download(&self, model_name: &str, result: Result<()>) -> Result<()> {
+        let result = if result.is_err()
+            && self.cancel_download_flag.read().await.as_deref() == Some(model_name)
+        {
+            Err(anyhow!("CANCELLED: Download cancelled by user"))
+        } else {
+            result
+        };
+        if let Err(error) = &result {
+            if let Some(model) = self.available_models.write().await.get_mut(model_name) {
+                model.status = if error.to_string().starts_with("CANCELLED:") {
+                    ModelStatus::NotDownloaded
+                } else {
+                    ModelStatus::Error { message: error.to_string() }
+                };
+            }
+        }
+        self.active_downloads.write().await.remove(model_name);
+        result
     }
 
     /// Validate that a file is a valid GGUF model
@@ -814,20 +784,7 @@ impl ModelManager {
             *cancel_flag = Some(model_name.to_string());
         }
 
-        // Note: active_downloads cleanup is handled by the download loop when it detects
-        // the cancellation flag. This avoids double-removal race condition.
-
-        // Update status immediately for UI responsiveness
-        {
-            let mut models = self.available_models.write().await;
-            if let Some(model_info) = models.get_mut(model_name) {
-                model_info.status = ModelStatus::NotDownloaded;
-            }
-        }
-
-        // Brief delay to let download loop detect cancellation
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-
+        // The worker sets the terminal status and sends the result after it stops.
         Ok(())
     }
 
@@ -871,6 +828,96 @@ impl ModelManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn failed_write_or_flush_leaves_a_pollable_error_without_an_event() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = ModelManager::new_with_models_dir(Some(dir.path().to_path_buf())).unwrap();
+        manager.init().await.unwrap();
+        let name = "gemma3:1b";
+        let file_path = dir.path().join("read-only-output");
+        std::fs::write(&file_path, b"").unwrap();
+        for fail_on_flush in [false, true] {
+            manager.active_downloads.write().await.insert(name.to_string());
+            manager.available_models.write().await.get_mut(name).unwrap().status =
+                ModelStatus::Downloading { progress: 99 };
+            let file = fs::File::open(&file_path).await.unwrap();
+            let mut writer = BufWriter::with_capacity(if fail_on_flush { 8 } else { 1 }, file);
+            // Tokio queues the first file write. The next write or flush reports its error.
+            writer.write_all(b"GGUF").await.unwrap();
+            let result = if fail_on_flush {
+                writer.flush().await
+            } else {
+                writer.write_all(b"GGUF").await
+            };
+            assert!(result.is_err());
+            assert!(manager.finish_download(name, result.map_err(Into::into)).await.is_err());
+            assert!(!manager.active_downloads.read().await.contains(name));
+            let model = manager.list_models().await.into_iter().find(|model| model.name == name).unwrap();
+            assert!(matches!(model.status, ModelStatus::Error { .. }));
+            let wire = serde_json::to_value(manager.list_models().await).unwrap();
+            let status = &wire.as_array().unwrap().iter().find(|model| model["name"] == name).unwrap()["status"];
+            assert_eq!(status["type"], "error");
+            assert!(!status["Error"].as_str().unwrap().is_empty());
+            serde_json::from_value::<ModelStatus>(status.clone()).unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn failed_request_is_serializable_and_can_be_retried() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = ModelManager::new_with_models_dir(Some(dir.path().to_path_buf())).unwrap();
+        manager.init().await.unwrap();
+        let mut model = get_model_by_name("gemma3:1b").unwrap();
+        model.download_url = "://invalid".to_string();
+        for _ in 0..2 {
+            let error = manager.download_model_from_definition(&model, None).await.unwrap_err();
+            assert!(error.to_string().contains("Failed to start download"));
+            assert!(!manager.active_downloads.read().await.contains(&model.name));
+            let wire = serde_json::to_value(manager.list_models().await).unwrap();
+            let entry = wire.as_array().unwrap().iter().find(|entry| entry["name"] == model.name).unwrap();
+            assert_eq!(entry["status"]["type"], "error");
+            assert!(entry["status"]["Error"].as_str().unwrap().contains("Failed to start download"));
+        }
+    }
+
+    #[tokio::test]
+    async fn cancellation_during_a_pending_chunk_remains_cancelled() {
+        use tokio::io::AsyncReadExt;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = listener.local_addr().unwrap();
+        let (release, released) = tokio::sync::oneshot::channel::<()>();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0; 4096];
+            socket.read(&mut request).await.unwrap();
+            socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 16\r\n\r\n").await.unwrap();
+            released.await.unwrap();
+            socket.write_all(b"latechunk").await.unwrap();
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let manager = ModelManager::new_with_models_dir(Some(dir.path().to_path_buf())).unwrap();
+        manager.init().await.unwrap();
+        let mut model = get_model_by_name("gemma3:1b").unwrap();
+        model.download_url = format!("http://{endpoint}/model");
+        let (started, ready) = tokio::sync::oneshot::channel();
+        let started = std::sync::Mutex::new(Some(started));
+        let progress = Box::new(move |_: DownloadProgress| {
+            if let Some(started) = started.lock().unwrap().take() { let _ = started.send(()); }
+        });
+        let download = manager.download_model_from_definition(&model, Some(progress));
+        let cancel = async {
+            ready.await.unwrap();
+            manager.cancel_download(&model.name).await.unwrap();
+            // A real chunk arrives after cancellation was requested.
+            release.send(()).unwrap();
+        };
+        let (result, ()) = tokio::join!(download, cancel);
+        server.await.unwrap();
+        assert!(result.unwrap_err().to_string().starts_with("CANCELLED:"));
+        assert!(!manager.active_downloads.read().await.contains(&model.name));
+        assert_eq!(manager.get_model_info(&model.name).await.unwrap().status, ModelStatus::NotDownloaded);
+    }
 
     #[tokio::test]
     async fn shared_model_discovery_prefers_owned_and_protects_shared_deletion() {

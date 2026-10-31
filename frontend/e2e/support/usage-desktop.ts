@@ -93,6 +93,7 @@ export async function installUsageDesktop(page: Page) {
             case 'get_ollama_models': return [{ name: 'fixture-model' }];
             case 'get_meeting_folder_path':
             case 'api_get_api_key':
+            case 'get_enhancement_review':
             case 'get_meeting_diarization_status': return null;
             case 'get_recording_preferences': return { preferred_mic_device: null, preferred_system_device: null };
             case 'get_diarization_settings': return { enabled: false, mode: 'off', showProvisionalLabels: false };

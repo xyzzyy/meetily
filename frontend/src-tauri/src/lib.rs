@@ -762,6 +762,7 @@ pub fn run() {
             console_utils::hide_console,
             console_utils::toggle_console,
             ollama::get_ollama_models,
+            ollama::get_ollama_download_status,
             ollama::pull_ollama_model,
             ollama::delete_ollama_model,
             ollama::get_ollama_model_context,

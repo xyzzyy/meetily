@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
-use tauri::Manager;
+use std::sync::atomic::{AtomicBool, Ordering};
+use tauri::{Emitter, Manager};
 use tauri::{AppHandle, Runtime, State};
 
 use crate::{
@@ -20,10 +21,29 @@ use crate::{
 
 pub use super::finalize::StartFinalDiarizationRequest;
 
+static MODEL_DOWNLOAD_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+// Reset worker state even if the command future is dropped before it returns.
+struct ModelDownloadGuard<'a>(&'a AtomicBool);
+
+impl<'a> ModelDownloadGuard<'a> {
+    fn start(active: &'a AtomicBool) -> Self {
+        active.store(true, Ordering::Release);
+        Self(active)
+    }
+}
+
+impl Drop for ModelDownloadGuard<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DiarizationModelStatus {
     pub installed: bool,
+    pub downloading: bool,
     pub embedding_installed: bool,
     pub offline_installed: bool,
     /// Whether post-call refinement can run on this machine.
@@ -41,6 +61,7 @@ pub async fn get_diarization_model_status<R: Runtime>(
     let offline_installed = super::finalize::offline_models_present(&app);
     let refinement_supported = super::finalize::refinement_supported();
     Ok(DiarizationModelStatus {
+        downloading: MODEL_DOWNLOAD_ACTIVE.load(Ordering::Acquire),
         // Live labels only need the embedding model. The offline models matter
         // only where post-call refinement can run.
         installed: embedding_installed && (offline_installed || !refinement_supported),
@@ -55,14 +76,28 @@ pub async fn get_diarization_model_status<R: Runtime>(
 
 #[tauri::command]
 pub async fn download_diarization_model<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
+    // A rejected request must not send a result for the worker that owns this slot.
     let _operation = super::operations::try_processing_slot()?;
-    crate::diarization::models::download_embedding_model(&app).await?;
-    if !super::finalize::refinement_supported() {
-        return Ok(());
-    }
-    super::finalize::prepare_offline_models(&app)
-        .await
-        .map_err(|error| error.to_string())
+    let active = ModelDownloadGuard::start(&MODEL_DOWNLOAD_ACTIVE);
+    let result: Result<(), String> = async {
+        let _ = app.emit(
+            "diarization-model-download-progress",
+            serde_json::json!({"percent": 0}),
+        );
+        crate::diarization::models::download_embedding_model(&app).await?;
+        if !super::finalize::refinement_supported() {
+            return Ok(());
+        }
+        super::finalize::prepare_offline_models(&app)
+            .await
+            .map_err(|error| error.to_string())
+    }.await;
+    drop(active);
+    let _ = app.emit(
+        "diarization-model-download-finished",
+        serde_json::json!({"error": result.as_ref().err()}),
+    );
+    result
 }
 
 #[tauri::command]
@@ -1122,6 +1157,15 @@ fn normalize_speaker_label(label: &str) -> Result<String, String> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn model_download_state_clears_when_the_worker_is_dropped() {
+        let active = AtomicBool::new(false);
+        let worker = ModelDownloadGuard::start(&active);
+        assert!(active.load(Ordering::Acquire));
+        drop(worker);
+        assert!(!active.load(Ordering::Acquire));
+    }
+
     #[tokio::test]
     async fn attribution_does_not_restore_a_deleted_cached_profile() {
         for has_voice in [false, true] {
@@ -1161,6 +1205,15 @@ mod tests {
             SampleSource { meeting_id: "meeting", speaker_id: "alice" },
         ).await.unwrap();
         let processing = super::super::operations::try_processing_slot().unwrap();
+        // Rejection must not publish a result for the operation that holds the slot.
+        let app = tauri::test::mock_app();
+        let finished = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let observed = finished.clone();
+        tauri::Listener::listen(&app, "diarization-model-download-finished", move |_| {
+            observed.fetch_add(1, Ordering::Relaxed);
+        });
+        assert!(download_diarization_model(app.handle().clone()).await.unwrap_err().contains("in progress"));
+        assert_eq!(finished.load(Ordering::Relaxed), 0);
         let error = delete_profile_from_store(&pool, &profile_id).await.unwrap_err();
         assert!(error.contains("in progress"));
         assert!(SpeakerProfilesRepository::get(&pool, &profile_id).await.unwrap().is_some());

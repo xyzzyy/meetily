@@ -197,23 +197,17 @@ pub async fn builtin_ai_download_model<R: Runtime>(
         Err(e) => {
             let error_msg = e.to_string();
 
-            // Check if this is a cancellation error (marked with "CANCELLED:" prefix)
-            // Don't emit error event for cancellations - cancel command already emits cancelled event
-            if !error_msg.starts_with("CANCELLED:") {
-                // Emit error via progress event for frontend to display (only for real errors)
-                let _ = app.emit(
-                    "builtin-ai-download-progress",
-                    serde_json::json!({
-                        "model": model_name,
-                        "progress": 0,
-                        "downloaded_mb": 0,
-                        "total_mb": 0,
-                        "speed_mbps": 0,
-                        "status": "error",
-                        "error": error_msg
-                    }),
-                );
-            }
+            // Only the stopped worker can publish a terminal result.
+            let cancelled = error_msg.starts_with("CANCELLED:");
+            let _ = app.emit(
+                "builtin-ai-download-progress",
+                serde_json::json!({
+                    "model": model_name,
+                    "progress": 0,
+                    "status": if cancelled { "cancelled" } else { "error" },
+                    "error": if cancelled { None } else { Some(&error_msg) }
+                }),
+            );
             Err(error_msg)
         }
     }
@@ -221,8 +215,7 @@ pub async fn builtin_ai_download_model<R: Runtime>(
 
 /// Cancel an ongoing model download
 #[tauri::command]
-pub async fn builtin_ai_cancel_download<R: Runtime>(
-    app: AppHandle<R>,
+pub async fn builtin_ai_cancel_download(
     state: State<'_, ModelManagerState>,
     model_name: String,
 ) -> Result<(), String> {
@@ -238,15 +231,6 @@ pub async fn builtin_ai_cancel_download<R: Runtime>(
         .cancel_download(&model_name)
         .await
         .map_err(|e| e.to_string())?;
-
-    let _ = app.emit(
-        "builtin-ai-download-progress",
-        serde_json::json!({
-            "model": model_name,
-            "progress": 0,
-            "status": "cancelled"
-        }),
-    );
 
     Ok(())
 }
