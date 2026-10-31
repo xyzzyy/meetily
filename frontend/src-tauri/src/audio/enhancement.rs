@@ -125,6 +125,105 @@ fn group_words(
     rows
 }
 
+/// Nemotron's word times can collapse to one decoder step per word, placing a
+/// sentence seconds before it was said. On a checked meeting, "As of right now
+/// it seems like uh pretty pretty good bandwidth so." was saved at 542.8 s and
+/// came back packed into 539.7-541.0 s, so Enhance reported a gap there.
+/// When a saved row has no new words over it, look for its words just before
+/// it. If they are packed faster than speech, move them onto the saved row's
+/// time, followed by any packed words that would now be out of order. Times
+/// are in milliseconds.
+pub(crate) fn retime_collapsed_words(
+    mut words: Vec<(String, f64, f64)>,
+    saved: &[Transcript],
+) -> Vec<(String, f64, f64)> {
+    const LOOK_BACK_MS: f64 = 10_000.0;
+    fn tokens(text: &str) -> Vec<String> {
+        text.split_whitespace()
+            .map(|word| {
+                word.chars()
+                    .filter(|c| c.is_alphanumeric())
+                    .flat_map(char::to_lowercase)
+                    .collect::<String>()
+            })
+            .filter(|word| !word.is_empty())
+            .collect()
+    }
+    fn spread(words: &mut [(String, f64, f64)], start: f64, end: f64) {
+        let total: usize = words.iter().map(|w| w.0.chars().count().max(1)).sum();
+        let mut cursor = start;
+        for word in words {
+            let length = (end - start) * word.0.chars().count().max(1) as f64 / total as f64;
+            word.1 = cursor;
+            word.2 = cursor + length;
+            cursor = word.2;
+        }
+    }
+    let mut rows: Vec<_> = saved
+        .iter()
+        .filter_map(|row| Some((row.audio_start_time?, row.audio_end_time?, &row.transcript)))
+        .filter(|(start, end, _)| start.is_finite() && end.is_finite() && end > start)
+        .collect();
+    rows.sort_by(|a, b| a.0.total_cmp(&b.0));
+    for (start, end, text) in rows {
+        let (start, end) = (start * 1000.0, end * 1000.0);
+        if words.iter().any(|w| w.1 < end && w.2 > start) {
+            continue;
+        }
+        let expected = tokens(text);
+        let candidates: Vec<usize> = (0..words.len())
+            .filter(|&i| (start - LOOK_BACK_MS..start).contains(&words[i].1))
+            .collect();
+        let found: Vec<String> = candidates
+            .iter()
+            .map(|&i| tokens(&words[i].0).concat())
+            .collect();
+        // Longest common subsequence of the saved and new words.
+        let mut table = vec![vec![0usize; found.len() + 1]; expected.len() + 1];
+        for a in (0..expected.len()).rev() {
+            for b in (0..found.len()).rev() {
+                table[a][b] = if expected[a] == found[b] {
+                    table[a + 1][b + 1] + 1
+                } else {
+                    table[a + 1][b].max(table[a][b + 1])
+                };
+            }
+        }
+        let matched = table[0][0];
+        if matched < 4 || (matched as f64) < expected.len() as f64 * 0.6 {
+            continue;
+        }
+        let (mut a, mut b, mut first, mut last) = (0, 0, None, 0);
+        while a < expected.len() && b < found.len() {
+            if expected[a] == found[b] {
+                first.get_or_insert(candidates[b]);
+                last = candidates[b];
+                a += 1;
+                b += 1;
+            } else if table[a + 1][b] >= table[a][b + 1] {
+                a += 1;
+            } else {
+                b += 1;
+            }
+        }
+        let first = first.unwrap();
+        let count = last + 1 - first;
+        let packed_ms = words[last].2 - words[first].1;
+        if count as f64 <= packed_ms / 1000.0 * MAX_WORDS_PER_SECOND {
+            continue;
+        }
+        let after = (last + 1..words.len())
+            .find(|&i| words[i].1 >= end)
+            .unwrap_or(words.len());
+        let next = words.get(after).map_or(f64::INFINITY, |w| w.1);
+        // Trailing words get a conversational pace of 3 per second at most.
+        let trailing = (after - last - 1) as f64 * 1000.0 / 3.0;
+        spread(&mut words[first..=last], start, end);
+        spread(&mut words[last + 1..after], end, next.min(end + trailing));
+    }
+    words
+}
+
 /// The mixed recording is the fallback. Retained capture tracks stay separate
 /// so one input cannot mask speech on the other input.
 pub(crate) struct EnhancementAudio {
@@ -640,12 +739,14 @@ fn detected_speech(
     Ok((distinct, converted))
 }
 
+/// Real speech on the checked call stayed under 5 words per second.
+const MAX_WORDS_PER_SECOND: f64 = 6.0;
+
 /// Rows without word times span their whole input. More words than the audio
 /// can hold is not a transcription of it: on a 1.1-second clip Whisper returned
 /// a nine-word caption credit. Real speech on the checked call stayed under
 /// 5 words per second.
 pub(crate) fn untimed_row(text: String, start_ms: f64, end_ms: f64) -> Option<(String, f64, f64)> {
-    const MAX_WORDS_PER_SECOND: f64 = 6.0;
     let words = text.split_whitespace().count();
     if words == 0 {
         return None;
@@ -1278,6 +1379,87 @@ mod tests {
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].0, "Done.");
         assert_eq!(rows[1].0, "Next");
+    }
+
+    fn saved_row(text: &str, start: f64, end: f64) -> Transcript {
+        Transcript {
+            id: text.into(),
+            meeting_id: "m1".into(),
+            transcript: text.into(),
+            timestamp: String::new(),
+            summary: None,
+            action_items: None,
+            key_points: None,
+            audio_start_time: Some(start),
+            audio_end_time: Some(end),
+            duration: Some(end - start),
+        }
+    }
+
+    /// Nemotron's reply on the checked meeting: the sentence saved at
+    /// 542.76-546.04 s came back packed about 3 s early.
+    fn collapsed_reply() -> Vec<(String, f64, f64)> {
+        [
+            ("discussion.", 539_490.0, 539_640.0),
+            ("As", 539_650.0, 539_930.0),
+            ("of", 539_930.0, 539_970.0),
+            ("right", 539_970.0, 540_050.0),
+            ("now", 540_050.0, 540_070.0),
+            ("it", 540_070.0, 540_130.0),
+            ("seems", 540_130.0, 540_210.0),
+            ("like", 540_210.0, 540_290.0),
+            ("uh", 540_290.0, 540_370.0),
+            ("pretty", 540_370.0, 540_450.0),
+            ("pretty", 540_450.0, 540_530.0),
+            ("good", 540_530.0, 540_610.0),
+            ("bandwidth", 540_610.0, 540_930.0),
+            ("so.", 540_930.0, 541_010.0),
+            ("Sounds", 541_010.0, 541_170.0),
+            ("good.", 541_170.0, 541_190.0),
+            ("Okay.", 547_400.0, 548_360.0),
+        ]
+        .into_iter()
+        .map(|(text, start, end)| (text.to_string(), start, end))
+        .collect()
+    }
+
+    #[test]
+    fn collapsed_words_move_onto_the_saved_row_they_repeat() {
+        let saved = [
+            saved_row("a discussion.", 541.16, 541.82),
+            saved_row(
+                "As of right now it seems like uh pretty pretty good bandwidth so.",
+                542.76,
+                546.04,
+            ),
+        ];
+        let words = retime_collapsed_words(collapsed_reply(), &saved);
+        assert_eq!(words[0], collapsed_reply()[0]);
+        assert_eq!(words[1].1, 542_760.0);
+        assert!((words[13].2 - 546_040.0).abs() < 1e-6, "{:?}", words[13]);
+        // Packed words after the sentence stay in order, before the next word.
+        assert!(words[14].1 >= 546_040.0 && words[15].2 <= 547_400.0);
+        assert!(words.windows(2).all(|pair| pair[0].2 <= pair[1].1 + 1e-6));
+        assert_eq!(words[16], collapsed_reply()[16]);
+    }
+
+    #[test]
+    fn words_at_a_speaking_pace_or_with_other_text_keep_their_times() {
+        let saved = [saved_row(
+            "As of right now it seems like uh pretty pretty good bandwidth so.",
+            542.76,
+            546.04,
+        )];
+        // The same words spoken earlier at a natural pace are not a collapse.
+        let paced: Vec<_> = collapsed_reply()
+            .into_iter()
+            .enumerate()
+            .map(|(i, (text, _, _))| (text, 530_000.0 + i as f64 * 400.0, 530_300.0 + i as f64 * 400.0))
+            .collect();
+        assert_eq!(retime_collapsed_words(paced.clone(), &saved), paced);
+        // Packed words that do not repeat the saved row are not its speech.
+        let other = [saved_row("We should ship the release on Friday", 542.76, 546.04)];
+        assert_eq!(retime_collapsed_words(collapsed_reply(), &other), collapsed_reply());
     }
 
     fn lossless_source_fixture() -> tempfile::TempDir {
