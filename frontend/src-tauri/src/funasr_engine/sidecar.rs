@@ -338,8 +338,8 @@ fn without_silence_marker(text: String) -> String {
     if !text.contains(SILENCE_MARKER) {
         return text;
     }
-    text.split_whitespace()
-        .filter(|word| *word != SILENCE_MARKER)
+    text.replace(SILENCE_MARKER, "")
+        .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ")
 }
@@ -354,6 +354,9 @@ mod tests {
         assert_eq!(clean("/sil".into()), "");
         assert_eq!(clean(" /sil ".into()), "");
         assert_eq!(clean("okay /sil thanks".into()), "okay thanks");
+        assert_eq!(clean("hello/sil".into()), "hello");
+        assert_eq!(clean("你好/sil世界".into()), "你好世界");
+        assert_eq!(clean("/sil/sil".into()), "");
         assert_eq!(clean("Sure, thanks.".into()), "Sure, thanks.");
         assert_eq!(clean("嗯。".into()), "嗯。");
     }
