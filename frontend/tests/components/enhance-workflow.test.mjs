@@ -19,6 +19,8 @@ function dialog(provider, loading = false, selected = true, supported = true, ch
   const calls = [];
   const effects = [];
   const listeners = new Map();
+  const runCalls = [];
+  const openChanges = [];
   const model = { provider, name: `${provider}-selected`, displayName: provider, size_mb: 100 };
   const jsx = (type, props) => ({ type, props: props || {} });
   const hooks = { useState(initial) {
@@ -50,6 +52,9 @@ function dialog(provider, loading = false, selected = true, supported = true, ch
       return helper.exports;
     }
     if (name === '@/constants/languages') return { LANGUAGES: [] };
+    if (name === '@/contexts/EnhancementRunContext') return { useEnhancementRun: () => ({ run: options.run ?? null,
+      markStarted: id => runCalls.push(['markStarted', id]), markStartFailed: id => runCalls.push(['markStartFailed', id]),
+      dismissFailure: id => runCalls.push(['dismissFailure', id]), cancelEnhancement: async () => { runCalls.push(['cancel']); return true; } }) };
     if (name === '@tauri-apps/api/core') return { invoke: async (command, args) => {
       calls.push({ command, args }); return options.invoke?.(command, args);
     } };
@@ -65,10 +70,11 @@ function dialog(provider, loading = false, selected = true, supported = true, ch
   vm.runInNewContext(compiled.outputText, { module, exports: module.exports, require, console });
   const render = () => {
     cursor = 0;
-    return module.exports.RetranscribeDialog({ open: true, meetingId: 'meeting', meetingFolderPath: '/audio', onOpenChange() {} });
+    return module.exports.RetranscribeDialog({ open: true, meetingId: 'meeting', meetingFolderPath: '/audio',
+      onOpenChange: open => openChanges.push(open) });
   };
   const tree = render();
-  return { tree, states, calls, render, listeners, async mount() {
+  return { tree, states, calls, runCalls, openChanges, render, listeners, async mount() {
     for (const effect of effects.splice(0)) effect();
     await new Promise(resolve => setImmediate(resolve));
   } };
@@ -181,3 +187,53 @@ for (const action of ['Keep saved transcript', 'Apply proposed transcript']) {
   assert.equal(instance.calls[0].args.provider, 'nemotron');
   assert.equal(instance.calls[0].args.assignSpeakers, true);
 }
+
+// Starting records the run so it keeps going when the popup is minimized.
+{
+  const instance = dialog('whisper');
+  await start(instance.tree).props.onClick();
+  assert.deepEqual(instance.runCalls, [['markStarted', 'meeting']]);
+}
+
+// A running enhancement can be minimized instead of blocking the app.
+{
+  const running = { meetingId: 'meeting', status: 'running', error: null,
+    progress: { meeting_id: 'meeting', stage: 'transcribing', progress_percentage: 40, message: 'Transcribing audio...' } };
+  const instance = dialog('whisper', false, true, true, false, null, { run: running });
+  const content = nodes(instance.tree).find(node => node.type === 'DialogContent');
+  assert.equal(content.props.minimizable, true, 'the corner control must minimize while running');
+  assert.equal(content.props.onEscapeKeyDown, undefined);
+  assert.equal(content.props.onInteractOutside, undefined);
+  nodes(instance.tree).find(node => node.type === 'Dialog').props.onOpenChange(false);
+  assert.deepEqual(instance.openChanges, [false]);
+  assert.equal(instance.runCalls.length, 0, 'minimizing must not cancel the run');
+  assert.ok(nodes(instance.tree).some(node => node.props.children === 'Transcribing audio...'));
+  assert.equal(start(instance.tree), undefined);
+  // Reopening mid-run must not load the previous run's result.
+  await instance.mount();
+  assert.equal(instance.calls.some(call => call.command === 'get_enhancement_review'), false);
+}
+
+// The corner control closes the popup when nothing is running.
+{
+  const instance = dialog('whisper');
+  assert.equal(nodes(instance.tree).find(node => node.type === 'DialogContent').props.minimizable, false);
+}
+
+// Another meeting's run blocks a second start, which the backend would reject.
+{
+  const instance = dialog('whisper', false, true, true, false, null, { run: { meetingId: 'other', status: 'running', progress: null, error: null } });
+  assert.equal(start(instance.tree).props.disabled, true);
+  await start(instance.tree).props.onClick();
+  assert.equal(instance.calls.length, 0);
+  assert.ok(nodes(instance.tree).some(node => String(node.props.children).startsWith('Another meeting is being enhanced')));
+}
+
+// A run that failed while minimized shows its error when the popup reopens.
+{
+  const instance = dialog('whisper', false, true, true, false, null, { run: { meetingId: 'meeting', status: 'failed', progress: null, error: 'Model crashed' } });
+  await instance.mount();
+  assert.equal(instance.states.get('error'), 'Model crashed');
+  assert.deepEqual(instance.runCalls, [['dismissFailure', 'meeting']]);
+}
+console.log('Enhance background run checks passed');

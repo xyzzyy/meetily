@@ -20,6 +20,7 @@ function render(id) {
     if(name==='react')return {useState(initial){const key=stateNames[cursor++];if(!states.has(key))states.set(key,key==='undoReviewId'?id:initial);return [states.get(key),value=>states.set(key,value)];},useCallback:fn=>fn,useEffect(){}};
     if(name==='react/jsx-runtime')return {jsx,jsxs:jsx};
     if(name==='@/contexts/ConfigContext')return {useConfig:()=>({betaFeatures:{importAndRetranscribe:false}})};
+    if(name==='@/contexts/EnhancementRunContext')return {useEnhancementRun:()=>({run:null,openEnhancement(){}})};
     if(name==='@tauri-apps/api/core')return {invoke:async(command,args)=>{calls.push({command,args});return null;}};
     if(name==='sonner')return {toast:{success(){},warning(){},error(){}}};
     return new Proxy({},{get:(_,key)=>String(key)});

@@ -31,6 +31,7 @@ function makePanel(overrides = {}, command = async () => undefined, extraProps =
   const calls = [];
   const notices = [];
   const listeners = new Map();
+  const opened = [];
   const mutationRef = { current: false };
   const jsx = (type, props) => ({ type, props: props || {} });
   const hooks = {
@@ -50,6 +51,10 @@ function makePanel(overrides = {}, command = async () => undefined, extraProps =
     if (name === '@/contexts/ConfigContext') return { useConfig: () => ({
       diarizationSettings: settings, isLoadingDiarizationSettings: false,
       betaFeatures: { importAndRetranscribe: true },
+    }) };
+    if (name === '@/contexts/EnhancementRunContext') return { useEnhancementRun: () => ({
+      run: overrides.enhancementRun ?? null,
+      openEnhancement: (meetingId, folder) => opened.push({ meetingId, folder }),
     }) };
     if (name === '@/hooks/useSpeakerRefinementAvailability') return { useSpeakerRefinementAvailability: () => ({ supported: overrides.refinementSupported !== false, unavailableReason: overrides.refinementSupported === false ? 'Speaker analysis is unavailable.' : null }) };
     if (name === 'react/jsx-runtime') return { jsx, jsxs: jsx, Fragment: 'Fragment' };
@@ -82,7 +87,7 @@ function makePanel(overrides = {}, command = async () => undefined, extraProps =
     ...extraProps,
   };
   const render = () => { cursor = 0; effects.length = 0; return module.exports.TranscriptPanel(props); };
-  return { states, effects, calls, notices, settings, render, listeners };
+  return { states, effects, calls, notices, settings, render, listeners, opened };
 }
 function nodes(node) {
   if (!node || typeof node !== 'object') return [];
@@ -327,12 +332,10 @@ console.log('Speaker review controls: all checks passed');
   button(panel.render(), 'Run again').props.onClick();
   await settle();
   assert.deepEqual(panel.calls.map(call => call.name), ['retry_final_diarization']);
-  assert.equal(panel.states.get('enhanceDialogOpen'), false);
+  assert.equal(panel.opened.length, 0);
   assert.ok(text(panel.render()).includes('The saved transcript and labels were kept.'));
   button(panel.render(), 'Enhance').props.onClick();
-  const dialog = nodes(panel.render()).find(node => node.type === 'RetranscribeDialog');
-  assert.equal(dialog.props.open, true);
-  assert.equal(dialog.props.meetingId, 'meeting');
+  assert.deepEqual(panel.opened, [{ meetingId: 'meeting', folder: '/retained-audio' }]);
   assert.equal(panel.calls.some(call => call.name === 'start_retranscription_command'), false);
 }
 
@@ -348,3 +351,27 @@ for (const currentStatus of ['none', 'completed', 'failed']) {
   assert.equal(attribute(tree).props.disabled, false);
   assert.equal(button(tree, 'Correct rows').props.disabled, false);
 }
+
+// A minimized enhancement shows its progress on the meeting page and can be reopened.
+{
+  const progress = { meeting_id: 'meeting', stage: 'transcribing', progress_percentage: 42.4, message: 'Transcribing audio...' };
+  const panel = makePanel({ speakers: [alice], enhancementRun: { meetingId: 'meeting', status: 'running', progress, error: null } });
+  const tree = panel.render();
+  const meter = nodes(tree).find(node => node.props.role === 'progressbar');
+  assert.ok(meter, 'the meeting page needs an enhancement meter');
+  assert.equal(meter.props['aria-valuenow'], 42);
+  assert.ok(text(tree).includes('Transcribing audio...'));
+  assert.ok(text(tree).includes('42%'));
+  assert.equal(attribute(tree).props.disabled, true, 'speaker edits wait for the enhancement');
+  button(tree, 'Show').props.onClick();
+  assert.deepEqual(panel.opened, [{ meetingId: 'meeting', folder: '/retained-audio' }]);
+}
+
+// Another meeting's enhancement does not show on this page.
+{
+  const panel = makePanel({ speakers: [alice], enhancementRun: { meetingId: 'other', status: 'running', progress: null, error: null } });
+  const tree = panel.render();
+  assert.equal(nodes(tree).some(node => node.props.role === 'progressbar'), false);
+  assert.equal(attribute(tree).props.disabled, false);
+}
+console.log('Enhancement meter checks passed');
