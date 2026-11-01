@@ -509,6 +509,33 @@ fn parse_word_reply(body: &Value) -> Result<Reply, String> {
     }
     Ok(reply)
 }
+
+/// Only the times are used. Tagged text can have a different word order.
+fn parse_speaker_word_reply(body: &Value) -> Reply {
+    let words = body
+        .pointer("/transcription/words")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|word| {
+            let start = number(word, "start")?;
+            let end = number(word, "end")?;
+            if !start.is_finite() || !end.is_finite() {
+                return None;
+            }
+            Some(Word {
+                text: word.get("word")?.as_str()?.to_string(),
+                start,
+                end: end.max(start),
+            })
+        })
+        .collect();
+    Reply {
+        words,
+        ..Reply::default()
+    }
+}
+
 /// Speaker turns from `/v1/audio/diarizations`.
 fn parse_turns(body: &Value) -> Result<Vec<Turn>, String> {
     let segments = body
@@ -532,8 +559,16 @@ fn parse_turns(body: &Value) -> Result<Vec<Turn>, String> {
 enum Job {
     Text,
     Words,
+    /// Words with NVIDIA's speaker-tag instruction, used only for their times.
+    SpeakerWords,
     Speakers,
 }
+/// NVIDIA's prompt guide instruction for "who said what, with punctuation".
+/// Tagging speakers changes how the runtime lines words up with the audio:
+/// on a checked meeting, plain requests packed four sentences seconds early
+/// into the other person's turn, and tagged requests timed all four right.
+/// Their words were less accurate, so only their times are used.
+const SPEAKER_INSTRUCTION: &str = "Transcribe this audio with punctuation and capitalization. Include all spoken words and verbal fillers. Write numbers in their standard written form. Put speaker tags <spk:0> <spk:1> <spk:2> <spk:3> on the transcription.";
 fn max_request_samples(job: Job) -> usize {
     if job == Job::Speakers {
         MAX_SPEAKER_SAMPLES
@@ -667,14 +702,16 @@ impl Server {
                 .post(format!("{}/v1/audio/diarizations", self.base))
                 .multipart(reqwest::multipart::Form::new().part("file", file))
         } else {
+            let mut content = vec![json!({"type": "input_audio", "input_audio": {"data": STANDARD.encode(wav(audio)), "format": "wav"}})];
+            if job == Job::SpeakerWords {
+                content.insert(0, json!({"type": "text", "text": SPEAKER_INSTRUCTION}));
+            }
             self.client
                 .post(format!("{}/v1/chat/completions", self.base))
                 .json(&json!({
                     "model": "nemotron",
-                    "word_timestamps": job == Job::Words,
-                    "messages": [{"role": "user", "content": [
-                        {"type": "input_audio", "input_audio": {"data": STANDARD.encode(wav(audio)), "format": "wav"}}
-                    ]}],
+                    "word_timestamps": job != Job::Text,
+                    "messages": [{"role": "user", "content": content}],
                 }))
         };
         let response = request
@@ -707,7 +744,9 @@ impl Server {
                 })
                 .map_err(RequestError::Segment);
         }
-        if job == Job::Words {
+        if job == Job::SpeakerWords {
+            Ok(parse_speaker_word_reply(&reply))
+        } else if job == Job::Words {
             parse_word_reply(&reply).map_err(RequestError::Alignment)
         } else {
             parse_reply(&reply).map_err(RequestError::Segment)
@@ -872,11 +911,18 @@ impl NemotronProvider {
         audio: &[f32],
         cancel: &AtomicBool,
     ) -> Result<MeetingTranscript, TranscriptionError> {
+        let duration_ms = audio.len() as f64 / 16.0;
         let speakers = self.requests(audio, Job::Speakers, Some(cancel)).await?;
         let text = self.requests(audio, Job::Words, Some(cancel)).await?;
+        let mut words = words_on_timeline(text, duration_ms);
+        match self.requests(audio, Job::SpeakerWords, Some(cancel)).await {
+            Ok(timed) => words = times_from(words, &words_on_timeline(timed, duration_ms)),
+            Err(error) if cancel.load(Ordering::SeqCst) => return Err(error),
+            Err(error) => log::warn!("Nemotron kept its plain word times: {error}"),
+        }
         Ok(MeetingTranscript {
-            words: words_on_timeline(text, audio.len() as f64 / 16.0),
-            turns: bridge_turn_gaps(turns_on_timeline(speakers), audio.len() as f64 / 16000.0),
+            words,
+            turns: bridge_turn_gaps(turns_on_timeline(speakers), duration_ms / 1000.0),
         })
     }
 }
@@ -896,6 +942,101 @@ fn words_on_timeline(parts: Vec<(Reply, f64)>, duration_ms: f64) -> Vec<(String,
             words.push((word.text, start, end));
             previous = start;
         }
+    }
+    words
+}
+
+/// Gives `words` the times of the same words in `timed`, matched in order.
+/// Words without a match are spread between their matched neighbours.
+/// The text and its order are unchanged.
+fn times_from(
+    mut words: Vec<(String, f64, f64)>,
+    timed: &[(String, f64, f64)],
+) -> Vec<(String, f64, f64)> {
+    /// Words per matching block, which bounds memory on long recordings.
+    const BLOCK: usize = 300;
+    /// How far past a block the same words can be timed.
+    const REACH_MS: f64 = 30_000.0;
+    let key = |text: &str| -> String {
+        text.chars()
+            .filter(|c| c.is_alphanumeric())
+            .flat_map(char::to_lowercase)
+            .collect()
+    };
+    let mut matched: Vec<Option<usize>> = vec![None; words.len()];
+    let mut cursor = 0;
+    for first in (0..words.len()).step_by(BLOCK) {
+        let last = (first + BLOCK).min(words.len());
+        let limit = words[last - 1].2 + REACH_MS;
+        let end = (cursor..timed.len())
+            .find(|&j| timed[j].1 > limit)
+            .unwrap_or(timed.len());
+        let a: Vec<String> = words[first..last].iter().map(|w| key(&w.0)).collect();
+        let b: Vec<String> = timed[cursor..end].iter().map(|w| key(&w.0)).collect();
+        // Longest common subsequence, traced from the start.
+        let mut table = vec![vec![0u32; b.len() + 1]; a.len() + 1];
+        for i in (0..a.len()).rev() {
+            for j in (0..b.len()).rev() {
+                table[i][j] = if !a[i].is_empty() && a[i] == b[j] {
+                    table[i + 1][j + 1] + 1
+                } else {
+                    table[i + 1][j].max(table[i][j + 1])
+                };
+            }
+        }
+        let (mut i, mut j) = (0, 0);
+        while i < a.len() && j < b.len() {
+            if !a[i].is_empty() && a[i] == b[j] {
+                matched[first + i] = Some(cursor + j);
+                i += 1;
+                j += 1;
+            } else if table[i + 1][j] >= table[i][j + 1] {
+                i += 1;
+            } else {
+                j += 1;
+            }
+        }
+        if let Some(last_match) = matched[first..last].iter().rev().flatten().next() {
+            cursor = last_match + 1;
+        }
+    }
+    let original = words.clone();
+    for (i, found) in matched.iter().enumerate() {
+        if let Some(j) = found {
+            words[i].1 = timed[*j].1;
+            words[i].2 = timed[*j].2;
+        }
+    }
+    // Spread each run of unmatched words between its matched neighbours.
+    let mut i = 0;
+    while i < words.len() {
+        if matched[i].is_some() {
+            i += 1;
+            continue;
+        }
+        let run = i..(i..words.len()).find(|&k| matched[k].is_some()).unwrap_or(words.len());
+        let from = (run.start > 0).then(|| words[run.start - 1].2);
+        let to = words.get(run.end).map(|w| w.1);
+        if let (Some(from), Some(to)) = (from, to) {
+            let step = (to - from).max(0.0) / run.len() as f64;
+            for (n, k) in run.clone().enumerate() {
+                words[k].1 = from + step * n as f64;
+                words[k].2 = from + step * (n + 1) as f64;
+            }
+        } else {
+            for k in run.clone() {
+                words[k].1 = original[k].1;
+                words[k].2 = original[k].2;
+            }
+        }
+        i = run.end;
+    }
+    // Keep the timeline in order.
+    let mut previous = 0.0;
+    for word in &mut words {
+        word.1 = word.1.max(previous);
+        word.2 = word.2.max(word.1);
+        previous = word.1;
     }
     words
 }
@@ -1399,6 +1540,119 @@ mod tests {
         assert_eq!(
             bridge_turn_gaps(vec![turn("1", 0.4, 9.0)], 12.0),
             vec![turn("1", 0.0, 10.0)]
+        );
+    }
+
+    fn timed(words: &[(&str, f64, f64)]) -> Vec<(String, f64, f64)> {
+        words.iter().map(|(text, start, end)| (text.to_string(), *start, *end)).collect()
+    }
+
+    /// The checked meeting at 09:02. A plain request packed "As of right
+    /// now ... Sounds good." into 539.7-541.2 s; it was said over 542-547 s.
+    #[test]
+    fn words_keep_their_text_and_take_the_speaker_request_times() {
+        let plain = timed(&[
+            ("discussion.", 539_493.0, 539_640.0),
+            ("As", 539_653.0, 539_933.0),
+            ("of", 539_933.0, 539_973.0),
+            ("right", 539_973.0, 540_053.0),
+            ("now", 540_053.0, 540_070.0),
+            ("it", 540_070.0, 540_133.0),
+            ("seems", 540_133.0, 540_213.0),
+            ("like", 540_213.0, 540_292.0),
+            ("uh", 540_292.0, 540_372.0),
+            ("pretty", 540_372.0, 540_452.0),
+            ("pretty", 540_452.0, 540_532.0),
+            ("good", 540_532.0, 540_612.0),
+            ("bandwidth", 540_612.0, 540_932.0),
+            ("so.", 540_932.0, 541_011.0),
+            ("Sounds", 541_011.0, 541_171.0),
+            ("good.", 541_171.0, 541_190.0),
+            ("Okay.", 547_403.0, 548_362.0),
+        ]);
+        let tagged = timed(&[
+            ("Yeah,", 540_290.0, 540_510.0),
+            ("a", 540_532.0, 540_772.0),
+            ("discussion.", 540_772.0, 541_190.0),
+            ("as", 542_050.0, 542_090.0),
+            ("for", 542_090.0, 542_529.0),
+            ("now,", 542_529.0, 542_769.0),
+            ("it", 542_769.0, 542_929.0),
+            ("seems", 542_929.0, 543_249.0),
+            ("like", 543_249.0, 543_488.0),
+            ("a", 543_488.0, 543_808.0),
+            ("pretty", 543_808.0, 544_287.0),
+            ("pretty", 544_287.0, 544_607.0),
+            ("good", 544_607.0, 544_767.0),
+            ("bandwidth,", 544_767.0, 545_406.0),
+            ("so", 545_406.0, 545_680.0),
+            ("sounds", 546_844.0, 546_880.0),
+            ("good.", 546_880.0, 547_380.0),
+            ("Okay,", 547_403.0, 548_362.0),
+        ]);
+        let words = times_from(plain.clone(), &tagged);
+        let texts = |words: &[(String, f64, f64)]| words.iter().map(|w| w.0.clone()).collect::<Vec<_>>();
+        assert_eq!(texts(&words), texts(&plain));
+        let at = |text: &str| words.iter().find(|w| w.0 == text).unwrap().1;
+        assert_eq!((at("As"), at("seems"), at("bandwidth")), (542_050.0, 542_929.0, 544_767.0));
+        // "of right" and "uh" are not in the tagged words: they fall between
+        // their matched neighbours.
+        assert!(at("of") >= 542_090.0 && at("right") < 542_529.0, "{words:?}");
+        assert!(at("uh") >= 543_488.0 && at("uh") < 543_808.0, "{words:?}");
+        assert_eq!(at("Sounds"), 546_844.0);
+        assert!(words.windows(2).all(|pair| pair[0].1 <= pair[1].1));
+    }
+
+    #[test]
+    fn speaker_words_keep_time_order_and_zero_length_words() {
+        let body = json!({
+            "choices": [{"message": {"content": "<spk:0> Proving So Yep. <spk:1> And Hm."}}],
+            "transcription": {"words": [
+                {"word": "Proving", "start": 0.48, "end": 0.48},
+                {"word": "And", "start": 0.5, "end": 0.7},
+                {"word": "So", "start": 0.6, "end": 0.8},
+                {"word": "Yep.", "start": 1.0, "end": 1.2},
+                {"word": "Hm.", "start": 1.1, "end": 1.3}
+            ]}
+        });
+        let reply = parse_speaker_word_reply(&body);
+        let words = words_on_timeline(vec![(reply, 0.0)], 2000.0);
+        assert_eq!(
+            words,
+            timed(&[
+                ("Proving", 480.0, 480.0),
+                ("And", 500.0, 700.0),
+                ("So", 600.0, 800.0),
+                ("Yep.", 1000.0, 1200.0),
+                ("Hm.", 1100.0, 1300.0),
+            ])
+        );
+        assert!(parse_word_reply(&body).is_err());
+    }
+
+    #[test]
+    fn speaker_words_allow_missing_times_and_clamp_reversed_times() {
+        let empty = parse_speaker_word_reply(&json!({
+            "choices": [{"message": {"content": "<spk:0> Proving"}}],
+            "transcription": {"words": []}
+        }));
+        assert!(empty.words.is_empty());
+        let plain = timed(&[("Proving", 100.0, 200.0)]);
+        let times = words_on_timeline(vec![(empty, 0.0)], 1000.0);
+        assert_eq!(times_from(plain.clone(), &times), plain);
+
+        let reply = parse_speaker_word_reply(&json!({"transcription": {"words": [
+            {"word": "Proving", "start": 0.48, "end": 0.4},
+            {"word": "invalid", "start": null, "end": 0.8},
+            {"word": "invalid", "start": 0.8, "end": null}
+        ]}}));
+        assert_eq!(
+            reply.words,
+            vec![Word {
+                text: "Proving".into(),
+                start: 0.48,
+                end: 0.48,
+            }]
         );
     }
 
