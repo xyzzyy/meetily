@@ -50,15 +50,14 @@ pub const DECODERS: &[Decoder] = &[
     },
 ];
 
-/// NVIDIA's NeMo-Speech.cpp Metal build at commit 66d50d9 (nightly of
-/// 2026-10-28). NVIDIA replaces its nightly archive each day, so the verified
-/// archive is mirrored on the fork's releases.
+/// NVIDIA's NeMo-Speech.cpp v0.3.0 Metal build, its first release with
+/// Nemotron 3.5 Transcribe support.
 pub const RUNTIME: Artifact = Artifact {
-    name: "nemo-speech-nightly-66d50d9-macos-aarch64-metal.tar.gz",
-    size: 7_234_179,
-    sha256: "4621515b0050d283d3a2a3f0382631ee7f876eea46608fdb52f7a05f50c958fc",
+    name: "nemo-speech-0.3.0-macos-aarch64-metal.tar.gz",
+    size: 7_239_335,
+    sha256: "2b972ed8b5dba07492212acf8cb75cbf34ecb141198ffa1997febe84b7c4d9ed",
 };
-pub const RUNTIME_URL: &str = "https://github.com/xyzzyy/meetily/releases/download/nemo-speech-66d50d9/nemo-speech-nightly-66d50d9-macos-aarch64-metal.tar.gz";
+pub const RUNTIME_URL: &str = "https://github.com/NVIDIA/NeMo-Speech.cpp/releases/download/v0.3.0/nemo-speech-0.3.0-macos-aarch64-metal.tar.gz";
 /// The folder inside the archive.
-pub const RUNTIME_DIR: &str = "nemo-speech-nightly-macos-aarch64-metal";
-pub const RUNTIME_VERSION: &str = "0.2.0+nightly.66d50d9";
+pub const RUNTIME_DIR: &str = "nemo-speech-0.3.0-macos-aarch64-metal";
+pub const RUNTIME_VERSION: &str = "0.3.0";
