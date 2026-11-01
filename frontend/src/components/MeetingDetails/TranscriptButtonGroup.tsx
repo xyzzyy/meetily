@@ -3,6 +3,7 @@
 import { useState, useCallback, useEffect } from 'react';
 import { Button } from '@/components/ui/button';
 import { ButtonGroup } from '@/components/ui/button-group';
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { Copy, FolderOpen, Loader2, RefreshCw, Undo2 } from 'lucide-react';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
@@ -32,6 +33,8 @@ export function TranscriptButtonGroup({
   const { betaFeatures } = useConfig();
   const { run, openEnhancement } = useEnhancementRun();
   const enhancing = Boolean(meetingId) && run?.meetingId === meetingId && run?.status === 'running';
+  // The backend runs one enhancement at a time.
+  const otherMeetingEnhancing = Boolean(meetingId) && run?.status === 'running' && run?.meetingId !== meetingId;
   const [undoReviewId, setUndoReviewId] = useState<string | null>(null);
   const [undoing, setUndoing] = useState(false);
   const refreshUndo = useCallback(async () => {
@@ -114,18 +117,29 @@ export function TranscriptButtonGroup({
         )}
 
         {betaFeatures.importAndRetranscribe && meetingId && meetingFolderPath && (
-          <Button
-            size="sm"
-            variant="outline"
-            className="bg-gradient-to-r from-blue-50 dark:from-blue-500/10 to-purple-50 dark:to-purple-500/10 hover:from-blue-100 dark:hover:from-blue-500/15 hover:to-purple-100 dark:hover:to-purple-500/15 border-blue-200 dark:border-blue-500/30 px-2 @[22rem]:px-4"
-            onClick={() => openEnhancement(meetingId, meetingFolderPath)}
-            title={enhancing ? 'Show enhancement progress' : 'Retranscribe to enhance your recorded audio'}
-          >
-            {enhancing
-              ? <Loader2 className="animate-spin @[22rem]:mr-2" size={18} />
-              : <RefreshCw className="@[22rem]:mr-2" size={18} />}
-            <span className="hidden @[22rem]:inline">Enhance</span>
-          </Button>
+          <Tooltip>
+            {/* aria-disabled instead of disabled, so hovering still shows why. */}
+            <TooltipTrigger asChild>
+              <Button
+                size="sm"
+                variant="outline"
+                className={`bg-gradient-to-r from-blue-50 dark:from-blue-500/10 to-purple-50 dark:to-purple-500/10 border-blue-200 dark:border-blue-500/30 px-2 @[22rem]:px-4 ${otherMeetingEnhancing
+                  ? 'cursor-not-allowed opacity-50'
+                  : 'hover:from-blue-100 dark:hover:from-blue-500/15 hover:to-purple-100 dark:hover:to-purple-500/15'}`}
+                aria-disabled={otherMeetingEnhancing || undefined}
+                onClick={() => { if (!otherMeetingEnhancing) openEnhancement(meetingId, meetingFolderPath); }}
+                title={otherMeetingEnhancing ? undefined : enhancing ? 'Show enhancement progress' : 'Retranscribe to enhance your recorded audio'}
+              >
+                {enhancing
+                  ? <Loader2 className="animate-spin @[22rem]:mr-2" size={18} />
+                  : <RefreshCw className="@[22rem]:mr-2" size={18} />}
+                <span className="hidden @[22rem]:inline">Enhance</span>
+              </Button>
+            </TooltipTrigger>
+            {otherMeetingEnhancing && (
+              <TooltipContent>Another meeting is being enhanced. Start this one after it finishes.</TooltipContent>
+            )}
+          </Tooltip>
         )}
       </ButtonGroup>
     </div>

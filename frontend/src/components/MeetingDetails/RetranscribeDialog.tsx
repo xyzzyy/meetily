@@ -382,7 +382,7 @@ export function RetranscribeDialog({
           )}
 
           {!isProcessing && !error && !review && otherMeetingRunning && (
-            <p className="text-sm text-amber-700 dark:text-amber-300" role="status">Another meeting is being enhanced. Start this one when it finishes.</p>
+            <p className="text-sm text-amber-700 dark:text-amber-300" role="status">Another meeting is being enhanced. Start this one after it finishes.</p>
           )}
           {!isProcessing && !error && !review && modelNotice && (
             <p className="text-sm text-amber-700 dark:text-amber-300" role="status">{modelNotice}</p>
