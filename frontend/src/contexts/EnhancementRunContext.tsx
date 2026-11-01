@@ -58,7 +58,7 @@ export function EnhancementRunProvider({ children }: { children: ReactNode }) {
   const dialogRef = useRef(dialog);
   useEffect(() => { dialogRef.current = dialog; }, [dialog]);
   const folderPaths = useRef(new Map<string, string | null>());
-  // Events from a cancelled run still arrive while it stops; they must not reopen the meter.
+  // A cancelled run still reports progress and its end while it stops; neither needs a notice.
   const cancelledMeetingRef = useRef<string | null>(null);
 
   const openEnhancement = useCallback((meetingId: string, meetingFolderPath?: string | null) => {
@@ -94,8 +94,8 @@ export function EnhancementRunProvider({ children }: { children: ReactNode }) {
   const cancelEnhancement = useCallback(async () => {
     const meetingId = run?.status === 'running' ? run.meetingId : null;
     if (!meetingId) return false;
+    // The run keeps the meeting locked until the backend reports that it stopped.
     cancelledMeetingRef.current = meetingId;
-    setRun(null);
     try {
       await invoke('cancel_retranscription_command');
       return true;
@@ -127,9 +127,9 @@ export function EnhancementRunProvider({ children }: { children: ReactNode }) {
         }),
         listen<{ meeting_id: string; warning?: string | null }>('retranscription-complete', event => {
           const { meeting_id: meetingId, warning } = event.payload;
-          if (finishCancelled(meetingId)) return;
+          const cancelled = finishCancelled(meetingId);
           setRun(current => current?.meetingId === meetingId ? null : current);
-          if (popupShows(meetingId)) return;
+          if (cancelled || popupShows(meetingId)) return;
           toast.success('Enhancement finished', {
             ...reachableNotice,
             description: warning || 'The enhanced transcript was applied. Undo is available.',

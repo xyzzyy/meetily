@@ -77,16 +77,30 @@ test('a failure while minimized is kept for the popup', async () => {
   expect(ctx.run).toBeNull();
 });
 
-test('a cancelled run stays hidden while it stops', async () => {
+test('a cancelled run keeps the meeting busy until the backend stops it', async () => {
   await act(async () => ctx.markStarted('meeting'));
   await act(async () => { expect(await ctx.cancelEnhancement()).toBe(true); });
   expect(invoke).toHaveBeenCalledWith('cancel_retranscription_command');
+  expect(ctx.run?.status).toBe('running');
   await send('retranscription-progress', progress(60));
-  expect(ctx.run).toBeNull();
   await send('retranscription-error', { meeting_id: 'meeting', error: 'Retranscription cancelled' });
   expect(ctx.run).toBeNull();
   expect(error).not.toHaveBeenCalled();
   // Later runs are tracked again.
   await send('retranscription-progress', progress(5));
   expect(ctx.run?.status).toBe('running');
+  // A run that finishes before the cancel lands ends quietly too.
+  await act(async () => { expect(await ctx.cancelEnhancement()).toBe(true); });
+  await send('retranscription-complete', { meeting_id: 'meeting', warning: null });
+  expect(ctx.run).toBeNull();
+  expect(success).not.toHaveBeenCalled();
+});
+
+test('a rejected cancel leaves the run tracked', async () => {
+  invoke.mockImplementationOnce(async () => { throw new Error('No retranscription in progress'); });
+  await act(async () => ctx.markStarted('meeting'));
+  await act(async () => { expect(await ctx.cancelEnhancement()).toBe(false); });
+  expect(ctx.run?.status).toBe('running');
+  await send('retranscription-error', { meeting_id: 'meeting', error: 'Model crashed' });
+  expect(error).toHaveBeenCalledTimes(1);
 });
