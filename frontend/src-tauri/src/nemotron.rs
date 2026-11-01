@@ -1009,12 +1009,17 @@ fn times_from(
         }
         // Adjust repeats only after the original trace is complete. Each
         // replacement stays before the next saved pair. Keep the last pair
-        // fixed, so both the block's match count and its next cursor stay the same.
-        let pairs: Vec<_> = matched[first..last]
+        // fixed when another block follows, so its next cursor stays the same.
+        let mut pairs: Vec<_> = matched[first..last]
             .iter()
             .enumerate()
             .filter_map(|(i, j)| j.map(|j| (i, j)))
             .collect();
+        // The final block has no next cursor to protect. Use the window ends
+        // as bounds so its last pair can also move to a nearer repeat.
+        if last == words.len() {
+            pairs.push((last - first, end));
+        }
         for pair in pairs.windows(2) {
             let (mut i, mut j) = pair[0];
             let (next_i, next_j) = pair[1];
@@ -1725,6 +1730,20 @@ mod tests {
         ]);
 
         assert_eq!(times_from(plain.clone(), &tagged), plain);
+    }
+
+    #[test]
+    fn final_block_last_pair_chooses_the_nearest_tagged_repeat() {
+        let plain = timed(&[("hello", 0.0, 500.0), ("yes", 60_000.0, 60_500.0)]);
+        let tagged = timed(&[
+            ("hello", 0.0, 500.0),
+            ("yes", 40_000.0, 40_500.0),
+            ("yes", 60_000.0, 60_500.0),
+        ]);
+
+        let words = times_from(plain.clone(), &tagged);
+        assert_eq!(words[1], tagged[2]);
+        assert_eq!(words, plain);
     }
 
     #[test]
