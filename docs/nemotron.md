@@ -34,3 +34,7 @@ Meetily starts `nemo-speech serve` on a free loopback port with a random API key
 The server log is `models/nemotron/server.log`.
 
 The runtime can report a successful alignment but return no word times for a nonempty transcript. Meetily checks that the timed words retain all returned text. It retries a failed section in pieces of up to 20 seconds. If a shorter section still has incomplete times, Enhance reports an error and keeps the saved transcript.
+
+The runtime can also return the right words with the wrong times. A whole sentence can come back packed at one 80 ms step per word, several seconds before it was said. With speakers on, Meetily also requests each text piece with NVIDIA's speaker-tag instruction. These word times follow the audio. Meetily matches the words in order and copies these times onto the plain request's words. The text stays from the plain request because the tagged text was less accurate.
+
+This doubles transcription time. Enhance's check for lost speech still matches the saved transcript's words within 10 seconds and only warns. It never discards a run; Undo restores the previous transcript.

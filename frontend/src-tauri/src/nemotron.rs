@@ -509,6 +509,33 @@ fn parse_word_reply(body: &Value) -> Result<Reply, String> {
     }
     Ok(reply)
 }
+
+/// Only the times are used. Tagged text can have a different word order.
+fn parse_speaker_word_reply(body: &Value) -> Reply {
+    let words = body
+        .pointer("/transcription/words")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|word| {
+            let start = number(word, "start")?;
+            let end = number(word, "end")?;
+            if !start.is_finite() || !end.is_finite() {
+                return None;
+            }
+            Some(Word {
+                text: word.get("word")?.as_str()?.to_string(),
+                start,
+                end: end.max(start),
+            })
+        })
+        .collect();
+    Reply {
+        words,
+        ..Reply::default()
+    }
+}
+
 /// Speaker turns from `/v1/audio/diarizations`.
 fn parse_turns(body: &Value) -> Result<Vec<Turn>, String> {
     let segments = body
@@ -532,8 +559,16 @@ fn parse_turns(body: &Value) -> Result<Vec<Turn>, String> {
 enum Job {
     Text,
     Words,
+    /// Words with NVIDIA's speaker-tag instruction, used only for their times.
+    SpeakerWords,
     Speakers,
 }
+/// NVIDIA's prompt guide instruction for "who said what, with punctuation".
+/// Tagging speakers changes how the runtime lines words up with the audio:
+/// on a checked meeting, plain requests packed four sentences seconds early
+/// into the other person's turn, and tagged requests timed all four right.
+/// Their words were less accurate, so only their times are used.
+const SPEAKER_INSTRUCTION: &str = "Transcribe this audio with punctuation and capitalization. Include all spoken words and verbal fillers. Write numbers in their standard written form. Put speaker tags <spk:0> <spk:1> <spk:2> <spk:3> on the transcription.";
 fn max_request_samples(job: Job) -> usize {
     if job == Job::Speakers {
         MAX_SPEAKER_SAMPLES
@@ -667,14 +702,16 @@ impl Server {
                 .post(format!("{}/v1/audio/diarizations", self.base))
                 .multipart(reqwest::multipart::Form::new().part("file", file))
         } else {
+            let mut content = vec![json!({"type": "input_audio", "input_audio": {"data": STANDARD.encode(wav(audio)), "format": "wav"}})];
+            if job == Job::SpeakerWords {
+                content.insert(0, json!({"type": "text", "text": SPEAKER_INSTRUCTION}));
+            }
             self.client
                 .post(format!("{}/v1/chat/completions", self.base))
                 .json(&json!({
                     "model": "nemotron",
-                    "word_timestamps": job == Job::Words,
-                    "messages": [{"role": "user", "content": [
-                        {"type": "input_audio", "input_audio": {"data": STANDARD.encode(wav(audio)), "format": "wav"}}
-                    ]}],
+                    "word_timestamps": job != Job::Text,
+                    "messages": [{"role": "user", "content": content}],
                 }))
         };
         let response = request
@@ -707,7 +744,9 @@ impl Server {
                 })
                 .map_err(RequestError::Segment);
         }
-        if job == Job::Words {
+        if job == Job::SpeakerWords {
+            Ok(parse_speaker_word_reply(&reply))
+        } else if job == Job::Words {
             parse_word_reply(&reply).map_err(RequestError::Alignment)
         } else {
             parse_reply(&reply).map_err(RequestError::Segment)
@@ -872,11 +911,18 @@ impl NemotronProvider {
         audio: &[f32],
         cancel: &AtomicBool,
     ) -> Result<MeetingTranscript, TranscriptionError> {
+        let duration_ms = audio.len() as f64 / 16.0;
         let speakers = self.requests(audio, Job::Speakers, Some(cancel)).await?;
         let text = self.requests(audio, Job::Words, Some(cancel)).await?;
+        let mut words = words_on_timeline(text, duration_ms);
+        match self.requests(audio, Job::SpeakerWords, Some(cancel)).await {
+            Ok(timed) => words = times_from(words, &words_on_timeline(timed, duration_ms)),
+            Err(error) if cancel.load(Ordering::SeqCst) => return Err(error),
+            Err(error) => log::warn!("Nemotron kept its plain word times: {error}"),
+        }
         Ok(MeetingTranscript {
-            words: words_on_timeline(text, audio.len() as f64 / 16.0),
-            turns: bridge_turn_gaps(turns_on_timeline(speakers), audio.len() as f64 / 16000.0),
+            words,
+            turns: bridge_turn_gaps(turns_on_timeline(speakers), duration_ms / 1000.0),
         })
     }
 }
@@ -896,6 +942,154 @@ fn words_on_timeline(parts: Vec<(Reply, f64)>, duration_ms: f64) -> Vec<(String,
             words.push((word.text, start, end));
             previous = start;
         }
+    }
+    words
+}
+
+/// Gives `words` the times of the same words in `timed`, matched in order.
+/// Words without a match are spread between their matched neighbours.
+/// The text and its order are unchanged.
+fn times_from(
+    mut words: Vec<(String, f64, f64)>,
+    timed: &[(String, f64, f64)],
+) -> Vec<(String, f64, f64)> {
+    /// Words per matching block, which bounds memory on long recordings.
+    const BLOCK: usize = 300;
+    /// Maximum difference between matching word starts.
+    const REACH_MS: f64 = 30_000.0;
+    const MIN_WIDTH_MS: f64 = 1.0;
+    let key = |text: &str| -> String {
+        text.chars()
+            .filter(|c| c.is_alphanumeric())
+            .flat_map(char::to_lowercase)
+            .collect()
+    };
+    let mut matched: Vec<Option<usize>> = vec![None; words.len()];
+    let mut cursor = 0;
+    for first in (0..words.len()).step_by(BLOCK) {
+        let last = (first + BLOCK).min(words.len());
+        let lookahead = (last + BLOCK).min(words.len());
+        // The tagged window must reach the lookahead words too, or they can
+        // take this block's matches.
+        let limit = words[lookahead - 1].2 + REACH_MS;
+        let end = (cursor..timed.len())
+            .find(|&j| timed[j].1 > limit)
+            .unwrap_or(timed.len());
+        let a: Vec<String> = words[first..lookahead].iter().map(|w| key(&w.0)).collect();
+        let b: Vec<String> = timed[cursor..end].iter().map(|w| key(&w.0)).collect();
+        let matches = |i: usize, j: usize| {
+            !a[i].is_empty()
+                && a[i] == b[j]
+                && (timed[cursor + j].1 - words[first + i].1).abs() <= REACH_MS
+                && timed[cursor + j].2 > timed[cursor + j].1
+        };
+        // Longest common subsequence, traced from the start.
+        let mut table = vec![vec![0u32; b.len() + 1]; a.len() + 1];
+        for i in (0..a.len()).rev() {
+            for j in (0..b.len()).rev() {
+                table[i][j] = if matches(i, j) {
+                    table[i + 1][j + 1] + 1
+                } else {
+                    table[i + 1][j].max(table[i][j + 1])
+                };
+            }
+        }
+        let (mut i, mut j) = (0, 0);
+        // Include the next block in the LCS, but save only this block's matches.
+        while i < last - first && j < b.len() {
+            if matches(i, j) {
+                matched[first + i] = Some(cursor + j);
+                i += 1;
+                j += 1;
+            } else if table[i + 1][j] >= table[i][j + 1] {
+                i += 1;
+            } else {
+                j += 1;
+            }
+        }
+        // Adjust repeats only after the original trace is complete. Each
+        // replacement stays before the next saved pair. Keep the last pair
+        // fixed when another block follows, so its next cursor stays the same.
+        let mut pairs: Vec<_> = matched[first..last]
+            .iter()
+            .enumerate()
+            .filter_map(|(i, j)| j.map(|j| (i, j)))
+            .collect();
+        // The final block has no next cursor to protect. Use the window ends
+        // as bounds so its last pair can also move to a nearer repeat.
+        if last == words.len() {
+            pairs.push((last - first, end));
+        }
+        for pair in pairs.windows(2) {
+            let (mut i, mut j) = pair[0];
+            let (next_i, next_j) = pair[1];
+            loop {
+                let distance = |i: usize, j: usize| (timed[j].1 - words[first + i].1).abs();
+                let nearest = (i + 1..next_i)
+                    .map(|k| (k, j))
+                    .chain((j + 1..next_j).map(|k| (i, k)))
+                    .filter(|&(i, j)| matches(i, j - cursor))
+                    .min_by(|&(a, b), &(c, d)| distance(a, b).total_cmp(&distance(c, d)));
+                let Some((near_i, near_j)) = nearest
+                    .filter(|&(near_i, near_j)| distance(near_i, near_j) < distance(i, j))
+                else {
+                    break;
+                };
+                matched[first + i] = None;
+                matched[first + near_i] = Some(near_j);
+                (i, j) = (near_i, near_j);
+            }
+        }
+        if let Some(last_match) = matched[first..last].iter().rev().flatten().next() {
+            cursor = last_match + 1;
+        }
+    }
+    let original = words.clone();
+    for (i, found) in matched.iter().enumerate() {
+        if let Some(j) = found {
+            words[i].1 = timed[*j].1;
+            words[i].2 = timed[*j].2;
+        }
+    }
+    // Spread each run of unmatched words between its matched neighbours.
+    let mut i = 0;
+    while i < words.len() {
+        if matched[i].is_some() {
+            i += 1;
+            continue;
+        }
+        let run = i..(i..words.len()).find(|&k| matched[k].is_some()).unwrap_or(words.len());
+        let from = (run.start > 0).then(|| words[run.start - 1].2);
+        let to = words.get(run.end).map(|w| w.1);
+        if let (Some(from), Some(to)) = (from, to) {
+            let from = from.min(to);
+            let step = (to - from).max(0.0) / run.len() as f64;
+            for (n, k) in run.clone().enumerate() {
+                words[k].1 = from + step * n as f64;
+                words[k].2 = from + step * (n + 1) as f64;
+            }
+        } else {
+            for k in run.clone() {
+                words[k].1 = original[k].1;
+                words[k].2 = original[k].2;
+                if let Some(to) = to {
+                    words[k].1 = words[k].1.min(to - MIN_WIDTH_MS);
+                    words[k].2 = words[k].2.min(to).max(words[k].1 + MIN_WIDTH_MS);
+                } else if let Some(from) = from {
+                    words[k].1 = words[k].1.max(from);
+                    words[k].2 = words[k].2.max(words[k].1 + MIN_WIDTH_MS);
+                }
+            }
+        }
+        i = run.end;
+    }
+    // Keep starts in order and give every word a positive duration, even
+    // when its matched neighbours leave no room.
+    let mut previous = 0.0;
+    for word in &mut words {
+        word.1 = word.1.max(previous);
+        word.2 = word.2.max(word.1 + MIN_WIDTH_MS);
+        previous = word.1;
     }
     words
 }
@@ -1400,6 +1594,322 @@ mod tests {
             bridge_turn_gaps(vec![turn("1", 0.4, 9.0)], 12.0),
             vec![turn("1", 0.0, 10.0)]
         );
+    }
+
+    fn timed(words: &[(&str, f64, f64)]) -> Vec<(String, f64, f64)> {
+        words.iter().map(|(text, start, end)| (text.to_string(), *start, *end)).collect()
+    }
+
+    /// The checked meeting at 09:02. A plain request packed "As of right
+    /// now ... Sounds good." into 539.7-541.2 s; it was said over 542-547 s.
+    #[test]
+    fn words_keep_their_text_and_take_the_speaker_request_times() {
+        let plain = timed(&[
+            ("discussion.", 539_493.0, 539_640.0),
+            ("As", 539_653.0, 539_933.0),
+            ("of", 539_933.0, 539_973.0),
+            ("right", 539_973.0, 540_053.0),
+            ("now", 540_053.0, 540_070.0),
+            ("it", 540_070.0, 540_133.0),
+            ("seems", 540_133.0, 540_213.0),
+            ("like", 540_213.0, 540_292.0),
+            ("uh", 540_292.0, 540_372.0),
+            ("pretty", 540_372.0, 540_452.0),
+            ("pretty", 540_452.0, 540_532.0),
+            ("good", 540_532.0, 540_612.0),
+            ("bandwidth", 540_612.0, 540_932.0),
+            ("so.", 540_932.0, 541_011.0),
+            ("Sounds", 541_011.0, 541_171.0),
+            ("good.", 541_171.0, 541_190.0),
+            ("Okay.", 547_403.0, 548_362.0),
+        ]);
+        let tagged = timed(&[
+            ("Yeah,", 540_290.0, 540_510.0),
+            ("a", 540_532.0, 540_772.0),
+            ("discussion.", 540_772.0, 541_190.0),
+            ("as", 542_050.0, 542_090.0),
+            ("for", 542_090.0, 542_529.0),
+            ("now,", 542_529.0, 542_769.0),
+            ("it", 542_769.0, 542_929.0),
+            ("seems", 542_929.0, 543_249.0),
+            ("like", 543_249.0, 543_488.0),
+            ("a", 543_488.0, 543_808.0),
+            ("pretty", 543_808.0, 544_287.0),
+            ("pretty", 544_287.0, 544_607.0),
+            ("good", 544_607.0, 544_767.0),
+            ("bandwidth,", 544_767.0, 545_406.0),
+            ("so", 545_406.0, 545_680.0),
+            ("sounds", 546_844.0, 546_880.0),
+            ("good.", 546_880.0, 547_380.0),
+            ("Okay,", 547_403.0, 548_362.0),
+        ]);
+        let words = times_from(plain.clone(), &tagged);
+        let texts = |words: &[(String, f64, f64)]| words.iter().map(|w| w.0.clone()).collect::<Vec<_>>();
+        assert_eq!(texts(&words), texts(&plain));
+        let at = |text: &str| words.iter().find(|w| w.0 == text).unwrap().1;
+        assert_eq!((at("As"), at("seems"), at("bandwidth")), (542_050.0, 542_929.0, 544_767.0));
+        // "of right" and "uh" are not in the tagged words: they fall between
+        // their matched neighbours.
+        assert!(at("of") >= 542_090.0 && at("right") < 542_529.0, "{words:?}");
+        assert!(at("uh") >= 543_488.0 && at("uh") < 543_808.0, "{words:?}");
+        assert_eq!(at("Sounds"), 546_844.0);
+        assert!(words.windows(2).all(|pair| pair[0].1 <= pair[1].1));
+    }
+
+    #[test]
+    fn overlapping_tagged_words_keep_the_right_matched_start() {
+        let plain = timed(&[
+            ("a", 0.0, 100.0),
+            ("b", 100.0, 200.0),
+            ("c", 300.0, 400.0),
+            ("d", 500.0, 600.0),
+        ]);
+        let tagged = timed(&[("a", 0.0, 100.0), ("b", 100.0, 500.0), ("d", 300.0, 600.0)]);
+        let words = times_from(plain, &tagged);
+        assert_eq!(words[3], ("d".into(), 300.0, 600.0));
+        assert!(words[2].1 >= words[1].1 && words[2].1 <= words[3].1, "{words:?}");
+        assert!(words.iter().all(|word| word.2 >= word.1 + 1.0), "{words:?}");
+        assert!(words.windows(2).all(|pair| pair[0].1 <= pair[1].1), "{words:?}");
+    }
+
+    #[test]
+    fn zero_length_tagged_words_get_positive_times_between_neighbours() {
+        let plain = timed(&[("before", 0.0, 80.0), ("word", 100.0, 120.0), ("after", 200.0, 400.0)]);
+        for (next_start, zero_start) in [(300.0_f64, 150.0), (100.0, 100.0)] {
+            let tagged = timed(&[
+                ("before", 0.0, 100.0),
+                ("word", zero_start, zero_start),
+                ("after", next_start, 400.0),
+            ]);
+            let words = times_from(plain.clone(), &tagged);
+            assert_eq!(words[1], ("word".into(), 100.0, next_start.max(101.0)));
+            assert!(words.iter().all(|word| word.2 > word.1), "{words:?}");
+            assert!(words.windows(2).all(|pair| pair[0].1 <= pair[1].1), "{words:?}");
+        }
+    }
+
+    #[test]
+    fn repeated_word_ties_keep_the_nearest_times() {
+        let plain = timed(&[
+            ("yes", 20_000.0, 20_500.0),
+            ("yes", 25_000.0, 25_500.0),
+            ("okay", 26_000.0, 26_500.0),
+        ]);
+        let tagged = timed(&[("yes", 25_000.0, 25_500.0), ("okay", 26_000.0, 26_500.0)]);
+        let words = times_from(plain.clone(), &tagged);
+        assert_eq!(words[1], plain[1]);
+        assert_eq!(words[2], plain[2]);
+        assert!(words[0].1 <= 25_000.0 && words[0].1 < words[1].1, "{words:?}");
+        assert_eq!(words, plain);
+
+        // The same tie can occur in the tagged words.
+        assert_eq!(times_from(tagged.clone(), &plain), tagged);
+
+        // A nearer repeat must not replace a match if that loses another match.
+        let plain = timed(&[
+            ("yes", 20_000.0, 20_500.0),
+            ("okay", 24_000.0, 24_500.0),
+            ("yes", 25_000.0, 25_500.0),
+        ]);
+        let tagged = timed(&[
+            ("yes", 25_000.0, 25_500.0),
+            ("okay", 26_000.0, 26_500.0),
+            ("yes", 27_000.0, 27_500.0),
+        ]);
+        assert_eq!(times_from(plain, &tagged), tagged);
+    }
+
+    #[test]
+    fn repeated_word_ties_choose_the_nearest_of_three_tagged_repeats() {
+        let plain = timed(&[("yes", 25_000.0, 25_500.0), ("okay", 26_000.0, 26_500.0)]);
+        let tagged = timed(&[
+            ("yes", 20_000.0, 20_500.0),
+            ("yes", 22_000.0, 22_500.0),
+            ("yes", 25_000.0, 25_500.0),
+            ("okay", 26_000.0, 26_500.0),
+        ]);
+
+        assert_eq!(times_from(plain.clone(), &tagged), plain);
+    }
+
+    #[test]
+    fn final_block_last_pair_chooses_the_nearest_tagged_repeat() {
+        let plain = timed(&[("hello", 0.0, 500.0), ("yes", 60_000.0, 60_500.0)]);
+        let tagged = timed(&[
+            ("hello", 0.0, 500.0),
+            ("yes", 40_000.0, 40_500.0),
+            ("yes", 60_000.0, 60_500.0),
+        ]);
+
+        let words = times_from(plain.clone(), &tagged);
+        assert_eq!(words[1], tagged[2]);
+        assert_eq!(words, plain);
+    }
+
+    #[test]
+    fn repeated_word_ties_choose_the_nearest_of_three_plain_repeats() {
+        let plain = timed(&[
+            ("yes", 20_000.0, 20_500.0),
+            ("yes", 22_000.0, 22_500.0),
+            ("yes", 25_000.0, 25_500.0),
+            ("okay", 26_000.0, 26_500.0),
+        ]);
+        let tagged = timed(&[("yes", 25_000.0, 25_500.0), ("okay", 26_000.0, 26_500.0)]);
+
+        let words = times_from(plain.clone(), &tagged);
+        assert_eq!(words[2], tagged[0]);
+        assert_eq!(words, plain);
+    }
+
+    #[test]
+    fn repeated_word_ties_keep_the_match_count_across_blocks() {
+        let mut plain: Vec<_> = (0..297)
+            .map(|i| (format!("prefix{i}"), 0.0, 1.0))
+            .collect();
+        let mut tagged = plain.clone();
+        let plain_keys = ["b", "b", "c", "c", "c", "a", "a", "b", "a", "a", "c", "a"];
+        for (i, text) in plain_keys.iter().enumerate() {
+            plain.push((text.to_string(), i as f64 * 100.0 + 12.0, i as f64 * 100.0 + 62.0));
+            if i == 5 {
+                plain.extend((0..297).map(|n| (format!("absent{n}"), 562.0, 563.0)));
+            }
+        }
+        let tagged_keys = ["c", "c", "c", "c", "a", "c", "a", "a", "a", "b", "c", "b", "c"];
+        let starts = [0.0, 100.0, 229.0, 298.0, 430.0, 531.0, 622.0, 730.0, 795.0, 913.0, 1002.0, 1128.0, 1192.0];
+        for (text, start) in tagged_keys.iter().zip(starts) {
+            tagged.push((text.to_string(), start, start + 50.0));
+        }
+
+        let words = times_from(plain, &tagged);
+        // The trace without the time preference matches 305 words. Compare
+        // text and both times so that words with interpolated times do not count.
+        let count = words.iter().filter(|word| tagged.contains(word)).count();
+        assert_eq!(count, 305);
+    }
+
+    #[test]
+    fn unmatched_edge_runs_keep_the_matched_times() {
+        let plain = timed(&[("um", 78_000.0, 78_500.0), ("hello", 79_000.0, 79_500.0)]);
+        let tagged = timed(&[("hello", 50_000.0, 50_500.0)]);
+        let words = times_from(plain, &tagged);
+        assert_eq!(words[1], tagged[0]);
+        assert!(words[0].1 <= 50_000.0, "{words:?}");
+        assert!(words[0].2 <= 50_000.0 && words[0].2 >= words[0].1 + 1.0, "{words:?}");
+
+        let plain = timed(&[("hello", 49_000.0, 49_500.0), ("um", 49_500.0, 49_800.0)]);
+        let words = times_from(plain, &tagged);
+        assert_eq!(words[0], tagged[0]);
+        assert!(words[1].1 >= 50_500.0 && words[1].2 >= words[1].1 + 1.0, "{words:?}");
+    }
+
+    #[test]
+    fn repeated_words_take_times_from_the_nearby_occurrence() {
+        let plain = timed(&[
+            ("hello", 0.0, 500.0),
+            ("yes", 600_000.0, 600_500.0),
+            ("done", 601_000.0, 601_500.0),
+        ]);
+        let tagged = timed(&[
+            ("hello", 0.0, 500.0),
+            ("yes", 10_000.0, 10_500.0),
+            ("yes", 600_000.0, 600_500.0),
+            ("done", 601_000.0, 601_500.0),
+        ]);
+        assert_eq!(times_from(plain.clone(), &tagged), plain);
+    }
+
+    #[test]
+    fn a_block_keeps_matches_for_words_in_the_next_block() {
+        let prefix: Vec<_> = (0..299)
+            .map(|i| (format!("word{i}"), (i + 1) as f64 * 300.0, (i + 2) as f64 * 300.0))
+            .collect();
+        let mut plain = prefix.clone();
+        plain.extend(timed(&[
+            ("yes", 90_000.0, 91_000.0),
+            ("we", 91_000.0, 92_000.0),
+            ("agree", 92_000.0, 93_000.0),
+            ("yes", 93_000.0, 94_000.0),
+            ("done", 94_000.0, 95_000.0),
+        ]));
+        let mut tagged = prefix;
+        tagged.extend_from_slice(&plain[300..]);
+
+        let words = times_from(plain.clone(), &tagged);
+        assert_eq!(words[..299], plain[..299]);
+        assert_eq!(words[299..], plain[299..]);
+    }
+
+    #[test]
+    fn speaker_words_keep_time_order_and_zero_length_words() {
+        let body = json!({
+            "choices": [{"message": {"content": "<spk:0> Proving So Yep. <spk:1> And Hm."}}],
+            "transcription": {"words": [
+                {"word": "Proving", "start": 0.48, "end": 0.48},
+                {"word": "And", "start": 0.5, "end": 0.7},
+                {"word": "So", "start": 0.6, "end": 0.8},
+                {"word": "Yep.", "start": 1.0, "end": 1.2},
+                {"word": "Hm.", "start": 1.1, "end": 1.3}
+            ]}
+        });
+        let reply = parse_speaker_word_reply(&body);
+        let words = words_on_timeline(vec![(reply, 0.0)], 2000.0);
+        assert_eq!(
+            words,
+            timed(&[
+                ("Proving", 480.0, 480.0),
+                ("And", 500.0, 700.0),
+                ("So", 600.0, 800.0),
+                ("Yep.", 1000.0, 1200.0),
+                ("Hm.", 1100.0, 1300.0),
+            ])
+        );
+        assert!(parse_word_reply(&body).is_err());
+    }
+
+    #[test]
+    fn speaker_words_allow_missing_times_and_clamp_reversed_times() {
+        let empty = parse_speaker_word_reply(&json!({
+            "choices": [{"message": {"content": "<spk:0> Proving"}}],
+            "transcription": {"words": []}
+        }));
+        assert!(empty.words.is_empty());
+        let plain = timed(&[("Proving", 100.0, 200.0)]);
+        let times = words_on_timeline(vec![(empty, 0.0)], 1000.0);
+        assert_eq!(times_from(plain.clone(), &times), plain);
+
+        let reply = parse_speaker_word_reply(&json!({"transcription": {"words": [
+            {"word": "Proving", "start": 0.48, "end": 0.4},
+            {"word": "invalid", "start": null, "end": 0.8},
+            {"word": "invalid", "start": 0.8, "end": null}
+        ]}}));
+        assert_eq!(
+            reply.words,
+            vec![Word {
+                text: "Proving".into(),
+                start: 0.48,
+                end: 0.48,
+            }]
+        );
+    }
+
+    #[test]
+    fn lookahead_words_cannot_take_matches_beyond_the_tagged_window() {
+        let mut plain: Vec<(String, f64, f64)> = (0..298)
+            .map(|i| (format!("w{i}"), i as f64 * 250.0, i as f64 * 250.0 + 200.0))
+            .collect();
+        let mut tagged = plain.clone();
+        tagged.push(("agree".into(), 89_500.0, 89_900.0));
+        for words in [&mut plain, &mut tagged] {
+            words.extend(timed(&[
+                ("we", 90_000.0, 91_000.0),
+                ("agree", 91_000.0, 92_000.0),
+                ("agree", 150_000.0, 151_000.0),
+                ("we", 151_000.0, 152_000.0),
+                ("agree", 152_000.0, 153_000.0),
+            ]));
+        }
+        // Every plain word has an exact twin, so no time should change.
+        assert_eq!(times_from(plain.clone(), &tagged), plain);
     }
 
     #[test]

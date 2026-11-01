@@ -1951,10 +1951,32 @@ mod tests {
                 core_backup: vec![],
                 speaker_backup: String::new(),
                 publication_rows: String::new(),
+                warnings: vec![],
             },
         )
         .await
         .unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_staged_review_reads_back_the_exact_saved_rows() {
+        let (_dir, core, feature, _) = publication_fixture().await;
+        // 1.7 - 1.68 is stored as 0.020000000000000018. A fast float parser
+        // read it back one bit off, so Apply always saw a changed transcript.
+        sqlx::query("UPDATE transcripts SET audio_start_time=1.68,audio_end_time=1.7,duration=? WHERE id='old'")
+            .bind(1.7f64 - 1.68)
+            .execute(&core).await.unwrap();
+        let original = crate::diarization::finalize::load_transcripts(&core, "m1")
+            .await
+            .unwrap();
+        let id = staged_review(&core, &feature, &original).await;
+        let staged = super::super::enhancement_review::load(&feature, "m1", &id)
+            .await
+            .unwrap();
+        assert_eq!(
+            serde_json::to_string(&staged.original).unwrap(),
+            serde_json::to_string(&original).unwrap()
+        );
     }
 
     #[tokio::test]
@@ -2402,7 +2424,7 @@ mod tests {
             .await
             .unwrap();
         proposal.original[0].audio_end_time = Some(88.0);
-        // Reject lost tails, lost heads, and large interior gaps.
+        // Warn about lost tails, lost heads, and large interior gaps.
         for spans in [
             vec![(1.25, 1.41)],
             vec![(80.0, 88.0)],
@@ -2418,13 +2440,13 @@ mod tests {
                     row
                 })
                 .collect();
-            let error = super::super::enhancement_review::stage(&core, &feature, proposal)
+            let id = super::super::enhancement_review::stage(&core, &feature, proposal)
                 .await
-                .unwrap_err();
-            assert!(error.to_string().contains("left a gap"));
+                .unwrap();
             proposal = super::super::enhancement_review::load(&feature, "m1", &id)
                 .await
                 .unwrap();
+            assert!(proposal.warnings[0].contains("no words"), "{:?}", proposal.warnings);
             proposal.original[0].audio_end_time = Some(88.0);
         }
         // Union coverage can be out of order, overlap, and contain short pauses.
@@ -2439,9 +2461,13 @@ mod tests {
                 segment
             })
             .collect();
-        super::super::enhancement_review::stage(&core, &feature, proposal)
+        let id = super::super::enhancement_review::stage(&core, &feature, proposal)
             .await
             .unwrap();
+        let staged = super::super::enhancement_review::load(&feature, "m1", &id)
+            .await
+            .unwrap();
+        assert!(staged.warnings.is_empty(), "{:?}", staged.warnings);
         let saved = crate::diarization::finalize::load_transcripts(&core, "m1")
             .await
             .unwrap();
@@ -2465,7 +2491,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn missing_speech_region_blocks_apply_and_preserves_saved_text() {
+    async fn missing_speech_region_is_staged_with_a_warning() {
         let (_dir, core, feature, original) = publication_fixture().await;
         let id = staged_review(&core, &feature, &original).await;
         let mut proposal = super::super::enhancement_review::load(&feature, "m1", &id)
@@ -2473,10 +2499,17 @@ mod tests {
             .unwrap();
         proposal.original[0].audio_start_time = Some(40.0);
         proposal.original[0].audio_end_time = Some(45.0);
-        let error = super::super::enhancement_review::stage(&core, &feature, proposal)
+        // A run can be better even where it differs, so it is never discarded.
+        let staged = super::super::enhancement_review::stage(&core, &feature, proposal)
             .await
-            .unwrap_err();
-        assert!(error.to_string().contains("00:40"));
+            .unwrap();
+        let review = super::super::enhancement_review::pending(&feature, "m1")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(review.id, staged);
+        assert!(review.warnings[0].contains("speech at 00:40"), "{:?}", review.warnings);
+        assert!(review.warnings[0].contains("Undo"));
         let current = crate::diarization::finalize::load_transcripts(&core, "m1")
             .await
             .unwrap();
@@ -2484,15 +2517,59 @@ mod tests {
             serde_json::to_string(&current).unwrap(),
             serde_json::to_string(&original).unwrap()
         );
-        assert_eq!(
-            super::super::enhancement_review::pending(&feature, "m1")
+    }
+
+    #[tokio::test]
+    async fn mistimed_words_are_not_reported_as_lost_speech() {
+        let (_dir, core, feature, original) = publication_fixture().await;
+        let id = staged_review(&core, &feature, &original).await;
+        let mut proposal = super::super::enhancement_review::load(&feature, "m1", &id)
+            .await
+            .unwrap();
+        // Nemotron returned this sentence packed about 3 s before it was said.
+        let sentence = "As of right now it seems like uh pretty pretty good bandwidth so.";
+        proposal.original[0].transcript = sentence.into();
+        proposal.original[0].audio_start_time = Some(42.76);
+        proposal.original[0].audio_end_time = Some(46.04);
+        let segment = |text: &str, start: f64, end: f64| {
+            let mut segment = fresh_segments().remove(0);
+            segment.id = uuid::Uuid::new_v4().to_string();
+            segment.text = text.into();
+            segment.audio_start_time = Some(start);
+            segment.audio_end_time = Some(end);
+            segment
+        };
+        for (text, warned) in [
+            ("As of right now, it seems like a pretty, pretty good bandwidth, so", false),
+            ("Pretty good bandwidth, so", true),
+        ] {
+            let mut candidate: super::super::enhancement_review::Proposal =
+                serde_json::from_str(&serde_json::to_string(&proposal).unwrap()).unwrap();
+            candidate.segments = vec![segment(text, 39.65, 41.01), segment("Okay.", 47.4, 48.36)];
+            let id = super::super::enhancement_review::stage(&core, &feature, candidate)
                 .await
-                .unwrap()
-                .unwrap()
-                .id,
-            id,
-            "a rejected replacement must not erase an earlier saved result"
-        );
+                .unwrap();
+            let staged = super::super::enhancement_review::load(&feature, "m1", &id)
+                .await
+                .unwrap();
+            assert_eq!(staged.warnings.len(), usize::from(warned), "{text}: {:?}", staged.warnings);
+        }
+        // Words on either side of a real hole in a long row do not hide it.
+        let words: Vec<String> = (1..=20).map(|i| format!("w{i}")).collect();
+        proposal.original[0].transcript = words.join(" ");
+        proposal.original[0].audio_start_time = Some(50.0);
+        proposal.original[0].audio_end_time = Some(70.0);
+        proposal.segments = vec![
+            segment(&words[..10].join(" "), 50.0, 60.0),
+            segment(&words[17..].join(" "), 67.0, 70.0),
+        ];
+        let id = super::super::enhancement_review::stage(&core, &feature, proposal)
+            .await
+            .unwrap();
+        let staged = super::super::enhancement_review::load(&feature, "m1", &id)
+            .await
+            .unwrap();
+        assert!(staged.warnings[0].contains("speech at 01:02"), "{:?}", staged.warnings);
     }
 
     #[tokio::test]

@@ -24,6 +24,9 @@ pub(crate) struct Proposal {
     pub core_backup: Vec<CoreTranscriptBackup>,
     pub speaker_backup: String,
     pub publication_rows: String,
+    /// Saved speech the new run left without words. Shown, never blocking.
+    #[serde(default)]
+    pub warnings: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -38,12 +41,11 @@ pub struct ReviewPreview {
 
 impl Proposal {
     fn preview(self, id: String, applied: bool) -> ReviewPreview {
-        let warnings = Vec::new();
         ReviewPreview {
             id,
             original: self.original,
             proposed: self.segments,
-            warnings,
+            warnings: self.warnings,
             model: self.model,
             applied,
         }
@@ -100,8 +102,11 @@ pub(crate) async fn speaker_snapshot_on(
 /// Do not silently remove previously transcribed speech, including row interiors.
 /// This checks missing output, not whether changed words are correct.
 /// Decoder and token times are estimates. Allow a two-second boundary shift.
-/// After that allowance, reject uncovered stretches longer than two seconds.
-fn check_baseline_regions(proposal: &Proposal) -> Result<()> {
+/// After that allowance, report uncovered stretches longer than two seconds.
+/// A new run can be better even where it differs, so this warns and Undo
+/// restores the saved transcript; it never discards the run.
+fn baseline_gaps(proposal: &Proposal) -> Option<String> {
+    let mut gaps = Vec::new();
     let mut intervals: Vec<_> = proposal
         .segments
         .iter()
@@ -128,9 +133,10 @@ fn check_baseline_regions(proposal: &Proposal) -> Result<()> {
             continue;
         }
         let end = end.min(proposal.duration_seconds);
+        // Stretches of the row more than two seconds from any new words.
+        let mut uncovered = Vec::new();
         let mut cursor = start;
         let mut covered = false;
-        let mut gap = false;
         for &(a, b) in &intervals {
             if b <= start {
                 continue;
@@ -140,16 +146,97 @@ fn check_baseline_regions(proposal: &Proposal) -> Result<()> {
             }
             covered = true;
             if a - cursor > 2.0 {
-                gap = true;
-                break;
+                uncovered.push((cursor, a));
             }
             cursor = cursor.max(b);
         }
-        if !covered || gap || end - cursor > 2.0 {
-            return Err(anyhow!("Enhance left a gap in previously transcribed speech at {:02}:{:02}. The saved transcript was kept.",start as u64/60,start as u64%60));
+        if !covered {
+            uncovered.push((start, end));
+        } else if end - cursor > 2.0 {
+            uncovered.push((cursor, end));
+        }
+        // Saved rows have no word times, so estimate a stretch's words from
+        // their place in the row.
+        let saved = words(&row.transcript);
+        let lost = uncovered.into_iter().find(|&(from, to)| {
+            let place = |i: usize| start + (i as f64 + 0.5) / saved.len() as f64 * (end - start);
+            let mut expected: Vec<String> = (0..saved.len())
+                .filter(|&i| (from..=to).contains(&place(i)))
+                .map(|i| saved[i].clone())
+                .collect();
+            if expected.is_empty() {
+                let middle = (from + to) / 2.0;
+                expected.extend(
+                    (0..saved.len())
+                        .min_by(|&a, &b| (place(a) - middle).abs().total_cmp(&(place(b) - middle).abs()))
+                        .map(|i| saved[i].clone()),
+                );
+            }
+            !words_nearby(proposal, &expected, from, to)
+        });
+        if let Some((from, _)) = lost {
+            gaps.push(format!("{:02}:{:02}", from as u64 / 60, from as u64 % 60));
         }
     }
-    Ok(())
+    gaps.dedup();
+    let more = gaps.len().saturating_sub(5);
+    gaps.truncate(5);
+    if more > 0 {
+        gaps.push(format!("{more} more"));
+    }
+    (!gaps.is_empty()).then(|| {
+        format!(
+            "Enhance has no words where the previous transcript had speech at {}. Check those parts, or use Undo to restore the previous transcript.",
+            gaps.join(", ")
+        )
+    })
+}
+
+/// Lowercased words without punctuation.
+fn words(text: &str) -> Vec<String> {
+    text.split_whitespace()
+        .map(|word| {
+            word.chars()
+                .filter(|c| c.is_alphanumeric())
+                .flat_map(char::to_lowercase)
+                .collect::<String>()
+        })
+        .filter(|word| !word.is_empty())
+        .collect()
+}
+
+/// Word times can be wrong even when the words are there: Nemotron sometimes
+/// packs a sentence into one 80 ms step per word, seconds before it was said.
+/// A stretch counts as lost unless at least 60% of its expected words are
+/// found nearby, in order. This errs toward a warning, which never discards
+/// the run.
+fn words_nearby(proposal: &Proposal, expected: &[String], start: f64, end: f64) -> bool {
+    const REACH_SECONDS: f64 = 10.0;
+    let mut nearby: Vec<_> = proposal
+        .segments
+        .iter()
+        .filter(|new| {
+            new.audio_start_time.is_some_and(|a| a < end + REACH_SECONDS)
+                && new.audio_end_time.is_some_and(|b| b > start - REACH_SECONDS)
+        })
+        .collect();
+    nearby.sort_by(|a, b| a.audio_start_time.unwrap().total_cmp(&b.audio_start_time.unwrap()));
+    let found: Vec<String> = nearby.iter().flat_map(|new| words(&new.text)).collect();
+    // Longest common subsequence, so words must also keep their order.
+    let mut row = vec![0usize; found.len() + 1];
+    for word in expected {
+        let mut diagonal = 0;
+        for (i, other) in found.iter().enumerate() {
+            let above = row[i + 1];
+            row[i + 1] = if word == other {
+                diagonal + 1
+            } else {
+                above.max(row[i])
+            };
+            diagonal = above;
+        }
+    }
+    row[found.len()] as f64 >= expected.len() as f64 * 0.6
 }
 
 pub(crate) async fn stage(
@@ -162,7 +249,7 @@ pub(crate) async fn stage(
             "No transcript text was found. The saved transcript was kept."
         ));
     }
-    check_baseline_regions(&proposal)?;
+    proposal.warnings = baseline_gaps(&proposal).into_iter().collect();
     proposal.core_backup = sqlx::query_as("SELECT id, meeting_id, transcript, timestamp, summary, action_items, key_points,
         audio_start_time, audio_end_time, duration, speaker FROM transcripts WHERE meeting_id = ? ORDER BY audio_start_time, id")
         .bind(&proposal.meeting_id).fetch_all(core).await?;
