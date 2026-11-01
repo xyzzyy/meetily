@@ -998,24 +998,6 @@ fn times_from(
         // Include the next block in the LCS, but save only this block's matches.
         while i < last - first && j < b.len() {
             if matches(i, j) {
-                let distance = (timed[cursor + j].1 - words[first + i].1).abs();
-                // Prefer a nearer repeat only if the match count stays the same.
-                if i + 1 < a.len()
-                    && table[i + 1][j] == table[i][j]
-                    && matches(i + 1, j)
-                    && (timed[cursor + j].1 - words[first + i + 1].1).abs() < distance
-                {
-                    i += 1;
-                    continue;
-                }
-                if j + 1 < b.len()
-                    && table[i][j + 1] == table[i][j]
-                    && matches(i, j + 1)
-                    && (timed[cursor + j + 1].1 - words[first + i].1).abs() < distance
-                {
-                    j += 1;
-                    continue;
-                }
                 matched[first + i] = Some(cursor + j);
                 i += 1;
                 j += 1;
@@ -1023,6 +1005,31 @@ fn times_from(
                 i += 1;
             } else {
                 j += 1;
+            }
+        }
+        // Adjust repeats only after the original trace is complete. Each
+        // replacement stays before the next saved pair. Keep the last pair
+        // fixed, so both the block's match count and its next cursor stay the same.
+        let pairs: Vec<_> = matched[first..last]
+            .iter()
+            .enumerate()
+            .filter_map(|(i, j)| j.map(|j| (i, j)))
+            .collect();
+        for pair in pairs.windows(2) {
+            let (i, j) = pair[0];
+            let (next_i, next_j) = pair[1];
+            let distance = (timed[j].1 - words[first + i].1).abs();
+            if i + 1 < next_i
+                && matches(i + 1, j - cursor)
+                && (timed[j].1 - words[first + i + 1].1).abs() < distance
+            {
+                matched[first + i] = None;
+                matched[first + i + 1] = Some(j);
+            } else if j + 1 < next_j
+                && matches(i, j + 1 - cursor)
+                && (timed[j + 1].1 - words[first + i].1).abs() < distance
+            {
+                matched[first + i] = Some(j + 1);
             }
         }
         if let Some(last_match) = matched[first..last].iter().rev().flatten().next() {
@@ -1702,6 +1709,32 @@ mod tests {
             ("yes", 27_000.0, 27_500.0),
         ]);
         assert_eq!(times_from(plain, &tagged), tagged);
+    }
+
+    #[test]
+    fn repeated_word_ties_keep_the_match_count_across_blocks() {
+        let mut plain: Vec<_> = (0..297)
+            .map(|i| (format!("prefix{i}"), 0.0, 1.0))
+            .collect();
+        let mut tagged = plain.clone();
+        let plain_keys = ["b", "b", "c", "c", "c", "a", "a", "b", "a", "a", "c", "a"];
+        for (i, text) in plain_keys.iter().enumerate() {
+            plain.push((text.to_string(), i as f64 * 100.0 + 12.0, i as f64 * 100.0 + 62.0));
+            if i == 5 {
+                plain.extend((0..297).map(|n| (format!("absent{n}"), 562.0, 563.0)));
+            }
+        }
+        let tagged_keys = ["c", "c", "c", "c", "a", "c", "a", "a", "a", "b", "c", "b", "c"];
+        let starts = [0.0, 100.0, 229.0, 298.0, 430.0, 531.0, 622.0, 730.0, 795.0, 913.0, 1002.0, 1128.0, 1192.0];
+        for (text, start) in tagged_keys.iter().zip(starts) {
+            tagged.push((text.to_string(), start, start + 50.0));
+        }
+
+        let words = times_from(plain, &tagged);
+        // The trace without the time preference matches 305 words. Compare
+        // text and both times so that words with interpolated times do not count.
+        let count = words.iter().filter(|word| tagged.contains(word)).count();
+        assert_eq!(count, 305);
     }
 
     #[test]
