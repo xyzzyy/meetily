@@ -5,7 +5,6 @@ import { VirtualizedTranscriptView } from '@/components/VirtualizedTranscriptVie
 import { SpeakerAttributionIndicator } from '@/components/SpeakerAttributionIndicator';
 import { SpeakerColorPicker } from './SpeakerColorPicker';
 import { SpeakerAttributeButton, type SpeakerAttribution } from './SpeakerAttributeButton';
-import { RetranscribeDialog } from './RetranscribeDialog';
 import { TranscriptButtonGroup } from './TranscriptButtonGroup';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -15,6 +14,7 @@ import { confirm } from '@tauri-apps/plugin-dialog';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { toast } from 'sonner';
 import { useConfig } from '@/contexts/ConfigContext';
+import { useEnhancementRun } from '@/contexts/EnhancementRunContext';
 import { useSpeakerRefinementAvailability } from '@/hooks/useSpeakerRefinementAvailability';
 
 const isTimingMismatch = (error: unknown) =>
@@ -101,7 +101,6 @@ export function TranscriptPanel({
   }, [transcripts, usePagination, segments]);
 
   const [speakersExpanded, setSpeakersExpanded] = useState(true);
-  const [enhanceDialogOpen, setEnhanceDialogOpen] = useState(false);
   const [speakers, setSpeakers] = useState<MeetingSpeaker[]>([]);
   const displaySegments = useMemo(() => {
     const colors = new Map(speakers.map(speaker => [speaker.speakerId, speaker.speakerColor]));
@@ -128,6 +127,11 @@ export function TranscriptPanel({
   const { diarizationSettings, isLoadingDiarizationSettings, betaFeatures } = useConfig();
   const { supported: refinementSupported, unavailableReason } = useSpeakerRefinementAvailability();
   const canEnhance = Boolean(betaFeatures.importAndRetranscribe && meetingId && meetingFolderPath);
+  const { run: enhancementRun, openEnhancement } = useEnhancementRun();
+  const enhancementProgress = meetingId && enhancementRun?.meetingId === meetingId && enhancementRun.status === 'running'
+    ? enhancementRun.progress ?? { stage: 'starting', progress_percentage: 0, message: 'Processing audio...' }
+    : null;
+  const showEnhancement = () => { if (meetingId) openEnhancement(meetingId, meetingFolderPath ?? null); };
   const timingMismatch = isTimingMismatch(diarizationStatus?.failureReason);
   const diarizationEnabled = !isLoadingDiarizationSettings
     && diarizationSettings.enabled && diarizationSettings.mode !== 'off';
@@ -140,7 +144,8 @@ export function TranscriptPanel({
     'processing', 'preparing_models', 'rebuilding_windows', 'transcribing_windows', 'saving',
   ].includes(diarizationStatus?.currentStatus || '');
   const recoveryRequired = diarizationStatus?.currentStatus === 'recovery_required';
-  const editsDisabled = refinementActive || recoveryRequired || savingSpeakerId !== null
+  // Enhance holds the meeting's edit lock until it finishes.
+  const editsDisabled = refinementActive || recoveryRequired || enhancementProgress !== null || savingSpeakerId !== null
     || attributingSpeakerId !== null || isApplyingCorrection || isMerging;
   const beginEdit = () => {
     if (editsDisabled || mutationInFlight.current) return false;
@@ -150,7 +155,6 @@ export function TranscriptPanel({
 
   useEffect(() => {
     setSpeakersExpanded(true);
-    setEnhanceDialogOpen(false);
     setMergingSpeakerId(null);
     setCorrectionMode(false);
     setSelectedRowIds(new Set());
@@ -246,7 +250,7 @@ export function TranscriptPanel({
         setDiarizationStatus({ meetingId, currentStatus: 'fallback_to_live', progress: 100, failureReason: String(error) });
         toast.error('Speaker labels could not be matched to this transcript', {
           description: 'The saved transcript and labels were kept. Enhance can rebuild the text and timing from the recording.',
-          ...(canEnhance ? { action: { label: 'Enhance', onClick: () => setEnhanceDialogOpen(true) } } : {}),
+          ...(canEnhance ? { action: { label: 'Enhance', onClick: showEnhancement } } : {}),
         });
       } else {
         toast.error('Speaker processing could not finish', { description: String(error) });
@@ -422,6 +426,34 @@ export function TranscriptPanel({
         />
       </div>
 
+      {enhancementProgress && (
+        <div className="border-b border-blue-200 dark:border-blue-500/30 bg-blue-50 dark:bg-blue-500/10 px-4 py-2 text-sm text-blue-950 dark:text-blue-200">
+          <div className="flex items-center justify-between gap-3">
+            <div className="min-w-0">
+              <p className="font-medium">Enhancing transcript…</p>
+              <p className="break-words text-xs opacity-80">{enhancementProgress.message || 'Processing audio...'}</p>
+            </div>
+            <Button size="sm" variant="outline" onClick={showEnhancement}>Show</Button>
+          </div>
+          <div className="mt-2 flex items-center gap-2">
+            <div
+              role="progressbar"
+              aria-label="Enhancement progress"
+              aria-valuemin={0}
+              aria-valuemax={100}
+              aria-valuenow={Math.round(Math.min(enhancementProgress.progress_percentage, 100))}
+              className="h-1.5 flex-1 rounded-full bg-gray-200 dark:bg-ink-800"
+            >
+              <div
+                className="h-1.5 rounded-full bg-blue-600 transition-all duration-300 ease-out"
+                style={{ width: `${Math.min(enhancementProgress.progress_percentage, 100)}%` }}
+              />
+            </div>
+            <span className="text-xs tabular-nums opacity-80">{Math.round(enhancementProgress.progress_percentage)}%</span>
+          </div>
+        </div>
+      )}
+
       {!isRecording && diarizationStatus && !['none', 'completed'].includes(diarizationStatus.currentStatus) && (
         <div className={`border-b px-4 py-2 text-sm ${
           ['fallback_to_live', 'needs_review', 'failed', 'cancelled', 'recovery_required'].includes(diarizationStatus.currentStatus)
@@ -456,7 +488,7 @@ export function TranscriptPanel({
                 Cancel
               </Button>
             ) : timingMismatch && canEnhance ? (
-              <Button size="sm" variant="outline" disabled={editsDisabled} onClick={() => setEnhanceDialogOpen(true)}>
+              <Button size="sm" variant="outline" disabled={editsDisabled} onClick={showEnhancement}>
                 Enhance
               </Button>
             ) : ['fallback_to_live', 'needs_review', 'failed', 'cancelled'].includes(diarizationStatus.currentStatus) ? (
@@ -661,20 +693,6 @@ export function TranscriptPanel({
             )}
           </div>
         </div>
-      )}
-
-      {canEnhance && meetingId && (
-        <RetranscribeDialog
-          key={meetingId}
-          open={enhanceDialogOpen}
-          onOpenChange={setEnhanceDialogOpen}
-          meetingId={meetingId}
-          meetingFolderPath={meetingFolderPath ?? null}
-          onComplete={async () => {
-            await onRefetchTranscripts?.();
-            await loadSpeakers();
-          }}
-        />
       )}
 
       {/* Transcript content - use virtualized view for better performance */}

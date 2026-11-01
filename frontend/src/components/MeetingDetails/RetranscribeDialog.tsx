@@ -25,6 +25,7 @@ import { useSpeakerRefinementAvailability } from '@/hooks/useSpeakerRefinementAv
 import { LANGUAGES } from '@/constants/languages';
 import { languagesForProvider } from '@/lib/funasr';
 import { useTranscriptionModels, ModelOption } from '@/hooks/useTranscriptionModels';
+import { useEnhancementRun } from '@/contexts/EnhancementRunContext';
 import { compareTranscriptText } from '@/lib/transcript-comparison';
 
 interface RetranscribeDialogProps {
@@ -32,14 +33,6 @@ interface RetranscribeDialogProps {
   onOpenChange: (open: boolean) => void;
   meetingId: string;
   meetingFolderPath: string | null;
-  onComplete?: () => void;
-}
-
-interface RetranscriptionProgress {
-  meeting_id: string;
-  stage: string;
-  progress_percentage: number;
-  message: string;
 }
 
 interface RetranscriptionResult {
@@ -69,19 +62,22 @@ export function RetranscribeDialog({
   onOpenChange,
   meetingId,
   meetingFolderPath,
-  onComplete,
 }: RetranscribeDialogProps) {
   const { selectedLanguage, transcriptModelConfig, diarizationSettings, isLoadingDiarizationSettings } = useConfig();
   const { supported: refinementSupported, checking: checkingRefinement, unavailableReason } = useSpeakerRefinementAvailability();
   const speakerLabelsEnabled = !isLoadingDiarizationSettings && diarizationSettings.enabled;
-  const [isProcessing, setIsProcessing] = useState(false);
+  const { run, markStarted, markStartFailed, dismissFailure, cancelEnhancement } = useEnhancementRun();
+  // The run continues in the background when the popup is minimized.
+  const isProcessing = run?.meetingId === meetingId && run.status === 'running';
+  const progress = isProcessing ? run.progress : null;
+  const otherMeetingRunning = run?.status === 'running' && run.meetingId !== meetingId;
+  const failedRunError = run?.meetingId === meetingId && run.status === 'failed' ? run.error : null;
   const [review, setReview] = useState<EnhancementReview | null>(null);
   const [isApplying, setIsApplying] = useState(false);
   const [loadingReview, setLoadingReview] = useState(false);
   const comparison = useMemo(() => review ? compareTranscriptText(
     review.original.map(row => row.transcript).join('\n\n'),
     review.proposed.map(row => row.text).join('\n\n')) : null, [review]);
-  const [progress, setProgress] = useState<RetranscriptionProgress | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [selectedLang, setSelectedLang] = useState(selectedLanguage || 'auto');
 
@@ -97,9 +93,7 @@ export function RetranscribeDialog({
   } = useTranscriptionModels(transcriptModelConfig);
 
   // Stable refs for callbacks to avoid listener re-registration
-  const onCompleteRef = useRef(onComplete);
   const onOpenChangeRef = useRef(onOpenChange);
-  useEffect(() => { onCompleteRef.current = onComplete; }, [onComplete]);
   useEffect(() => { onOpenChangeRef.current = onOpenChange; }, [onOpenChange]);
 
   // Track previous open state to only reset on closed→open transition
@@ -145,9 +139,9 @@ export function RetranscribeDialog({
 
     if (open && !wasOpen) {
       resetSelection();
-      setIsProcessing(false);
-      setProgress(null);
-      setError(null);
+      // Show why a run that failed while minimized stopped.
+      setError(failedRunError);
+      if (failedRunError) dismissFailure(meetingId);
       setSelectedLang(selectedLanguage || 'auto');
 
       // Fetch available models using centralized hook
@@ -163,11 +157,14 @@ export function RetranscribeDialog({
 
   useEffect(() => {
     if (!open) return;
+    // Reopened mid-run: the saved review is from an earlier run. Completion loads the new one.
+    if (isProcessing) { setReview(null); return; }
     let active = true;
     setLoadingReview(true);
     setReview(null);
     invoke<EnhancementReview | null>('get_enhancement_review', { meetingId })
-      .then(value => { if (active) setReview(value); })
+      // After a failed run, an applied result belongs to an earlier run. Show only a pending one.
+      .then(value => { if (active) setReview(failedRunError && value?.applied ? null : value); })
       .catch(error => { if (active) setError(String(error)); })
       .finally(() => { if (active) setLoadingReview(false); });
     return () => { active = false; };
@@ -181,7 +178,6 @@ export function RetranscribeDialog({
       const warning = await invoke<string | null>('apply_enhancement_review', { meetingId, reviewId: review.id });
       if (warning) toast.warning(warning); else toast.success('Proposed transcript applied.');
       setReview(null);
-      onCompleteRef.current?.();
       onOpenChangeRef.current(false);
     } catch (error) { setError(String(error)); }
     finally { setIsApplying(false); }
@@ -194,7 +190,6 @@ export function RetranscribeDialog({
       if (review.applied) {
         const warning=await invoke<string | null>('undo_enhancement', {meetingId,reviewId:review.id});
         if (warning) toast.warning(warning); else toast.success('Enhancement undone.');
-        onCompleteRef.current?.();
       } else await invoke('discard_enhancement_review', { meetingId, reviewId: review.id });
       setReview(null);
       onOpenChangeRef.current(false);
@@ -209,33 +204,17 @@ export function RetranscribeDialog({
     const unlisteners: UnlistenFn[] = [];
     const cleanedUpRef = { current: false };
 
+    // Progress is tracked by EnhancementRunProvider so it survives minimizing.
     const setupListeners = async () => {
-      // Progress events
-      const unlistenProgress = await listen<RetranscriptionProgress>(
-        'retranscription-progress',
-        (event) => {
-          if (event.payload.meeting_id === meetingId) {
-            setProgress(event.payload);
-          }
-        }
-      );
-      if (cleanedUpRef.current) {
-        unlistenProgress();
-        return;
-      }
-      unlisteners.push(unlistenProgress);
-
       // Completion event
       const unlistenComplete = await listen<RetranscriptionResult>(
         'retranscription-complete',
         async (event) => {
           if (event.payload.meeting_id === meetingId) {
-            setIsProcessing(false);
             try {
               const proposed = await invoke<EnhancementReview | null>('get_enhancement_review', { meetingId });
               if (event.payload.warning) toast.warning(event.payload.warning);
               else toast.success('Enhancement applied. Undo is available.');
-              onCompleteRef.current?.();
               setReview(proposed);
               if (!proposed) setError('The proposed transcript could not be loaded. The saved transcript was kept.');
             } catch (error) { setError(String(error)); }
@@ -254,7 +233,6 @@ export function RetranscribeDialog({
         'retranscription-error',
         async (event) => {
           if (event.payload.meeting_id === meetingId) {
-            setIsProcessing(false);
             setError(event.payload.error);
             setLoadingReview(true);
             try {
@@ -290,16 +268,15 @@ export function RetranscribeDialog({
       return;
     }
 
-    if (review || loadingReview || (speakerLabelsEnabled && checkingRefinement)) return;
+    if (review || loadingReview || otherMeetingRunning || (speakerLabelsEnabled && checkingRefinement)) return;
 
     if (loadingModels || !selectedModelDetails) {
       setError(loadingModels ? 'Wait for the models to load.' : 'Select an available transcription model.');
       return;
     }
 
-    setIsProcessing(true);
+    markStarted(meetingId);
     setError(null);
-    setProgress(null);
 
     try {
       const languageToSend = isParakeetModel ? null : selectedLang === 'auto' ? null : selectedLang;
@@ -312,52 +289,32 @@ export function RetranscribeDialog({
         assignSpeakers: canAssignSpeakers && assignSpeakers,
       });
     } catch (err: any) {
-      setIsProcessing(false);
+      markStartFailed(meetingId);
       const errorMsg = typeof err === 'string' ? err : (err?.message || String(err));
       setError(errorMsg);
     }
   };
 
   const handleCancel = async () => {
-    if (isProcessing) {
-      try {
-        await invoke('cancel_retranscription_command');
-        setIsProcessing(false);
-        setProgress(null);
-        toast.info('Retranscription cancelled');
-      } catch (err) {
-        console.error('Failed to cancel retranscription:', err);
-      }
+    if (isProcessing && await cancelEnhancement()) {
+      toast.info('Retranscription cancelled');
     }
     onOpenChange(false);
   };
 
-  // Prevent closing during processing
+  // Closing during processing minimizes the popup; the run keeps going.
   const handleOpenChange = (newOpen: boolean) => {
-    if (!newOpen && (isProcessing || isApplying)) {
+    if (!newOpen && isApplying) {
       return;
     }
     onOpenChange(newOpen);
-  };
-
-  const handleEscapeKeyDown = (event: KeyboardEvent) => {
-    if (isProcessing) {
-      event.preventDefault();
-    }
-  };
-
-  const handleInteractOutside = (event: Event) => {
-    if (isProcessing) {
-      event.preventDefault();
-    }
   };
 
   return (
     <Dialog open={open} onOpenChange={handleOpenChange}>
       <DialogContent
         className={review ? "sm:max-w-5xl" : "sm:max-w-[450px]"}
-        onEscapeKeyDown={handleEscapeKeyDown}
-        onInteractOutside={handleInteractOutside}
+        minimizable={isProcessing}
       >
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
@@ -424,6 +381,9 @@ export function RetranscribeDialog({
             )
           )}
 
+          {!isProcessing && !error && !review && otherMeetingRunning && (
+            <p className="text-sm text-amber-700 dark:text-amber-300" role="status">Another meeting is being enhanced. Start this one after it finishes.</p>
+          )}
           {!isProcessing && !error && !review && modelNotice && (
             <p className="text-sm text-amber-700 dark:text-amber-300" role="status">{modelNotice}</p>
           )}
@@ -526,7 +486,7 @@ export function RetranscribeDialog({
               <Button
                 onClick={handleStartRetranscription}
                 className="bg-blue-600 hover:bg-blue-700"
-                disabled={loadingReview || !meetingFolderPath || loadingModels || !selectedModelDetails || (speakerLabelsEnabled && checkingRefinement)}
+                disabled={loadingReview || otherMeetingRunning || !meetingFolderPath || loadingModels || !selectedModelDetails || (speakerLabelsEnabled && checkingRefinement)}
               >
                 <RefreshCw className="h-4 w-4 mr-2" />
                 Start enhancement
@@ -546,10 +506,7 @@ export function RetranscribeDialog({
               </Button>
               <Button
                 disabled={loadingReview}
-                onClick={() => {
-                  setError(null);
-                  setProgress(null);
-                }}
+                onClick={() => setError(null)}
                 variant="outline"
               >
                 Try Again
@@ -559,5 +516,20 @@ export function RetranscribeDialog({
         </DialogFooter>
       </DialogContent>
     </Dialog>
+  );
+}
+
+/** The one Enhance popup. It lives above the pages so a minimized run can be reopened from anywhere. */
+export function EnhancementDialog() {
+  const { dialog, setDialogOpen } = useEnhancementRun();
+  if (!dialog) return null;
+  return (
+    <RetranscribeDialog
+      key={dialog.meetingId}
+      open={dialog.open}
+      onOpenChange={setDialogOpen}
+      meetingId={dialog.meetingId}
+      meetingFolderPath={dialog.meetingFolderPath}
+    />
   );
 }

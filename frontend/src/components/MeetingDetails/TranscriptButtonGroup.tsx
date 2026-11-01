@@ -3,11 +3,13 @@
 import { useState, useCallback, useEffect } from 'react';
 import { Button } from '@/components/ui/button';
 import { ButtonGroup } from '@/components/ui/button-group';
-import { Copy, FolderOpen, RefreshCw, Undo2 } from 'lucide-react';
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
+import { Copy, FolderOpen, Loader2, RefreshCw, Undo2 } from 'lucide-react';
 import { invoke } from '@tauri-apps/api/core';
+import { listen } from '@tauri-apps/api/event';
 import { toast } from 'sonner';
-import { RetranscribeDialog } from './RetranscribeDialog';
 import { useConfig } from '@/contexts/ConfigContext';
+import { useEnhancementRun } from '@/contexts/EnhancementRunContext';
 
 
 interface TranscriptButtonGroupProps {
@@ -29,7 +31,10 @@ export function TranscriptButtonGroup({
   onRefetchTranscripts,
 }: TranscriptButtonGroupProps) {
   const { betaFeatures } = useConfig();
-  const [showRetranscribeDialog, setShowRetranscribeDialog] = useState(false);
+  const { run, openEnhancement } = useEnhancementRun();
+  const enhancing = Boolean(meetingId) && run?.meetingId === meetingId && run?.status === 'running';
+  // The backend runs one enhancement at a time.
+  const otherMeetingEnhancing = Boolean(meetingId) && run?.status === 'running' && run?.meetingId !== meetingId;
   const [undoReviewId, setUndoReviewId] = useState<string | null>(null);
   const [undoing, setUndoing] = useState(false);
   const refreshUndo = useCallback(async () => {
@@ -45,6 +50,19 @@ export function TranscriptButtonGroup({
       .catch(() => { if (active) setUndoReviewId(null); });
     return () => { active = false; };
   }, [meetingId]);
+
+  // Enhance, Apply, and Undo all report finished transcript changes with this event.
+  useEffect(() => {
+    if (!meetingId) return;
+    let unlisten: (() => void) | undefined;
+    let disposed = false;
+    void listen<{ meetingId: string; status: string }>('diarization-progress', event => {
+      if (event.payload.meetingId === meetingId && event.payload.status === 'completed') {
+        refreshUndo().catch(() => setUndoReviewId(null));
+      }
+    }).then(cleanup => { if (disposed) cleanup(); else unlisten = cleanup; });
+    return () => { disposed = true; unlisten?.(); };
+  }, [meetingId, refreshUndo]);
 
   const handleRetranscribeComplete = useCallback(async () => {
     await refreshUndo().catch(() => setUndoReviewId(null));
@@ -92,35 +110,38 @@ export function TranscriptButtonGroup({
         </Button>
 
         {undoReviewId && (
-          <Button size="sm" variant="outline" onClick={handleUndo} disabled={undoing} title="Undo last enhancement" className="px-2 @[22rem]:px-3">
+          <Button size="sm" variant="outline" onClick={handleUndo} disabled={undoing || enhancing} title="Undo last enhancement" className="px-2 @[22rem]:px-3">
             <Undo2 />
             <span className="hidden @[22rem]:inline">{undoing ? 'Undoing...' : 'Undo'}</span>
           </Button>
         )}
 
         {betaFeatures.importAndRetranscribe && meetingId && meetingFolderPath && (
-          <Button
-            size="sm"
-            variant="outline"
-            className="bg-gradient-to-r from-blue-50 dark:from-blue-500/10 to-purple-50 dark:to-purple-500/10 hover:from-blue-100 dark:hover:from-blue-500/15 hover:to-purple-100 dark:hover:to-purple-500/15 border-blue-200 dark:border-blue-500/30 px-2 @[22rem]:px-4"
-            onClick={() => setShowRetranscribeDialog(true)}
-            title="Retranscribe to enhance your recorded audio"
-          >
-            <RefreshCw className="@[22rem]:mr-2" size={18} />
-            <span className="hidden @[22rem]:inline">Enhance</span>
-          </Button>
+          <Tooltip>
+            {/* aria-disabled instead of disabled, so hovering still shows why. */}
+            <TooltipTrigger asChild>
+              <Button
+                size="sm"
+                variant="outline"
+                className={`bg-gradient-to-r from-blue-50 dark:from-blue-500/10 to-purple-50 dark:to-purple-500/10 border-blue-200 dark:border-blue-500/30 px-2 @[22rem]:px-4 ${otherMeetingEnhancing
+                  ? 'cursor-not-allowed opacity-50'
+                  : 'hover:from-blue-100 dark:hover:from-blue-500/15 hover:to-purple-100 dark:hover:to-purple-500/15'}`}
+                aria-disabled={otherMeetingEnhancing || undefined}
+                onClick={() => { if (!otherMeetingEnhancing) openEnhancement(meetingId, meetingFolderPath); }}
+                title={otherMeetingEnhancing ? undefined : enhancing ? 'Show enhancement progress' : 'Retranscribe to enhance your recorded audio'}
+              >
+                {enhancing
+                  ? <Loader2 className="animate-spin @[22rem]:mr-2" size={18} />
+                  : <RefreshCw className="@[22rem]:mr-2" size={18} />}
+                <span className="hidden @[22rem]:inline">Enhance</span>
+              </Button>
+            </TooltipTrigger>
+            {otherMeetingEnhancing && (
+              <TooltipContent>Another meeting is being enhanced. Start this one after it finishes.</TooltipContent>
+            )}
+          </Tooltip>
         )}
       </ButtonGroup>
-
-      {betaFeatures.importAndRetranscribe && meetingId && meetingFolderPath && (
-        <RetranscribeDialog
-          open={showRetranscribeDialog}
-          onOpenChange={setShowRetranscribeDialog}
-          meetingId={meetingId}
-          meetingFolderPath={meetingFolderPath}
-          onComplete={handleRetranscribeComplete}
-        />
-      )}
     </div>
   );
 }
