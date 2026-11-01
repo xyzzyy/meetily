@@ -1335,6 +1335,17 @@ for (const initial of [[], [INVALID], [GRACE], [AGAIN], [INVALID, GRACE, AGAIN]]
   });
 }
 
+for (const permission of ["read", "triage"]) {
+  test(`a manually closed grace issue requires a moderator to reopen (${permission})`, async () => {
+    const f = closedFixture({ issue: { labels: [GRACE, "bug"] }, permission: { permission } });
+    await reopen(f);
+    assert.equal(f.issue.state, permission === "triage" ? "open" : "closed");
+    assert.deepEqual(f.labels(), [GRACE, "bug"]);
+    assert.equal(f.calls.filter(call => call.method === "permission").length, 1);
+    if (permission === "read") assert.match(f.comments[0].body, /Ask a maintainer/);
+  });
+}
+
 test("template labels follow the full author and moderator recovery cycle", async () => {
   const f = fixture({ issue: { labels: ["bug", "triaged"] } });
   await enforce(f);

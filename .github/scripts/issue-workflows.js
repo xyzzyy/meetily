@@ -196,12 +196,12 @@ async function reopen({ context, github, core }) {
     await api.comment(key, "I did not reopen this issue because this command came before its latest closure. Submit a new `/reopen` request.");
     return;
   }
-  if (!api.labels.has(INVALID) && !api.labels.has(AGAIN)) {
+  if (!api.labels.has(INVALID) && !api.labels.has(AGAIN) && !api.labels.has(GRACE)) {
     await api.comment(key, "I did not reopen this issue. `/reopen` applies only to issues closed for missing template information.");
     return;
   }
 
-  if (api.labels.has(AGAIN)) {
+  if (api.labels.has(AGAIN) || api.labels.has(GRACE)) {
     let maintainer = false;
     try {
       // Check the comment author, not an actor who reruns the workflow.
@@ -213,11 +213,11 @@ async function reopen({ context, github, core }) {
         !!(permission.user && permission.user.permissions && permission.user.permissions.triage);
     } catch (error) {
       await api.comment(key, "I could not check your maintainer permissions, so I did not reopen this issue. " +
-        "It has `" + AGAIN + "`. A maintainer can try `/reopen` again when the permission check is available.");
+        "A maintainer can try `/reopen` again when the permission check is available.");
       return;
     }
     if (!maintainer) {
-      await api.comment(key, "I did not reopen this issue because it has `" + AGAIN + "`. " +
+      await api.comment(key, "I did not reopen this issue because it has already had a grace period. " +
         "Ask a maintainer in this thread to comment `/reopen` for another grace period.");
       return;
     }

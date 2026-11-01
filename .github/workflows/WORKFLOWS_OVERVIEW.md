@@ -224,6 +224,7 @@ This document provides a quick overview of all available CI/CD workflows in this
 - `invalid-template-again` marks an issue closed after an unsuccessful grace period; a maintainer can use `/reopen` to replace it with `template-grace`
 - Maintainers with triage, write, maintain, or admin access can use `/reopen` without a limit
 - Checks the command author's current permissions when a later reopen needs a maintainer
+- A maintainer can also use `/reopen` after a manual closure during grace; the issue keeps only `template-grace` of the template labels
 - Checks no title or body while an issue is closed; only an explicit `/reopen` request can process a closed issue
 - A failed command rolls back new request labels and keeps an existing maintainer-only label; the bot reports any rollback failure
 - A failed API response triggers a state check before rollback; a confirmed open issue keeps only `template-grace` of the template labels
