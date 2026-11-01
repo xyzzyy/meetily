@@ -39,6 +39,10 @@ interface EnhancementRunContextType {
   cancelEnhancement: () => Promise<boolean>;
 }
 
+// Another meeting's Enhance popup can be open when a run ends. An open popup blocks
+// clicks outside it, so these notices opt back in to keep View reachable.
+const reachableNotice = { className: 'pointer-events-auto' };
+
 const EnhancementRunContext = createContext<EnhancementRunContextType | null>(null);
 
 export const useEnhancementRun = () => {
@@ -127,6 +131,7 @@ export function EnhancementRunProvider({ children }: { children: ReactNode }) {
           setRun(current => current?.meetingId === meetingId ? null : current);
           if (popupShows(meetingId)) return;
           toast.success('Enhancement finished', {
+            ...reachableNotice,
             description: warning || 'The enhanced transcript was applied. Undo is available.',
             action: { label: 'View', onClick: () => viewMeetingRef.current(meetingId) },
           });
@@ -144,6 +149,7 @@ export function EnhancementRunProvider({ children }: { children: ReactNode }) {
           }
           setRun({ meetingId, status: 'failed', progress: null, error });
           toast.error('Enhancement failed', {
+            ...reachableNotice,
             description: error,
             action: { label: 'View', onClick: () => viewMeetingRef.current(meetingId) },
           });
