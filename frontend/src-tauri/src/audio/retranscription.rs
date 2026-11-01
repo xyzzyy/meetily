@@ -522,7 +522,7 @@ async fn run_retranscription<R: Runtime>(
                 })
                 .collect();
             (
-                super::enhancement::word_rows(
+                super::enhancement::nemotron_rows(
                     words,
                     speaker_analysis.as_ref(),
                     segment.source.as_deref(),
@@ -671,7 +671,7 @@ async fn nemotron_with_speakers<R: Runtime>(
     )
     .await?;
     Ok((
-        super::enhancement::word_rows(meeting.words, Some(&analysis), None),
+        super::enhancement::nemotron_rows(meeting.words, Some(&analysis), None),
         analysis,
     ))
 }

@@ -480,7 +480,7 @@ fn parse_reply(body: &Value) -> Result<Reply, String> {
 }
 
 fn parse_word_reply(body: &Value) -> Result<Reply, String> {
-    let reply = parse_reply(body)?;
+    let mut reply = parse_reply(body)?;
     let timed_text = reply
         .words
         .iter()
@@ -510,6 +510,20 @@ fn parse_word_reply(body: &Value) -> Result<Reply, String> {
             .any(|word| !word.start.is_finite() || !word.end.is_finite() || word.end <= word.start)
     {
         return Err("Nemotron did not return valid times for the complete transcript. The saved transcript was kept.".into());
+    }
+    // Keep the transcript's spelling, spaces and punctuation. The timestamp
+    // tokens can omit punctuation and use different word boundaries.
+    let positions: Vec<_> = reply.text.char_indices()
+        .filter(|(_, c)| !formatting.is_match(&c.to_string()))
+        .map(|(position, _)| position)
+        .collect();
+    reply.words.retain(|word| !formatting.replace_all(&word.text, "").is_empty());
+    let (mut character, mut byte) = (0, 0);
+    for word in &mut reply.words {
+        character += formatting.replace_all(&word.text, "").chars().count();
+        let end = positions.get(character).copied().unwrap_or(reply.text.len());
+        word.text = reply.text[byte..end].to_string();
+        byte = end;
     }
     Ok(reply)
 }
@@ -999,9 +1013,16 @@ impl NemotronProvider {
 /// Moves request words onto one timeline in milliseconds, in order and
 /// inside the audio.
 fn words_on_timeline(parts: Vec<(Reply, f64)>, duration_ms: f64) -> Vec<(String, f64, f64)> {
-    let mut words = Vec::new();
+    let mut words: Vec<(String, f64, f64)> = Vec::new();
     let mut previous = 0.0;
     for (reply, offset) in parts {
+        // Separate independently decoded clips, as the text-only path does.
+        // Within each clip, the plain words carry the transcript's spacing.
+        if !reply.text.is_empty() {
+            if let Some(last) = words.last_mut() {
+                last.0.push(' ');
+            }
+        }
         for word in reply.words {
             if !word.start.is_finite() || !word.end.is_finite() {
                 continue;
@@ -1527,6 +1548,60 @@ mod tests {
             "transcription": {"words": [{"word": "ด", "start": 0.0, "end": 0.5}]}
         });
         assert!(parse_word_reply(&body).is_err());
+    }
+
+    #[test]
+    fn character_times_keep_original_text_in_enhance_rows() {
+        for (text, tokens) in [
+            ("你好，世界！", vec!["你", "好", "世", "界"]),
+            ("こんにちは。", vec!["こ", "ん", "に", "ち", "は"]),
+            ("สวัสดี โลก!", vec!["ส", "วั", "ส", "ดี", "โ", "ล", "ก"]),
+            ("你好，Meetily 2!", vec!["你", "好", "Meetily", "2"]),
+            ("Hello, John!", vec!["Hello", "John"]),
+        ] {
+            let tokens: Vec<_> = tokens.iter().enumerate().map(|(i, token)| {
+                json!({"word": token, "start": i as f64 * 0.2, "end": i as f64 * 0.2 + 0.1})
+            }).collect();
+            let body = json!({
+                "choices": [{"message": {"content": text}}],
+                "transcription": {"words": tokens}
+            });
+            let reply = parse_word_reply(&body).unwrap();
+            let words = words_on_timeline(vec![(reply, 0.0)], 5000.0);
+            let rows = crate::audio::enhancement::nemotron_rows(words.clone(), None, None);
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].0, text);
+            // The speaker path replaces times before it builds the same rows.
+            let timed = times_from(words.clone(), &words);
+            let rows = crate::audio::enhancement::nemotron_rows(timed, None, None);
+            assert_eq!(rows[0].0, text);
+        }
+    }
+
+    #[test]
+    fn source_text_keeps_sentence_and_clip_boundaries() {
+        let part = |text: &str, tokens: &[&str]| {
+            let words: Vec<_> = tokens.iter().enumerate().map(|(i, text)| {
+                json!({"word": text, "start": i as f64 * 0.2, "end": i as f64 * 0.2 + 0.1})
+            }).collect();
+            parse_word_reply(&json!({
+                "choices": [{"message": {"content": text}}],
+                "transcription": {"words": words}
+            })).unwrap()
+        };
+        let words = words_on_timeline(vec![
+            (part("Hello", &["Hello"]), 0.0),
+            (part("world!", &["world"]), 0.2),
+        ], 5000.0);
+        let rows = crate::audio::enhancement::nemotron_rows(words, None, None);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].0, "Hello world!");
+        assert!((rows[0].2 - 300.0).abs() < 0.001);
+        let words = words_on_timeline(vec![
+            (part("你好！世界。", &["你", "好", "世", "界"]), 0.0),
+        ], 5000.0);
+        let rows = crate::audio::enhancement::nemotron_rows(words, None, None);
+        assert_eq!(rows.iter().map(|row| row.0.as_str()).collect::<Vec<_>>(), vec!["你好！", "世界。"]);
     }
 
     #[test]
