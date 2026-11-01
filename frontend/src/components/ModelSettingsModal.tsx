@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import { useSidebar } from './Sidebar/SidebarProvider';
 import { invoke } from '@tauri-apps/api/core';
+import { confirm } from '@tauri-apps/plugin-dialog';
 import { Button } from '@/components/ui/button';
 import { useOllamaDownload } from '@/contexts/OllamaDownloadContext';
 import { BuiltInModelManager } from '@/components/BuiltInModelManager';
@@ -104,7 +105,7 @@ const GROQ_FALLBACK_MODELS = [
 interface ModelSettingsModalProps {
   modelConfig: ModelConfig;
   setModelConfig: (config: ModelConfig | ((prev: ModelConfig) => ModelConfig)) => void;
-  onSave: (config: ModelConfig) => void;
+  onSave: (config: ModelConfig) => Promise<void> | void;
   skipInitialFetch?: boolean; // Optional: skip fetching config from backend if parent manages it
   layout?: 'inline' | 'dialog';
 }
@@ -122,12 +123,17 @@ export function ModelSettingsModal({
   const setModelConfig = configContext?.setModelConfig || propsSetModelConfig;
   const providerApiKeys = configContext?.providerApiKeys;
   const updateProviderApiKey = configContext?.updateProviderApiKey;
+  const modelProviderRef = useRef(modelConfig.provider);
+  modelProviderRef.current = modelConfig.provider;
 
   const [models, setModels] = useState<OllamaModel[]>([]);
   const [error, setError] = useState<string>('');
   const [apiKey, setApiKey] = useState<string | null>(modelConfig.apiKey || null);
   const [showApiKey, setShowApiKey] = useState<boolean>(false);
   const [isApiKeyLocked, setIsApiKeyLocked] = useState<boolean>(!!modelConfig.apiKey?.trim());
+  const [isRemovingApiKey, setIsRemovingApiKey] = useState(false);
+  const [isSavingSettings, setIsSavingSettings] = useState(false);
+  const [isLoadingInitialModelConfig, setIsLoadingInitialModelConfig] = useState(!skipInitialFetch);
   const [isLockButtonVibrating, setIsLockButtonVibrating] = useState<boolean>(false);
   const { serverAddress } = useSidebar();
   const [openRouterModels, setOpenRouterModels] = useState<OpenRouterModel[]>([]);
@@ -238,6 +244,7 @@ export function ModelSettingsModal({
     modelConfig.provider === 'groq' ||
     modelConfig.provider === 'openai' ||
     modelConfig.provider === 'openrouter';
+  const storedApiKey = providerApiKeys?.[modelConfig.provider as keyof typeof providerApiKeys];
 
   // Check if Ollama endpoint has changed but models haven't been fetched yet
   const ollamaEndpointChanged = modelConfig.provider === 'ollama' &&
@@ -249,7 +256,9 @@ export function ModelSettingsModal({
     !customOpenAIModel.trim()
   );
 
+  const isSettingsBusy = configContext.isModelSettingsBusy;
   const isDoneDisabled =
+    isSettingsBusy ||
     (requiresApiKey && (!apiKey || (typeof apiKey === 'string' && !apiKey.trim()))) ||
     (modelConfig.provider === 'ollama' && ollamaEndpointChanged) ||
     isCustomOpenAIInvalid;
@@ -262,19 +271,34 @@ export function ModelSettingsModal({
         return;
       }
 
+      const providers = ['claude', 'groq', 'openai', 'openrouter'];
+      const versions = Object.fromEntries(providers.map(provider => [
+        provider, configContext.getProviderApiKeyChange(provider).version,
+      ]));
+      const changedKey = (provider: string) => {
+        const change = configContext.getProviderApiKeyChange(provider);
+        return change.version !== (versions[provider] ?? 0) ? change : null;
+      };
+
       try {
-        const data = (await invoke('api_get_model_config')) as any;
+        let data = (await invoke('api_get_model_config')) as any;
         if (data && data.provider !== null) {
+          const latestChange = changedKey(data.provider);
+          if (latestChange) data = { ...data, apiKey: latestChange.value };
           setModelConfig(data);
 
           // Fetch API key if not included in response and provider requires it
-          if (data.provider !== 'ollama' && !data.apiKey) {
+          if (data.provider !== 'ollama' && !data.apiKey && !latestChange) {
             try {
               const apiKeyData = await invoke('api_get_api_key', {
                 provider: data.provider
               }) as string;
-              data.apiKey = apiKeyData;
-              setApiKey(apiKeyData);
+              const change = changedKey(data.provider);
+              const key = change ? change.value : apiKeyData;
+              if (modelProviderRef.current === data.provider) setApiKey(key || '');
+              setModelConfig((current: ModelConfig) => current.provider === data.provider
+                ? { ...current, apiKey: key || null }
+                : current);
             } catch (err) {
               console.error('Failed to fetch API key:', err);
             }
@@ -307,6 +331,8 @@ export function ModelSettingsModal({
       } catch (error) {
         console.error('Failed to fetch model config:', error);
         hasLoadedInitialConfig.current = true; // Mark as loaded even on error
+      } finally {
+        setIsLoadingInitialModelConfig(false);
       }
     };
 
@@ -614,6 +640,35 @@ export function ModelSettingsModal({
     }
   }, [models, openRouterModels, builtinAiModels, openaiModels, claudeModels, groqModels, modelConfig.provider]);
 
+  const handleRemoveApiKey = async () => {
+    if (!requiresApiKey || !storedApiKey?.trim() || isLoadingInitialModelConfig) return;
+
+    const provider = modelConfig.provider;
+    await configContext.runModelSettingsOperation(async () => {
+      setIsRemovingApiKey(true);
+      try {
+        const accepted = await confirm(
+          'Removing this key stops this provider from generating summaries until you add another key. Transcription keys are separate.',
+          { title: 'Remove saved summary API key?', kind: 'warning', okLabel: 'Remove key' },
+        );
+        if (!accepted) return;
+
+        await invoke('api_delete_api_key', { provider });
+        updateProviderApiKey?.(provider, null);
+        const clearKey = (current: ModelConfig): ModelConfig =>
+          current.provider === provider ? { ...current, apiKey: null } : current;
+        setModelConfig(clearKey);
+        if (propsSetModelConfig !== setModelConfig) propsSetModelConfig(clearKey);
+        toast.success('Saved summary API key removed');
+      } catch (error) {
+        console.error('Failed to remove summary API key:', error);
+        toast.error('Could not remove the saved API key');
+      } finally {
+        setIsRemovingApiKey(false);
+      }
+    });
+  };
+
   const handleSave = async () => {
     // For custom-openai provider, save the custom config first
     if (modelConfig.provider === 'custom-openai') {
@@ -665,7 +720,23 @@ export function ModelSettingsModal({
       updateProviderApiKey(updatedConfig.provider, updatedConfig.apiKey);
     }
 
-    onSave(updatedConfig);
+    await onSave(updatedConfig);
+  };
+
+  // A pending save can otherwise write the old key after it is removed.
+  const saveSettings = async () => {
+    if (isDoneDisabled) return;
+    await configContext.runModelSettingsOperation(async () => {
+      setIsSavingSettings(true);
+      try {
+        await handleSave();
+      } catch (error) {
+        console.error('Failed to save model settings:', error);
+        toast.error('Failed to save model settings');
+      } finally {
+        setIsSavingSettings(false);
+      }
+    });
   };
 
   // Test custom OpenAI connection
@@ -813,6 +884,7 @@ export function ModelSettingsModal({
           <div className="flex space-x-2 mt-1">
             <Select
               value={modelConfig.provider}
+              disabled={isSettingsBusy}
               onValueChange={(value) => {
                 const provider = value as ModelConfig['provider'];
 
@@ -1078,7 +1150,7 @@ export function ModelSettingsModal({
                 type={showApiKey ? 'text' : 'password'}
                 value={apiKey || ''}
                 onChange={(e) => setApiKey(e.target.value)}
-                disabled={isApiKeyLocked}
+                disabled={isApiKeyLocked || isSettingsBusy}
                 placeholder="Enter your API key"
                 className="pr-24"
               />
@@ -1094,6 +1166,7 @@ export function ModelSettingsModal({
                     type="button"
                     variant="ghost"
                     size="icon"
+                    disabled={isSettingsBusy}
                     onClick={() => setIsApiKeyLocked(!isApiKeyLocked)}
                     className={isLockButtonVibrating ? 'animate-vibrate text-red-500 dark:text-red-400' : ''}
                     title={isApiKeyLocked ? 'Unlock to edit' : 'Lock to prevent editing'}
@@ -1105,12 +1178,25 @@ export function ModelSettingsModal({
                   type="button"
                   variant="ghost"
                   size="icon"
+                  disabled={isSettingsBusy}
                   onClick={() => setShowApiKey(!showApiKey)}
                 >
                   {showApiKey ? <EyeOff /> : <Eye />}
                 </Button>
               </div>
             </div>
+            {storedApiKey?.trim() && (
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                className="mt-2"
+                disabled={isSettingsBusy || isLoadingInitialModelConfig}
+                onClick={handleRemoveApiKey}
+              >
+                {isRemovingApiKey ? 'Removing key...' : 'Remove saved API key'}
+              </Button>
+            )}
           </div>
         )}
 
@@ -1397,10 +1483,10 @@ export function ModelSettingsModal({
             'px-4 text-sm font-medium text-white rounded-md focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500',
             isDoneDisabled ? 'bg-gray-400 dark:bg-ink-600 cursor-not-allowed' : 'bg-blue-600 hover:bg-blue-700'
           )}
-          onClick={handleSave}
+          onClick={saveSettings}
           disabled={isDoneDisabled}
         >
-          Save
+          {isSavingSettings ? 'Saving...' : 'Save'}
         </Button>
       </div>
     </div>
