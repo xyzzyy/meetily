@@ -1,8 +1,8 @@
 name: issue-grace
 
-# Anyone can use the first /reopen on a template-closed issue. Each successful
-# command adds template-grace and invalid-template-again. Later commands need
-# a maintainer. Commands do not check templates on closed issues.
+# Anyone can use /reopen on an issue with invalid-template. Reopening an issue
+# with invalid-template-again needs a maintainer. A successful command leaves
+# only template-grace. Commands do not check templates on closed issues.
 # At 04:00 UTC, check all open issues, including older issues without grace.
 # Closed issues have no automatic checks or cleanup.
 

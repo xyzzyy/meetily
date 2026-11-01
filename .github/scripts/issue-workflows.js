@@ -8,8 +8,8 @@ const GRACE = "template-grace";
 const AGAIN = "invalid-template-again";
 const STATE_LABELS = {
   [INVALID]: { color: "d73a4a", description: "Required issue template information is missing" },
+  [AGAIN]: { color: "d4c5f9", description: "Required template information is still missing after a grace period" },
   [GRACE]: { color: "fbca04", description: "Edits are allowed until the next nightly template check at 04:00 UTC" },
-  [AGAIN]: { color: "d4c5f9", description: "Further /reopen commands require a maintainer" },
 };
 
 class IssueChanged extends Error {}
@@ -109,23 +109,30 @@ function reopenHelp(labels) {
 }
 
 // Event checks and nightly checks use the same rules and closure explanation.
-// Only the nightly check can end an active grace period.
+// A complete correction ends grace; the nightly check closes incomplete issues.
 async function checkOpenIssue({ context, github, core }, issue, { nightly = false, dryRun = false } = {}) {
   if (issue.state !== "open" || issue.pull_request) return;
   const api = issueApi(context, github, issue, true);
   const result = validate(issue);
-  if (api.labels.has(GRACE) && !nightly) {
+  if (api.labels.has(GRACE) && !nightly && !result.ok) {
     // Retained grace after a manual close and reopen is allowed intentionally.
+    const stale = [INVALID, AGAIN].filter(name => api.labels.has(name));
+    if (stale.length) {
+      await api.comment("grace-labels:" + context.runId + ":" + issue.number,
+        "This issue is in its grace period. I will keep `" + GRACE +
+        "` and remove the other template labels. You can continue editing it.");
+      for (const name of stale) await api.remove(name);
+    }
     core.notice("#" + issue.number + " has grace until the next nightly check; edits remain allowed.");
     return;
   }
 
   const key = "template-check:" + context.runId + ":" + issue.number;
   if (result.ok) {
-    const removed = [INVALID, GRACE].filter((name) => api.labels.has(name));
+    const removed = [INVALID, GRACE, AGAIN].filter((name) => api.labels.has(name));
     // The forms label new issues. Add the type label only when recovering an
     // issue, so a maintainer who removes it during triage is not overridden.
-    const added = removed.length && !api.labels.has(result.template.label) ? [result.template.label] : [];
+    const added = (api.labels.has(INVALID) || api.labels.has(GRACE)) && !api.labels.has(result.template.label) ? [result.template.label] : [];
     if (!removed.length) return;
     core.info("#" + issue.number + " follows its template; updating its labels.");
     if (dryRun) return;
@@ -145,20 +152,23 @@ async function checkOpenIssue({ context, github, core }, issue, { nightly = fals
     core.info(problems(result, context));
     return;
   }
+  const invalidLabel = api.labels.has(GRACE) || api.labels.has(AGAIN) ? AGAIN : INVALID;
   const graceEnded = api.labels.has(GRACE) ? "The nightly check ends this issue's grace period.\n\n" : "";
   // Ignore labels changed by a partial closure, so another run can retry it
   // without repeating the same explanation. The repeat allowance changes help text.
   const stateKey = "invalid-state:" + createHash("sha256")
-    .update(JSON.stringify([issue.title, issue.body, api.labels.has(AGAIN)])).digest("hex");
+    .update(JSON.stringify([issue.title, issue.body, invalidLabel])).digest("hex");
   await api.comment(key + ":" + stateKey, graceEnded + "I will close this issue because required template information is missing.\n\n" +
-    problems(result, context) + "\n\nI will add `" + INVALID + "`. " +
-    "I will remove `" + GRACE + "` if it is present. " + reopenHelp(api.labels), {
+    problems(result, context) + "\n\nI will add `" + invalidLabel + "`. " +
+    "I will remove the other template labels. " + reopenHelp(new Set([invalidLabel])), {
       stateKey,
       forceNew: context.eventName === "issues" && context.payload.action === "reopened",
     });
-  await api.add(INVALID);
+  await api.add(invalidLabel);
   // Change labels while the issue is open. No cleanup runs on closed issues.
-  await api.remove(GRACE);
+  for (const name of [INVALID, GRACE, AGAIN]) {
+    if (name !== invalidLabel) await api.remove(name);
+  }
   await api.update({ state: "closed", state_reason: "not_planned" });
 }
 
@@ -186,12 +196,12 @@ async function reopen({ context, github, core }) {
     await api.comment(key, "I did not reopen this issue because this command came before its latest closure. Submit a new `/reopen` request.");
     return;
   }
-  if (!api.labels.has(INVALID)) {
+  if (!api.labels.has(INVALID) && !api.labels.has(AGAIN) && !api.labels.has(GRACE)) {
     await api.comment(key, "I did not reopen this issue. `/reopen` applies only to issues closed for missing template information.");
     return;
   }
 
-  if (api.labels.has(AGAIN)) {
+  if (api.labels.has(AGAIN) || api.labels.has(GRACE)) {
     let maintainer = false;
     try {
       // Check the comment author, not an actor who reruns the workflow.
@@ -203,29 +213,30 @@ async function reopen({ context, github, core }) {
         !!(permission.user && permission.user.permissions && permission.user.permissions.triage);
     } catch (error) {
       await api.comment(key, "I could not check your maintainer permissions, so I did not reopen this issue. " +
-        "It has `" + AGAIN + "`. A maintainer can try `/reopen` again when the permission check is available.");
+        "A maintainer can try `/reopen` again when the permission check is available.");
       return;
     }
     if (!maintainer) {
-      await api.comment(key, "I did not reopen this issue because it has `" + AGAIN + "`. " +
+      await api.comment(key, "I did not reopen this issue because it has already had a grace period. " +
         "Ask a maintainer in this thread to comment `/reopen` for another grace period.");
       return;
     }
   }
 
   const hadGrace = api.labels.has(GRACE);
-  const hadAgain = api.labels.has(AGAIN);
-  await api.comment(key, "I will reopen this issue with `" + GRACE + "` until the next nightly check at 04:00 UTC.\n\n" +
+  await api.comment(key, "I will reopen this issue with `" + GRACE + "` until the next nightly check at 04:00 UTC, or until you complete the template.\n\n" +
+    "I will remove `" + INVALID + "` and `" + AGAIN + "` if present. " +
     "You can make as many edits as needed while that label stays on the issue. " +
     "The nightly check will close it if required template information is still missing.\n\n" +
-    "The `" + AGAIN + "` label means that further `/reopen` commands need a maintainer. " +
+    "If the nightly check closes it again, it will have only `" + AGAIN + "`. Further `/reopen` commands then need a maintainer. " +
     "Maintainers can use the command without a limit.");
   try {
-    // Set both labels before reopening, so an issue event sees the grace.
-    // The labels record the allowance. No reopen count is needed.
+    // Set grace before reopening, so the issue event allows edits.
+    // Clear the closed-state labels only after reopening succeeds.
     await api.add(GRACE);
-    await api.add(AGAIN);
     await api.update({ state: "open" });
+    await api.remove(INVALID);
+    await api.remove(AGAIN);
   } catch (error) {
     // A failed response does not prove that GitHub rejected the update.
     // Read the actual state before removing any request labels.
@@ -241,9 +252,10 @@ async function reopen({ context, github, core }) {
     const recovery = issueApi(context, github, current);
     if (current.state === "open") {
       await recovery.add(GRACE);
-      await recovery.add(AGAIN);
+      await recovery.remove(INVALID);
+      await recovery.remove(AGAIN);
       await recovery.comment(key + ":confirmed", "The API response failed, but I confirmed that this issue is open. " +
-        "I kept `" + GRACE + "` and `" + AGAIN + "`. The grace period remains active until the nightly check.");
+        "I kept only `" + GRACE + "` of the template labels. The grace period remains active until the nightly check.");
       return;
     }
     if (current.closed_at && live.closed_at && current.closed_at !== live.closed_at) {
@@ -252,7 +264,7 @@ async function reopen({ context, github, core }) {
       return;
     }
     const remaining = [];
-    for (const [name, existed] of [[GRACE, hadGrace], [AGAIN, hadAgain]]) {
+    for (const [name, existed] of [[GRACE, hadGrace]]) {
       if (existed) continue;
       try {
         await recovery.remove(name);

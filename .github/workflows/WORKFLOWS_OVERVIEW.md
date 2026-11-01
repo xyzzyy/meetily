@@ -195,8 +195,8 @@ This document provides a quick overview of all available CI/CD workflows in this
 - Ignores headings and task-list text inside raw HTML blocks; hidden HTML comments cannot complete required fields
 - Keeps code fences within their list item, including after a nested quote, and handles HTML blocks after a list, quote, or GFM table ends
 - Comments with the current failures, adds `invalid-template`, and closes incomplete issues
-- Allows unlimited edits while `template-grace` is present, even after an edit completes the template
-- Keeps grace until the nightly check; removing the label starts a normal template check
+- Allows partial edits while `template-grace` is present; a complete correction removes all three template labels
+- Keeps grace for incomplete issues until the nightly check; removing the label starts a normal template check
 - Explains label changes when an issue follows its template
 - Does no work on closed issues
 - Checks the current state, title, body, and labels before each automatic change; a changed issue stops that pass
@@ -215,23 +215,24 @@ This document provides a quick overview of all available CI/CD workflows in this
 
 ### 10. **issue-grace.yml** - Reopen and Nightly Checks
 
-**Purpose:** Give any user one reopen per issue and let maintainers grant more grace periods.
+**Purpose:** Let users reopen a template-closed issue and let maintainers grant more grace after an unsuccessful correction.
 
 **Key Features:**
-- Anyone can comment `/reopen` on a closed issue with `invalid-template`
-- The first successful command adds `template-grace` and `invalid-template-again`, then reopens the issue
-- `template-grace` permits unlimited edits until the next nightly check at 04:00 UTC
-- `invalid-template-again` means that later `/reopen` commands need a maintainer; there is no reopen counter
+- Anyone can comment `/reopen` on a closed issue with `invalid-template`; reopening an issue with `invalid-template-again` needs a maintainer
+- A successful command reopens the issue and leaves only `template-grace` of the three template labels
+- `template-grace` permits partial edits until the next nightly check at 04:00 UTC; a complete correction ends grace
+- `invalid-template-again` marks an issue closed after an unsuccessful grace period; a maintainer can use `/reopen` to replace it with `template-grace`
 - Maintainers with triage, write, maintain, or admin access can use `/reopen` without a limit
 - Checks the command author's current permissions when a later reopen needs a maintainer
+- A maintainer can also use `/reopen` after a manual closure during grace; the issue keeps only `template-grace` of the template labels
 - Checks no title or body while an issue is closed; only an explicit `/reopen` request can process a closed issue
 - A failed command rolls back new request labels and keeps an existing maintainer-only label; the bot reports any rollback failure
-- A failed API response triggers a state check before rollback; an open issue keeps grace and the maintainer-only marker
+- A failed API response triggers a state check before rollback; a confirmed open issue keeps only `template-grace` of the template labels
 - If the state check also fails, the bot keeps the labels and explains the uncertainty
 - Each command response explains the action or refusal
 - The nightly check covers **all open issues**, including older issues without a grace label
-- Complete issues stay open; the bot removes `template-grace` and `invalid-template`, but keeps `invalid-template-again`
-- Incomplete issues receive a comment with the current failures and close; the bot removes grace before closure
+- Complete issues stay open; the bot removes `template-grace`, `invalid-template`, and `invalid-template-again`, including on a complete edit during grace
+- Incomplete issues receive a comment with the current failures and close. The first closure leaves only `invalid-template`; closure after grace leaves only `invalid-template-again`. Other labels, such as `bug` and `enhancement`, stay in place
 - A retry of a failed closure reuses the explanation for the same invalid state; a changed report or new reopen cycle gets a fresh explanation
 - A GitHub rate-limit response stops and fails the nightly check; it does not continue API calls for the remaining issues
 - Closed issues have no scheduled checks or automatic label cleanup

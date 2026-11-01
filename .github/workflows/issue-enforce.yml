@@ -1,8 +1,8 @@
 name: issue-enforce
 
 # Check every author against the same issue templates. Incomplete issues close
-# with an explanation unless template-grace protects edits until the nightly
-# check. Removing template-grace makes the issue subject to normal checks.
+# with an explanation unless template-grace protects partial edits until the
+# nightly check. A complete correction removes all three template labels.
 # Closed issues have no automatic checks or cleanup.
 
 on:

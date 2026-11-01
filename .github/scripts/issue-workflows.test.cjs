@@ -303,26 +303,28 @@ test("retained grace is intentionally allowed after an author manually closes an
   f.event("issues", "reopened");
   await enforce(f);
   assert.equal(f.issue.state, "open");
-  assert.deepEqual(f.labels(), [INVALID, GRACE, AGAIN]);
-  assert.equal(f.comments.length, 0);
+  assert.deepEqual(f.labels(), [GRACE]);
+  assert.equal(f.comments.length, 1);
 });
 
-test("grace allows repeated partial edits, including edits after a complete correction", async () => {
+test("partial edits keep grace, but a complete correction clears all template labels", async () => {
   const f = graceFixture({ issue: { author_association: "OWNER" } });
-  for (const body of ["partial fix", completeBody, "another partial fix"]) {
-    f.issue.body = body;
-    f.event("issues", "edited");
-    await enforce(f);
-    assert.equal(f.issue.state, "open");
-    assert.deepEqual(f.labels(), [INVALID, GRACE, AGAIN]);
-  }
-  assert.equal(f.comments.length, 0);
+  f.issue.body = "partial fix";
+  f.event("issues", "edited");
+  await enforce(f);
+  assert.equal(f.issue.state, "open");
+  assert.deepEqual(f.labels(), [GRACE]);
+  f.issue.body = completeBody;
+  f.event("issues", "edited");
+  await enforce(f);
+  assert.equal(f.issue.state, "open");
+  assert.deepEqual(f.labels(), ["bug"]);
 });
 
 test("a complete edit outside grace clears invalid status and explains why", async () => {
   const f = fixture({ action: "edited", issue: { body: completeBody, labels: [INVALID, AGAIN] } });
   await enforce(f);
-  assert.deepEqual(f.labels().sort(), ["bug", AGAIN].sort());
+  assert.deepEqual(f.labels().sort(), ["bug"].sort());
   assert.match(f.comments[0].body, /remove these labels: `invalid-template`/);
 });
 
@@ -333,18 +335,18 @@ for (const commenter of ["author", "another-user"]) {
     assert.equal(f.issue.state, "open");
     const update = f.calls.find((call) => call.method === "update");
     assert.ok(update.labels.includes(GRACE));
-    assert.ok(update.labels.includes(AGAIN));
+    assert.deepEqual(f.labels(), [GRACE]);
     assert.equal(f.calls.filter((call) => call.method === "permission").length, 0);
     assert.match(f.comments[0].body, /04:00 UTC/);
     assert.match(f.comments[0].body, /as many edits as needed/);
   });
 }
 
-test("the first reopen always grants grace and records the allowance, even after a complete correction", async () => {
+test("the first reopen grants only grace, even before checking a complete correction", async () => {
   const f = closedFixture({ issue: { body: completeBody } });
   await reopen(f);
   assert.equal(f.issue.state, "open");
-  assert.deepEqual(f.labels().sort(), [INVALID, GRACE, AGAIN].sort());
+  assert.deepEqual(f.labels().sort(), [GRACE]);
   assert.ok(!f.labels().includes("bug"));
 });
 
@@ -355,7 +357,7 @@ test("an existing repository label does not prevent a reopen", async () => {
   };
   await reopen(f);
   assert.equal(f.issue.state, "open");
-  assert.deepEqual(f.labels().sort(), [INVALID, GRACE, AGAIN].sort());
+  assert.deepEqual(f.labels().sort(), [GRACE]);
 });
 
 test("/reopen does not inspect a closed issue's title or body", async () => {
@@ -396,7 +398,7 @@ for (const permission of [
       await reopen(f);
       assert.equal(f.issue.state, "open");
       assert.ok(f.labels().includes(GRACE));
-      assert.ok(f.labels().includes(AGAIN));
+      assert.deepEqual(f.labels(), [GRACE]);
       assert.match(f.comments[0].body, /04:00 UTC/);
     });
   }
@@ -432,7 +434,7 @@ test("a failed maintainer reopen preserves the maintainer-only label", async () 
   assert.deepEqual(f.labels().sort(), [INVALID, AGAIN].sort());
 });
 
-test("a lost response after a successful reopen preserves grace and the allowance label", async () => {
+test("a lost response after a successful reopen keeps only grace", async () => {
   const f = closedFixture();
   const update = f.github.rest.issues.update;
   f.github.rest.issues.update = async (args) => {
@@ -441,9 +443,9 @@ test("a lost response after a successful reopen preserves grace and the allowanc
   };
   await reopen(f);
   assert.equal(f.issue.state, "open");
-  assert.deepEqual(f.labels().sort(), [INVALID, GRACE, AGAIN].sort());
+  assert.deepEqual(f.labels().sort(), [GRACE]);
   assert.match(f.comments.at(-1).body, /confirmed that this issue is open/);
-  assert.ok(!f.calls.some((call) => call.method === "removeLabel"));
+  assert.ok(!f.labels().includes(INVALID));
 });
 
 test("an unknown reopen state preserves request labels and explains the uncertainty", async () => {
@@ -462,7 +464,7 @@ test("an unknown reopen state preserves request labels and explains the uncertai
   };
   await assert.rejects(reopen(f), /Response lost after update/);
   assert.equal(f.issue.state, "open");
-  assert.deepEqual(f.labels().sort(), [INVALID, GRACE, AGAIN].sort());
+  assert.deepEqual(f.labels().sort(), [INVALID, GRACE].sort());
   assert.match(f.comments.at(-1).body, /could not confirm the issue's current state/);
   assert.ok(!f.calls.some((call) => call.method === "removeLabel"));
 });
@@ -490,18 +492,18 @@ test("a later manual closure after a lost reopen response keeps the request labe
   };
   await reopen(f);
   assert.equal(f.issue.state, "closed");
-  assert.deepEqual(f.labels().sort(), [INVALID, GRACE, AGAIN].sort());
+  assert.deepEqual(f.labels().sort(), [INVALID, GRACE].sort());
   assert.match(f.comments.at(-1).body, /later closure/);
 });
 
 test("a failed label addition does not use the first allowance", async () => {
-  const f = closedFixture({ failLabel: AGAIN });
+  const f = closedFixture({ failLabel: GRACE });
   await assert.rejects(reopen(f), /Label failed/);
   assert.equal(f.issue.state, "closed");
   assert.deepEqual(f.labels(), [INVALID]);
 });
 
-test("a rollback failure is explained and does not stop the other label rollback", async () => {
+test("a failed grace rollback is explained", async () => {
   const f = closedFixture({ failUpdate: true, failRemove: GRACE });
   await assert.rejects(reopen(f), /Update failed/);
   assert.deepEqual(f.labels(), [INVALID, GRACE]);
@@ -567,7 +569,7 @@ for (const association of ["NONE", "OWNER", "MEMBER", "COLLABORATOR"]) {
     const f = graceFixture({ issue: { author_association: association } });
     await sweep(f);
     assert.equal(f.issue.state, "closed");
-    assert.deepEqual(f.labels().sort(), [INVALID, AGAIN].sort());
+    assert.deepEqual(f.labels().sort(), [AGAIN]);
     assert.match(f.comments[0].body, /### Environment/);
     assert.match(f.comments[0].body, /required boxes/);
     assert.match(f.comments[0].body, /maintainer/);
@@ -589,7 +591,7 @@ test("the nightly check clears grace and invalid status when the issue is comple
   const f = graceFixture({ issue: { author_association: "OWNER", body: completeBody } });
   await sweep(f);
   assert.equal(f.issue.state, "open");
-  assert.deepEqual(f.labels().sort(), ["bug", AGAIN].sort());
+  assert.deepEqual(f.labels().sort(), ["bug"].sort());
   assert.match(f.comments[0].body, /remove these labels: `invalid-template`, `template-grace`/);
 });
 
@@ -632,7 +634,7 @@ test("the nightly check uses a correction made after listing", async () => {
   const f = graceFixture({ beforeGet: (issue) => { issue.body = completeBody; } });
   await sweep(f);
   assert.equal(f.issue.state, "open");
-  assert.deepEqual(f.labels().sort(), ["bug", AGAIN].sort());
+  assert.deepEqual(f.labels().sort(), ["bug"].sort());
 });
 
 for (const [name, run] of [["event check", enforce], ["nightly check", sweep]]) {
@@ -811,7 +813,7 @@ test("later nightly runs reuse the explanation after a partial closure fails", a
   }
   assert.equal(f.comments.length, 1);
   assert.ok(!f.labels().includes(GRACE));
-  assert.match(f.comments[0].body, /remove `template-grace`/);
+  assert.match(f.comments[0].body, /remove the other template labels/);
 });
 
 test("rerunning a failed check explains a changed invalid body", async () => {
@@ -1322,4 +1324,54 @@ test("a large paragraph of unfinished inline comments does not stall validation"
   const script = `const { validate } = require(${JSON.stringify(require.resolve("./issue-template.js"))});
     require('node:assert/strict').equal(validate({title:'[BUG] Test',body:'a <!--\\n'.repeat(9000)}).ok, false);`;
   execFileSync(process.execPath, ["-e", script], { timeout: 5000 });
+});
+
+for (const initial of [[], [INVALID], [GRACE], [AGAIN], [INVALID, GRACE, AGAIN]]) {
+  test(`a complete report clears all template labels and keeps triage: ${initial}`, async () => {
+    const f = fixture({ issue: { body: completeBody, labels: ["bug", "triaged", ...initial] } });
+    await enforce(f);
+    assert.equal(f.issue.state, "open");
+    assert.deepEqual(f.labels().sort(), ["bug", "triaged"]);
+  });
+}
+
+for (const permission of ["read", "triage"]) {
+  test(`a manually closed grace issue requires a moderator to reopen (${permission})`, async () => {
+    const f = closedFixture({ issue: { labels: [GRACE, "bug"] }, permission: { permission } });
+    await reopen(f);
+    assert.equal(f.issue.state, permission === "triage" ? "open" : "closed");
+    assert.deepEqual(f.labels(), [GRACE, "bug"]);
+    assert.equal(f.calls.filter(call => call.method === "permission").length, 1);
+    if (permission === "read") assert.match(f.comments[0].body, /Ask a maintainer/);
+  });
+}
+
+test("template labels follow the full author and moderator recovery cycle", async () => {
+  const f = fixture({ issue: { labels: ["bug", "triaged"] } });
+  await enforce(f);
+  assert.equal(f.issue.state, "closed");
+  assert.deepEqual(f.labels().sort(), ["bug", "triaged", INVALID].sort());
+  f.event("issue_comment");
+  await reopen(f);
+  assert.equal(f.issue.state, "open");
+  assert.deepEqual(f.labels().sort(), ["bug", "triaged", GRACE].sort());
+  f.event("schedule");
+  await sweep(f);
+  assert.equal(f.issue.state, "closed");
+  assert.deepEqual(f.labels().sort(), ["bug", "triaged", AGAIN].sort());
+  f.event("issue_comment");
+  f.context.payload.comment.id++;
+  await reopen(f);
+  assert.equal(f.issue.state, "closed", "A reader cannot grant another grace period");
+  f.context.payload.comment.id++;
+  f.context.payload.comment.user.login = "moderator";
+  f.github.rest.repos.getCollaboratorPermissionLevel = async () => ({ data: { permission: "triage" } });
+  await reopen(f);
+  assert.equal(f.issue.state, "open");
+  assert.deepEqual(f.labels().sort(), ["bug", "triaged", GRACE].sort());
+  f.issue.body = completeBody;
+  f.event("issues", "edited");
+  await enforce(f);
+  assert.equal(f.issue.state, "open");
+  assert.deepEqual(f.labels().sort(), ["bug", "triaged"]);
 });
