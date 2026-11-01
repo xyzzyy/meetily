@@ -967,11 +967,12 @@ fn times_from(
     let mut cursor = 0;
     for first in (0..words.len()).step_by(BLOCK) {
         let last = (first + BLOCK).min(words.len());
+        let lookahead = (last + BLOCK).min(words.len());
         let limit = words[last - 1].2 + REACH_MS;
         let end = (cursor..timed.len())
             .find(|&j| timed[j].1 > limit)
             .unwrap_or(timed.len());
-        let a: Vec<String> = words[first..last].iter().map(|w| key(&w.0)).collect();
+        let a: Vec<String> = words[first..lookahead].iter().map(|w| key(&w.0)).collect();
         let b: Vec<String> = timed[cursor..end].iter().map(|w| key(&w.0)).collect();
         // Longest common subsequence, traced from the start.
         let mut table = vec![vec![0u32; b.len() + 1]; a.len() + 1];
@@ -985,7 +986,8 @@ fn times_from(
             }
         }
         let (mut i, mut j) = (0, 0);
-        while i < a.len() && j < b.len() {
+        // Include the next block in the LCS, but save only this block's matches.
+        while i < last - first && j < b.len() {
             if !a[i].is_empty() && a[i] == b[j] {
                 matched[first + i] = Some(cursor + j);
                 i += 1;
@@ -1601,6 +1603,27 @@ mod tests {
         assert!(at("uh") >= 543_488.0 && at("uh") < 543_808.0, "{words:?}");
         assert_eq!(at("Sounds"), 546_844.0);
         assert!(words.windows(2).all(|pair| pair[0].1 <= pair[1].1));
+    }
+
+    #[test]
+    fn a_block_keeps_matches_for_words_in_the_next_block() {
+        let prefix: Vec<_> = (0..299)
+            .map(|i| (format!("word{i}"), (i + 1) as f64 * 300.0, (i + 2) as f64 * 300.0))
+            .collect();
+        let mut plain = prefix.clone();
+        plain.extend(timed(&[
+            ("yes", 90_000.0, 91_000.0),
+            ("we", 91_000.0, 92_000.0),
+            ("agree", 92_000.0, 93_000.0),
+            ("yes", 93_000.0, 94_000.0),
+            ("done", 94_000.0, 95_000.0),
+        ]));
+        let mut tagged = prefix;
+        tagged.extend_from_slice(&plain[300..]);
+
+        let words = times_from(plain.clone(), &tagged);
+        assert_eq!(words[..299], plain[..299]);
+        assert_eq!(words[299..], plain[299..]);
     }
 
     #[test]
