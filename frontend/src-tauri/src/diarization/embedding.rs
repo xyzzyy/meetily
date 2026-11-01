@@ -1,7 +1,7 @@
 // diarization/embedding.rs
 //
 // Speaker-embedding extraction using the WeSpeaker CAM++ ONNX model
-// (input: kaldi fbank features [1, T, 80], output: 192-dim embedding).
+// (input: kaldi fbank features [1, T, 80], output: 512-dim embedding).
 
 use super::fbank::{FbankComputer, NUM_MEL_BINS};
 use ndarray::Array3;
