@@ -163,7 +163,8 @@ export function RetranscribeDialog({
     setLoadingReview(true);
     setReview(null);
     invoke<EnhancementReview | null>('get_enhancement_review', { meetingId })
-      .then(value => { if (active) setReview(value); })
+      // After a failed run, an applied result belongs to an earlier run. Show only a pending one.
+      .then(value => { if (active) setReview(failedRunError && value?.applied ? null : value); })
       .catch(error => { if (active) setError(String(error)); })
       .finally(() => { if (active) setLoadingReview(false); });
     return () => { active = false; };

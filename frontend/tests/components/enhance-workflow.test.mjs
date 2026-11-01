@@ -236,4 +236,15 @@ for (const action of ['Keep saved transcript', 'Apply proposed transcript']) {
   assert.equal(instance.states.get('error'), 'Model crashed');
   assert.deepEqual(instance.runCalls, [['dismissFailure', 'meeting']]);
 }
+// Reopened after that failure, an earlier run's applied result stays hidden.
+{
+  const instance = dialog('whisper', false, true, true, false, null, {
+    run: { meetingId: 'meeting', status: 'failed', progress: null, error: 'Model crashed' },
+    invoke: command => command === 'get_enhancement_review'
+      ? { id: 'earlier', applied: true, original: [{ transcript: 'A' }], proposed: [{ text: 'B' }], warnings: [] } : undefined,
+  });
+  await instance.mount();
+  assert.equal(instance.states.get('review'), null);
+  assert.equal(instance.states.get('error'), 'Model crashed');
+}
 console.log('Enhance background run checks passed');
