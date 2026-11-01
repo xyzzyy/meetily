@@ -462,7 +462,9 @@ pub async fn start_recording_with_meeting_name<R: Runtime>(
         serde_json::json!({
             "message": "Recording started successfully with parallel processing",
             "devices": ["Default Microphone", "Default System Audio"],
-            "workers": 3
+            "workers": 3,
+            // Lets the frontend save the folder with the crash-recovery record from the start.
+            "folder_path": current_meeting_folder()
         }),
     )
     .map_err(|e| e.to_string());
@@ -651,7 +653,8 @@ pub async fn start_recording_with_devices_and_meeting<R: Runtime>(
                 mic_device_name.unwrap_or_else(|| "Default Microphone".to_string()),
                 system_device_name.unwrap_or_else(|| "Default System Audio".to_string())
             ],
-            "workers": 3
+            "workers": 3,
+            "folder_path": current_meeting_folder()
         }),
     )
     .map_err(|e| e.to_string());
@@ -1300,14 +1303,16 @@ pub async fn get_recording_state() -> serde_json::Value {
 /// Returns the path if a meeting name was set and folder structure initialized
 #[tauri::command]
 pub async fn get_meeting_folder_path() -> Result<Option<String>, String> {
+    Ok(current_meeting_folder())
+}
+
+/// Folder of the recording that is active right now, if any.
+fn current_meeting_folder() -> Option<String> {
     let manager_guard = RECORDING_MANAGER.lock().unwrap();
-    if let Some(manager) = manager_guard.as_ref() {
-        Ok(manager
-            .get_meeting_folder()
-            .map(|p| p.to_string_lossy().to_string()))
-    } else {
-        Ok(None)
-    }
+    manager_guard
+        .as_ref()
+        .and_then(|manager| manager.get_meeting_folder())
+        .map(|path| path.to_string_lossy().to_string())
 }
 
 /// Get accumulated transcript segments from current recording session
