@@ -24,6 +24,9 @@ pub(crate) struct Proposal {
     pub core_backup: Vec<CoreTranscriptBackup>,
     pub speaker_backup: String,
     pub publication_rows: String,
+    /// Saved speech the new run left without words. Shown, never blocking.
+    #[serde(default)]
+    pub warnings: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -38,12 +41,11 @@ pub struct ReviewPreview {
 
 impl Proposal {
     fn preview(self, id: String, applied: bool) -> ReviewPreview {
-        let warnings = Vec::new();
         ReviewPreview {
             id,
             original: self.original,
             proposed: self.segments,
-            warnings,
+            warnings: self.warnings,
             model: self.model,
             applied,
         }
@@ -100,8 +102,11 @@ pub(crate) async fn speaker_snapshot_on(
 /// Do not silently remove previously transcribed speech, including row interiors.
 /// This checks missing output, not whether changed words are correct.
 /// Decoder and token times are estimates. Allow a two-second boundary shift.
-/// After that allowance, reject uncovered stretches longer than two seconds.
-fn check_baseline_regions(proposal: &Proposal) -> Result<()> {
+/// After that allowance, report uncovered stretches longer than two seconds.
+/// A new run can be better even where it differs, so this warns and Undo
+/// restores the saved transcript; it never discards the run.
+fn baseline_gaps(proposal: &Proposal) -> Option<String> {
+    let mut gaps = Vec::new();
     let mut intervals: Vec<_> = proposal
         .segments
         .iter()
@@ -146,10 +151,21 @@ fn check_baseline_regions(proposal: &Proposal) -> Result<()> {
             cursor = cursor.max(b);
         }
         if !covered || gap || end - cursor > 2.0 {
-            return Err(anyhow!("Enhance left a gap in previously transcribed speech at {:02}:{:02}. The saved transcript was kept.",start as u64/60,start as u64%60));
+            gaps.push(format!("{:02}:{:02}", start as u64 / 60, start as u64 % 60));
         }
     }
-    Ok(())
+    gaps.dedup();
+    let more = gaps.len().saturating_sub(5);
+    gaps.truncate(5);
+    if more > 0 {
+        gaps.push(format!("{more} more"));
+    }
+    (!gaps.is_empty()).then(|| {
+        format!(
+            "Enhance has no words where the previous transcript had speech at {}. Check those parts, or use Undo to restore the previous transcript.",
+            gaps.join(", ")
+        )
+    })
 }
 
 pub(crate) async fn stage(
@@ -162,7 +178,7 @@ pub(crate) async fn stage(
             "No transcript text was found. The saved transcript was kept."
         ));
     }
-    check_baseline_regions(&proposal)?;
+    proposal.warnings = baseline_gaps(&proposal).into_iter().collect();
     proposal.core_backup = sqlx::query_as("SELECT id, meeting_id, transcript, timestamp, summary, action_items, key_points,
         audio_start_time, audio_end_time, duration, speaker FROM transcripts WHERE meeting_id = ? ORDER BY audio_start_time, id")
         .bind(&proposal.meeting_id).fetch_all(core).await?;

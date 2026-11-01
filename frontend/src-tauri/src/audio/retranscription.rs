@@ -726,6 +726,7 @@ async fn save_retranscription<R: Runtime>(
             core_backup: Vec::new(),
             speaker_backup: String::new(),
             publication_rows: String::new(),
+            warnings: Vec::new(),
         },
     )
     .await?;
@@ -1177,10 +1178,11 @@ async fn apply_review_content<R: Runtime>(
         .unwrap_or_else(|| "audio.mp4".into());
     let metadata_export =
         write_retranscription_metadata(&folder, &meeting_id, proposal.duration_seconds, &audio);
+    let mut warnings = proposal.warnings;
     if transcript_export.is_err() || metadata_export.is_err() {
-        return Ok(Some("The transcript is saved in the app, but its recording folder export could not be updated.".into()));
+        warnings.push("The transcript is saved in the app, but its recording folder export could not be updated.".into());
     }
-    Ok(None)
+    Ok((!warnings.is_empty()).then(|| warnings.join(" ")))
 }
 
 #[tauri::command]
