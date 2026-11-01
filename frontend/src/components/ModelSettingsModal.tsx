@@ -161,6 +161,40 @@ export function ModelSettingsModal({
   const [isCustomOpenAIAdvancedOpen, setIsCustomOpenAIAdvancedOpen] = useState<boolean>(false);
   const [isTestingConnection, setIsTestingConnection] = useState<boolean>(false);
 
+  const [customModels, setCustomModels] = useState<string[]>([]);
+  const [customModelsError, setCustomModelsError] = useState('');
+  const [isLoadingCustomModels, setIsLoadingCustomModels] = useState(false);
+  const customModelsRequest = useRef(0);
+
+  // Invalidate results when the server or credentials change.
+  useEffect(() => {
+    customModelsRequest.current += 1;
+    setCustomModels([]);
+    setCustomModelsError('');
+    setIsLoadingCustomModels(false);
+  }, [customOpenAIEndpoint, customOpenAIApiKey, modelConfig.provider]);
+
+  const fetchCustomModels = async () => {
+    const request = ++customModelsRequest.current;
+    setIsLoadingCustomModels(true);
+    setCustomModels([]);
+    setCustomModelsError('');
+    try {
+      const models = await invoke<string[]>('get_custom_openai_models', {
+        endpoint: customOpenAIEndpoint.trim(),
+        apiKey: customOpenAIApiKey.trim() || null,
+      });
+      if (request !== customModelsRequest.current) return;
+      setCustomModels(models);
+      if (models.length === 0) setCustomModelsError('No models found. Load a model in your server, then fetch models again.');
+    } catch (error) {
+      if (request !== customModelsRequest.current) return;
+      setCustomModelsError(`Cannot fetch models. Start your server and check the endpoint. ${String(error)}`);
+    } finally {
+      if (request === customModelsRequest.current) setIsLoadingCustomModels(false);
+    }
+  };
+
   // Combobox state
   const [modelComboboxOpen, setModelComboboxOpen] = useState<boolean>(false);
 
@@ -948,7 +982,7 @@ export function ModelSettingsModal({
               <SelectContent className="max-h-64 overflow-y-auto">
                 <SelectItem value="builtin-ai">Built-in AI (Offline, No API needed)</SelectItem>
                 <SelectItem value="claude">Claude</SelectItem>
-                <SelectItem value="custom-openai">Custom Server (OpenAI)</SelectItem>
+                <SelectItem value="custom-openai">Custom Server (OpenAI / LM Studio)</SelectItem>
                 <SelectItem value="groq">Groq</SelectItem>
                 <SelectItem value="ollama">Ollama</SelectItem>
                 <SelectItem value="openai">OpenAI</SelectItem>
@@ -1020,6 +1054,16 @@ export function ModelSettingsModal({
         {modelConfig.provider === 'custom-openai' && (
           <div className="space-y-4 border-t pt-4">
             <div>
+              <Button type="button" variant="outline" size="sm" onClick={() => {
+                setCustomOpenAIEndpoint('http://localhost:1234/v1');
+                setCustomOpenAIModel('');
+                setCustomOpenAIApiKey('');
+              }}>Use LM Studio</Button>
+              <p className="text-xs text-muted-foreground mt-1">
+                Start the local server in LM Studio. Then fetch models and select a model for summaries.
+              </p>
+            </div>
+            <div>
               <Label htmlFor="custom-endpoint">Endpoint URL *</Label>
               <Input
                 id="custom-endpoint"
@@ -1033,6 +1077,23 @@ export function ModelSettingsModal({
               </p>
             </div>
 
+            <Button type="button" variant="outline" size="sm"
+              onClick={fetchCustomModels}
+              disabled={isLoadingCustomModels || !customOpenAIEndpoint.trim()}>
+              {isLoadingCustomModels ? 'Fetching Models...' : 'Fetch Models'}
+            </Button>
+            {customModelsError && <p role="status" className="text-sm text-muted-foreground">{customModelsError}</p>}
+            {customModels.length > 0 && (
+              <div>
+                <Label htmlFor="custom-model-list">Server Models</Label>
+                <select id="custom-model-list" className="w-full rounded-md border bg-background p-2 mt-1"
+                  value={customModels.includes(customOpenAIModel) ? customOpenAIModel : ''}
+                  onChange={(event) => setCustomOpenAIModel(event.target.value)}>
+                  <option value="" disabled>Select a model</option>
+                  {customModels.map(model => <option key={model} value={model}>{model}</option>)}
+                </select>
+              </div>
+            )}
             <div>
               <Label htmlFor="custom-model">Model Name *</Label>
               <Input
