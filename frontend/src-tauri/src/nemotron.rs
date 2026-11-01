@@ -998,6 +998,24 @@ fn times_from(
         // Include the next block in the LCS, but save only this block's matches.
         while i < last - first && j < b.len() {
             if matches(i, j) {
+                let distance = (timed[cursor + j].1 - words[first + i].1).abs();
+                // Prefer a nearer repeat only if the match count stays the same.
+                if i + 1 < a.len()
+                    && table[i + 1][j] == table[i][j]
+                    && matches(i + 1, j)
+                    && (timed[cursor + j].1 - words[first + i + 1].1).abs() < distance
+                {
+                    i += 1;
+                    continue;
+                }
+                if j + 1 < b.len()
+                    && table[i][j + 1] == table[i][j]
+                    && matches(i, j + 1)
+                    && (timed[cursor + j + 1].1 - words[first + i].1).abs() < distance
+                {
+                    j += 1;
+                    continue;
+                }
                 matched[first + i] = Some(cursor + j);
                 i += 1;
                 j += 1;
@@ -1039,6 +1057,13 @@ fn times_from(
             for k in run.clone() {
                 words[k].1 = original[k].1;
                 words[k].2 = original[k].2;
+                if let Some(to) = to {
+                    words[k].1 = words[k].1.min(to - MIN_WIDTH_MS);
+                    words[k].2 = words[k].2.min(to).max(words[k].1 + MIN_WIDTH_MS);
+                } else if let Some(from) = from {
+                    words[k].1 = words[k].1.max(from);
+                    words[k].2 = words[k].2.max(words[k].1 + MIN_WIDTH_MS);
+                }
             }
         }
         i = run.end;
@@ -1646,6 +1671,52 @@ mod tests {
             assert!(words.iter().all(|word| word.2 > word.1), "{words:?}");
             assert!(words.windows(2).all(|pair| pair[0].1 <= pair[1].1), "{words:?}");
         }
+    }
+
+    #[test]
+    fn repeated_word_ties_keep_the_nearest_times() {
+        let plain = timed(&[
+            ("yes", 20_000.0, 20_500.0),
+            ("yes", 25_000.0, 25_500.0),
+            ("okay", 26_000.0, 26_500.0),
+        ]);
+        let tagged = timed(&[("yes", 25_000.0, 25_500.0), ("okay", 26_000.0, 26_500.0)]);
+        let words = times_from(plain.clone(), &tagged);
+        assert_eq!(words[1], plain[1]);
+        assert_eq!(words[2], plain[2]);
+        assert!(words[0].1 <= 25_000.0 && words[0].1 < words[1].1, "{words:?}");
+        assert_eq!(words, plain);
+
+        // The same tie can occur in the tagged words.
+        assert_eq!(times_from(tagged.clone(), &plain), tagged);
+
+        // A nearer repeat must not replace a match if that loses another match.
+        let plain = timed(&[
+            ("yes", 20_000.0, 20_500.0),
+            ("okay", 24_000.0, 24_500.0),
+            ("yes", 25_000.0, 25_500.0),
+        ]);
+        let tagged = timed(&[
+            ("yes", 25_000.0, 25_500.0),
+            ("okay", 26_000.0, 26_500.0),
+            ("yes", 27_000.0, 27_500.0),
+        ]);
+        assert_eq!(times_from(plain, &tagged), tagged);
+    }
+
+    #[test]
+    fn unmatched_edge_runs_keep_the_matched_times() {
+        let plain = timed(&[("um", 78_000.0, 78_500.0), ("hello", 79_000.0, 79_500.0)]);
+        let tagged = timed(&[("hello", 50_000.0, 50_500.0)]);
+        let words = times_from(plain, &tagged);
+        assert_eq!(words[1], tagged[0]);
+        assert!(words[0].1 <= 50_000.0, "{words:?}");
+        assert!(words[0].2 <= 50_000.0 && words[0].2 >= words[0].1 + 1.0, "{words:?}");
+
+        let plain = timed(&[("hello", 49_000.0, 49_500.0), ("um", 49_500.0, 49_800.0)]);
+        let words = times_from(plain, &tagged);
+        assert_eq!(words[0], tagged[0]);
+        assert!(words[1].1 >= 50_500.0 && words[1].2 >= words[1].1 + 1.0, "{words:?}");
     }
 
     #[test]
