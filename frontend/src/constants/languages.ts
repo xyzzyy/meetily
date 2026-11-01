@@ -37,4 +37,13 @@ export const LANGUAGES = [
   { code: 'hr', name: 'Croatian' },
   { code: 'bg', name: 'Bulgarian' },
   { code: 'lt', name: 'Lithuanian' },
+  { code: 'sk', name: 'Slovak' },
+  { code: 'lv', name: 'Latvian' },
+  { code: 'bn', name: 'Bengali' },
+  { code: 'sl', name: 'Slovenian' },
+  { code: 'et', name: 'Estonian' },
+  { code: 'hy', name: 'Armenian' },
+  { code: 'nn', name: 'Norwegian Nynorsk' },
+  { code: 'mt', name: 'Maltese' },
+  { code: 'tl', name: 'Tagalog' },
 ];

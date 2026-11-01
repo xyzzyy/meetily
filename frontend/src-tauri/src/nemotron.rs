@@ -480,32 +480,50 @@ fn parse_reply(body: &Value) -> Result<Reply, String> {
 }
 
 fn parse_word_reply(body: &Value) -> Result<Reply, String> {
-    let reply = parse_reply(body)?;
+    let mut reply = parse_reply(body)?;
     let timed_text = reply
         .words
         .iter()
         .map(|word| word.text.as_str())
         .collect::<Vec<_>>()
         .join(" ");
+    // The runtime times Chinese, Japanese and Thai per character and omits
+    // punctuation. Compare retained speech, keeping combining marks (Thai
+    // vowels, for example), while ignoring those formatting differences.
+    static FORMATTING: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let formatting = FORMATTING.get_or_init(|| regex::Regex::new(r"[\s\p{P}]").unwrap());
+    let text = formatting.replace_all(&reply.text, "");
+    let timed = formatting.replace_all(&timed_text, "");
     // Silence is returned without a decoder run. Generated tokens with no
     // retained text are a failed decode, not evidence that this clip was silent.
-    let empty_decode = reply.text.is_empty()
+    let empty_decode = text.is_empty()
         && body
             .pointer("/usage/completion_tokens")
             .and_then(Value::as_u64)
             .unwrap_or(0)
             > 0;
     if empty_decode
-        || reply
-            .text
-            .split_whitespace()
-            .ne(timed_text.split_whitespace())
+        || text != timed
         || reply
             .words
             .iter()
             .any(|word| !word.start.is_finite() || !word.end.is_finite() || word.end <= word.start)
     {
         return Err("Nemotron did not return valid times for the complete transcript. The saved transcript was kept.".into());
+    }
+    // Keep the transcript's spelling, spaces and punctuation. The timestamp
+    // tokens can omit punctuation and use different word boundaries.
+    let positions: Vec<_> = reply.text.char_indices()
+        .filter(|(_, c)| !formatting.is_match(&c.to_string()))
+        .map(|(position, _)| position)
+        .collect();
+    reply.words.retain(|word| !formatting.replace_all(&word.text, "").is_empty());
+    let (mut character, mut byte) = (0, 0);
+    for word in &mut reply.words {
+        character += formatting.replace_all(&word.text, "").chars().count();
+        let end = positions.get(character).copied().unwrap_or(reply.text.len());
+        word.text = reply.text[byte..end].to_string();
+        byte = end;
     }
     Ok(reply)
 }
@@ -606,6 +624,76 @@ fn last_log_line(path: &Path) -> String {
         .take(300)
         .collect()
 }
+// Language names from NeMo-Speech.cpp v0.3.0 salm_policy.cpp.
+// Custom instructions bypass the runtime's language hint, so speaker requests
+// need the same hint in their instruction as well as the HTTP field.
+const LANGUAGE_NAMES: &[(&str, &str)] = &[
+    ("en", "English"),
+    ("ar", "Arabic"),
+    ("zh", "Chinese"),
+    ("fr", "French"),
+    ("de", "German"),
+    ("hi", "Hindi"),
+    ("it", "Italian"),
+    ("ja", "Japanese"),
+    ("es", "Spanish"),
+    ("ko", "Korean"),
+    ("pt", "Portuguese"),
+    ("ru", "Russian"),
+    ("th", "Thai"),
+    ("hy", "Armenian"),
+    ("nn", "Norwegian"),
+    ("nb", "Norwegian"),
+    ("no", "Norwegian"),
+    ("bg", "Bulgarian"),
+    ("hr", "Croatian"),
+    ("cs", "Czech"),
+    ("da", "Danish"),
+    ("nl", "Dutch"),
+    ("et", "Estonian"),
+    ("fi", "Finnish"),
+    ("el", "Greek"),
+    ("he", "Hebrew"),
+    ("hu", "Hungarian"),
+    ("id", "Indonesian"),
+    ("lv", "Latvian"),
+    ("lt", "Lithuanian"),
+    ("mt", "Maltese"),
+    ("ta", "Tamil"),
+    ("bn", "Bengali"),
+    ("pl", "Polish"),
+    ("ro", "Romanian"),
+    ("sk", "Slovak"),
+    ("sl", "Slovenian"),
+    ("sv", "Swedish"),
+    ("tr", "Turkish"),
+    ("tl", "Filipino"),
+    ("fil", "Filipino"),
+    ("uk", "Ukrainian"),
+    ("vi", "Vietnamese"),
+];
+
+fn chat_request(audio: &[f32], job: Job, language: Option<&str>) -> Value {
+    let hint = language.and_then(|code| LANGUAGE_NAMES.iter().find(|(key, _)| *key == code));
+    let mut content = vec![json!({"type": "input_audio", "input_audio": {"data": STANDARD.encode(wav(audio)), "format": "wav"}})];
+    if job == Job::SpeakerWords {
+        let instruction = match hint {
+            Some((_, name)) => format!("{SPEAKER_INSTRUCTION} The speech is in {name}."),
+            None => SPEAKER_INSTRUCTION.to_string(),
+        };
+        content.insert(0, json!({"type": "text", "text": instruction}));
+    }
+    let mut body = json!({
+        "model": "nemotron",
+        "word_timestamps": job != Job::Text,
+        "messages": [{"role": "user", "content": content}],
+    });
+    if let Some((code, _)) = hint {
+        body["language"] = json!(code);
+    }
+    body
+}
+
 impl Server {
     async fn spawn(path: &Path, decoder: &Decoder) -> Result<Self, String> {
         let port = std::net::TcpListener::bind("127.0.0.1:0")
@@ -689,7 +777,7 @@ impl Server {
             tokio::time::sleep(Duration::from_millis(500)).await;
         }
     }
-    async fn request(&mut self, audio: &[f32], job: Job) -> Result<Reply, RequestError> {
+    async fn request(&mut self, audio: &[f32], job: Job, language: Option<&str>) -> Result<Reply, RequestError> {
         // Decoding is slower than real time on some Macs.
         let timeout =
             Duration::from_secs(600) + Duration::from_secs_f64(audio.len() as f64 / 8000.0);
@@ -702,17 +790,9 @@ impl Server {
                 .post(format!("{}/v1/audio/diarizations", self.base))
                 .multipart(reqwest::multipart::Form::new().part("file", file))
         } else {
-            let mut content = vec![json!({"type": "input_audio", "input_audio": {"data": STANDARD.encode(wav(audio)), "format": "wav"}})];
-            if job == Job::SpeakerWords {
-                content.insert(0, json!({"type": "text", "text": SPEAKER_INSTRUCTION}));
-            }
             self.client
                 .post(format!("{}/v1/chat/completions", self.base))
-                .json(&json!({
-                    "model": "nemotron",
-                    "word_timestamps": job != Job::Text,
-                    "messages": [{"role": "user", "content": content}],
-                }))
+                .json(&chat_request(audio, job, language))
         };
         let response = request
             .bearer_auth(&self.key)
@@ -830,6 +910,7 @@ impl NemotronProvider {
         &self,
         audio: &[f32],
         job: Job,
+        language: Option<&str>,
         cancel: Option<&AtomicBool>,
     ) -> Result<Vec<(Reply, f64)>, TranscriptionError> {
         if audio.len() < MIN_SAMPLES {
@@ -862,10 +943,10 @@ impl NemotronProvider {
             let piece = &audio[range.clone()];
             let result = match cancel {
                 Some(flag) => tokio::select! {
-                    result = server.request(piece, job) => result,
+                    result = server.request(piece, job, language) => result,
                     _ = wait_for(flag) => return Err(TranscriptionError::EngineFailed("Cancelled.".into())),
                 },
-                None => server.request(piece, job).await,
+                None => server.request(piece, job, language).await,
             };
             match result {
                 Ok(reply) => {
@@ -898,8 +979,9 @@ impl NemotronProvider {
     pub async fn transcribe_words(
         &self,
         audio: &[f32],
+        language: Option<&str>,
     ) -> Result<Vec<(String, f64, f64)>, TranscriptionError> {
-        let parts = self.requests(audio, Job::Words, None).await?;
+        let parts = self.requests(audio, Job::Words, language, None).await?;
         Ok(words_on_timeline(parts, audio.len() as f64 / 16.0))
     }
 
@@ -910,12 +992,13 @@ impl NemotronProvider {
         &self,
         audio: &[f32],
         cancel: &AtomicBool,
+        language: Option<&str>,
     ) -> Result<MeetingTranscript, TranscriptionError> {
         let duration_ms = audio.len() as f64 / 16.0;
-        let speakers = self.requests(audio, Job::Speakers, Some(cancel)).await?;
-        let text = self.requests(audio, Job::Words, Some(cancel)).await?;
+        let speakers = self.requests(audio, Job::Speakers, None, Some(cancel)).await?;
+        let text = self.requests(audio, Job::Words, language, Some(cancel)).await?;
         let mut words = words_on_timeline(text, duration_ms);
-        match self.requests(audio, Job::SpeakerWords, Some(cancel)).await {
+        match self.requests(audio, Job::SpeakerWords, language, Some(cancel)).await {
             Ok(timed) => words = times_from(words, &words_on_timeline(timed, duration_ms)),
             Err(error) if cancel.load(Ordering::SeqCst) => return Err(error),
             Err(error) => log::warn!("Nemotron kept its plain word times: {error}"),
@@ -930,9 +1013,16 @@ impl NemotronProvider {
 /// Moves request words onto one timeline in milliseconds, in order and
 /// inside the audio.
 fn words_on_timeline(parts: Vec<(Reply, f64)>, duration_ms: f64) -> Vec<(String, f64, f64)> {
-    let mut words = Vec::new();
+    let mut words: Vec<(String, f64, f64)> = Vec::new();
     let mut previous = 0.0;
     for (reply, offset) in parts {
+        // Separate independently decoded clips, as the text-only path does.
+        // Within each clip, the plain words carry the transcript's spacing.
+        if !reply.text.is_empty() {
+            if let Some(last) = words.last_mut() {
+                last.0.push(' ');
+            }
+        }
         for word in reply.words {
             if !word.start.is_finite() || !word.end.is_finite() {
                 continue;
@@ -1154,9 +1244,9 @@ impl TranscriptionProvider for NemotronProvider {
     async fn transcribe(
         &self,
         audio: Vec<f32>,
-        _language: Option<String>,
+        language: Option<String>,
     ) -> Result<TranscriptResult, TranscriptionError> {
-        let parts = self.requests(&audio, Job::Text, None).await?;
+        let parts = self.requests(&audio, Job::Text, language.as_deref(), None).await?;
         Ok(TranscriptResult {
             text: parts
                 .into_iter()
@@ -1184,6 +1274,26 @@ impl TranscriptionProvider for NemotronProvider {
 mod tests {
     use super::*;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[test]
+    fn language_hint_reaches_plain_and_speaker_word_requests() {
+        for job in [Job::Text, Job::Words, Job::SpeakerWords] {
+            let body = chat_request(&[0.0; 320], job, Some("fr"));
+            assert_eq!(body["language"], "fr");
+            assert_eq!(body["word_timestamps"], job != Job::Text);
+            if job == Job::SpeakerWords {
+                assert_eq!(body["messages"][0]["content"][0]["text"],
+                    format!("{SPEAKER_INSTRUCTION} The speech is in French."));
+            }
+            for language in [None, Some("auto"), Some("auto-translate"), Some("haw")] {
+                let body = chat_request(&[0.0; 320], job, language);
+                assert!(body.get("language").is_none());
+                if job == Job::SpeakerWords {
+                    assert_eq!(body["messages"][0]["content"][0]["text"], SPEAKER_INSTRUCTION);
+                }
+            }
+        }
+    }
 
     fn sparse(path: &Path, artifact: &Artifact) {
         let file = gguf(path, artifact);
@@ -1414,11 +1524,95 @@ mod tests {
     }
 
     #[test]
+    fn character_word_times_retain_chinese_japanese_and_thai_text() {
+        for (text, timed) in [
+            ("你好，世界！", vec!["你", "好", "世", "界"]),
+            ("こんにちは。", vec!["こ", "ん", "に", "ち", "は"]),
+            ("สวัสดี โลก!", vec!["ส", "วั", "ส", "ดี", "โ", "ล", "ก"]),
+        ] {
+            let words: Vec<_> = timed.iter().enumerate().map(|(i, text)| {
+                json!({"word": text, "start": i as f64, "end": i as f64 + 0.5})
+            }).collect();
+            let mut body = json!({
+                "choices": [{"message": {"content": text}}],
+                "transcription": {"words": words}
+            });
+            assert!(parse_word_reply(&body).is_ok(), "{text}");
+            body["transcription"]["words"].as_array_mut().unwrap().pop();
+            assert!(parse_word_reply(&body).is_err(), "missing character: {text}");
+        }
+        // Thai vowel marks are part of the speech, even though they are not
+        // alphanumeric. Dropping one must still fail the completeness check.
+        let body = json!({
+            "choices": [{"message": {"content": "ดี"}}],
+            "transcription": {"words": [{"word": "ด", "start": 0.0, "end": 0.5}]}
+        });
+        assert!(parse_word_reply(&body).is_err());
+    }
+
+    #[test]
+    fn character_times_keep_original_text_in_enhance_rows() {
+        for (text, tokens) in [
+            ("你好，世界！", vec!["你", "好", "世", "界"]),
+            ("こんにちは。", vec!["こ", "ん", "に", "ち", "は"]),
+            ("สวัสดี โลก!", vec!["ส", "วั", "ส", "ดี", "โ", "ล", "ก"]),
+            ("你好，Meetily 2!", vec!["你", "好", "Meetily", "2"]),
+            ("Hello, John!", vec!["Hello", "John"]),
+        ] {
+            let tokens: Vec<_> = tokens.iter().enumerate().map(|(i, token)| {
+                json!({"word": token, "start": i as f64 * 0.2, "end": i as f64 * 0.2 + 0.1})
+            }).collect();
+            let body = json!({
+                "choices": [{"message": {"content": text}}],
+                "transcription": {"words": tokens}
+            });
+            let reply = parse_word_reply(&body).unwrap();
+            let words = words_on_timeline(vec![(reply, 0.0)], 5000.0);
+            let rows = crate::audio::enhancement::nemotron_rows(words.clone(), None, None);
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].0, text);
+            // The speaker path replaces times before it builds the same rows.
+            let timed = times_from(words.clone(), &words);
+            let rows = crate::audio::enhancement::nemotron_rows(timed, None, None);
+            assert_eq!(rows[0].0, text);
+        }
+    }
+
+    #[test]
+    fn source_text_keeps_sentence_and_clip_boundaries() {
+        let part = |text: &str, tokens: &[&str]| {
+            let words: Vec<_> = tokens.iter().enumerate().map(|(i, text)| {
+                json!({"word": text, "start": i as f64 * 0.2, "end": i as f64 * 0.2 + 0.1})
+            }).collect();
+            parse_word_reply(&json!({
+                "choices": [{"message": {"content": text}}],
+                "transcription": {"words": words}
+            })).unwrap()
+        };
+        let words = words_on_timeline(vec![
+            (part("Hello", &["Hello"]), 0.0),
+            (part("world!", &["world"]), 0.2),
+        ], 5000.0);
+        let rows = crate::audio::enhancement::nemotron_rows(words, None, None);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].0, "Hello world!");
+        assert!((rows[0].2 - 300.0).abs() < 0.001);
+        let words = words_on_timeline(vec![
+            (part("你好！世界。", &["你", "好", "世", "界"]), 0.0),
+        ], 5000.0);
+        let rows = crate::audio::enhancement::nemotron_rows(words, None, None);
+        assert_eq!(rows.iter().map(|row| row.0.as_str()).collect::<Vec<_>>(), vec!["你好！", "世界。"]);
+    }
+
+    #[test]
     fn failed_empty_decode_is_not_treated_as_silence() {
         let mut body = json!({"choices": [{"message": {"content": ""}}]});
         assert!(parse_word_reply(&body).is_ok());
         body["usage"] = json!({"completion_tokens": 2000});
-        assert!(parse_word_reply(&body).is_err());
+        for text in ["", "...", "！？", " \t"] {
+            body["choices"][0]["message"]["content"] = json!(text);
+            assert!(parse_word_reply(&body).is_err(), "generated empty decode: {text:?}");
+        }
     }
 
     #[test]
@@ -1537,7 +1731,7 @@ mod tests {
         let provider = NemotronProvider::new(root, decoder, Some(server));
         let started = std::time::Instant::now();
         let meeting = provider
-            .transcribe_meeting(&samples, &AtomicBool::new(false))
+            .transcribe_meeting(&samples, &AtomicBool::new(false), None)
             .await
             .unwrap();
         println!(

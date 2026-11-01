@@ -95,9 +95,28 @@ pub(crate) fn word_rows(
     })
 }
 
+/// Nemotron's timed pieces carry the model transcript's spaces and punctuation.
+pub(crate) fn nemotron_rows(
+    words: Vec<(String, f64, f64)>,
+    speakers: Option<&EnhancementSpeakerAnalysis>,
+    source: Option<&str>,
+) -> Vec<(String, f64, f64)> {
+    group_words_with_separator(words, |start, end| {
+        speakers.and_then(|analysis| analysis.speaker_key(start / 1000.0, end / 1000.0, source))
+    }, "").into_iter().map(|(text, start, end)| (text.trim().to_string(), start, end)).collect()
+}
+
 fn group_words(
     words: Vec<(String, f64, f64)>,
     speaker_key: impl Fn(f64, f64) -> Option<String>,
+) -> Vec<(String, f64, f64)> {
+    group_words_with_separator(words, speaker_key, " ")
+}
+
+fn group_words_with_separator(
+    words: Vec<(String, f64, f64)>,
+    speaker_key: impl Fn(f64, f64) -> Option<String>,
+    separator: &str,
 ) -> Vec<(String, f64, f64)> {
     let mut rows: Vec<(String, f64, f64)> = Vec::new();
     let mut current_key = None;
@@ -109,14 +128,14 @@ fn group_words(
                 key != current_key
                     || start - row.2 > 600.0
                     || end - row.1 > 6000.0
-                    || row.0.ends_with(['.', '!', '?', '。', '！', '？'])
+                    || row.0.trim_end().ends_with(['.', '!', '?', '。', '！', '？'])
             })
             .unwrap_or(true);
         if split {
             rows.push((text, start, end));
         } else {
             let row = rows.last_mut().unwrap();
-            row.0.push(' ');
+            row.0.push_str(separator);
             row.0.push_str(&text);
             row.2 = row.2.max(end);
         }
@@ -1246,6 +1265,20 @@ mod tests {
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].0, "first turn");
         assert_eq!(rows[1].0, "second");
+    }
+
+    #[test]
+    fn source_pieces_split_at_speaker_changes_without_added_spaces() {
+        let words = vec![
+            ("你".to_string(), 0.0, 100.0),
+            ("好，".to_string(), 100.0, 200.0),
+            ("世".to_string(), 200.0, 300.0),
+            ("界！".to_string(), 300.0, 400.0),
+        ];
+        let rows = group_words_with_separator(words, |start, _| {
+            Some(if start < 200.0 { "S1" } else { "S2" }.to_string())
+        }, "");
+        assert_eq!(rows, vec![("你好，".into(), 0.0, 200.0), ("世界！".into(), 200.0, 400.0)]);
     }
 
     #[test]

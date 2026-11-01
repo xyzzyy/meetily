@@ -277,7 +277,7 @@ async fn run_retranscription<R: Runtime>(
             audio_samples.len()
         );
         let (transcripts, analysis) =
-            nemotron_with_speakers(&app, &meeting_id, &folder_path, model.as_deref(), &audio_samples)
+            nemotron_with_speakers(&app, &meeting_id, &folder_path, model.as_deref(), &audio_samples, language.as_deref())
                 .await?;
         let transcript_sources = vec![None; transcripts.len()];
         return save_retranscription(
@@ -508,7 +508,7 @@ async fn run_retranscription<R: Runtime>(
 
         let (rows, confidence) = if let Some(provider) = nemotron_provider.as_ref() {
             let words = provider
-                .transcribe_words(&segment.samples)
+                .transcribe_words(&segment.samples, language.as_deref())
                 .await
                 .map_err(|e| anyhow!("Nemotron transcription failed on segment {i}: {e}"))?;
             let words = words
@@ -522,7 +522,7 @@ async fn run_retranscription<R: Runtime>(
                 })
                 .collect();
             (
-                super::enhancement::word_rows(
+                super::enhancement::nemotron_rows(
                     words,
                     speaker_analysis.as_ref(),
                     segment.source.as_deref(),
@@ -636,6 +636,7 @@ async fn nemotron_with_speakers<R: Runtime>(
     folder_path: &Path,
     model: Option<&str>,
     audio_samples: &[f32],
+    language: Option<&str>,
 ) -> Result<(
     Vec<(String, f64, f64)>,
     crate::diarization::finalize::EnhancementSpeakerAnalysis,
@@ -653,7 +654,7 @@ async fn nemotron_with_speakers<R: Runtime>(
         &format!("Transcribing {minutes:.0} min and identifying speakers with Nemotron..."),
     );
     let meeting = provider
-        .transcribe_meeting(audio_samples, &RETRANSCRIPTION_CANCELLED)
+        .transcribe_meeting(audio_samples, &RETRANSCRIPTION_CANCELLED, language)
         .await;
     if RETRANSCRIPTION_CANCELLED.load(Ordering::SeqCst) {
         return Err(anyhow!("Retranscription cancelled"));
@@ -670,7 +671,7 @@ async fn nemotron_with_speakers<R: Runtime>(
     )
     .await?;
     Ok((
-        super::enhancement::word_rows(meeting.words, Some(&analysis), None),
+        super::enhancement::nemotron_rows(meeting.words, Some(&analysis), None),
         analysis,
     ))
 }

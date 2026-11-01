@@ -408,7 +408,7 @@ export function RetranscribeDialog({
                   </SelectContent>
                 </Select>
                 <p className="text-xs text-muted-foreground">
-                  Select a specific language to improve accuracy, or use auto-detect
+                  {modelFindsSpeakers ? 'Auto sends no language hint. Select the meeting language when you know it.' : 'Select a specific language to improve accuracy, or use auto-detect'}
                 </p>
               </div>
             ) : (
