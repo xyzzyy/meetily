@@ -968,7 +968,9 @@ fn times_from(
     for first in (0..words.len()).step_by(BLOCK) {
         let last = (first + BLOCK).min(words.len());
         let lookahead = (last + BLOCK).min(words.len());
-        let limit = words[last - 1].2 + REACH_MS;
+        // The tagged window must reach the lookahead words too, or they can
+        // take this block's matches.
+        let limit = words[lookahead - 1].2 + REACH_MS;
         let end = (cursor..timed.len())
             .find(|&j| timed[j].1 > limit)
             .unwrap_or(timed.len());
@@ -1677,6 +1679,26 @@ mod tests {
                 end: 0.48,
             }]
         );
+    }
+
+    #[test]
+    fn lookahead_words_cannot_take_matches_beyond_the_tagged_window() {
+        let mut plain: Vec<(String, f64, f64)> = (0..298)
+            .map(|i| (format!("w{i}"), i as f64 * 250.0, i as f64 * 250.0 + 200.0))
+            .collect();
+        let mut tagged = plain.clone();
+        tagged.push(("agree".into(), 89_500.0, 89_900.0));
+        for words in [&mut plain, &mut tagged] {
+            words.extend(timed(&[
+                ("we", 90_000.0, 91_000.0),
+                ("agree", 91_000.0, 92_000.0),
+                ("agree", 150_000.0, 151_000.0),
+                ("we", 151_000.0, 152_000.0),
+                ("agree", 152_000.0, 153_000.0),
+            ]));
+        }
+        // Every plain word has an exact twin, so no time should change.
+        assert_eq!(times_from(plain.clone(), &tagged), plain);
     }
 
     #[test]
