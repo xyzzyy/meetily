@@ -150,7 +150,9 @@ fn baseline_gaps(proposal: &Proposal) -> Option<String> {
             }
             cursor = cursor.max(b);
         }
-        if !covered || gap || end - cursor > 2.0 {
+        if (!covered || gap || end - cursor > 2.0)
+            && !words_nearby(proposal, &row.transcript, start, end)
+        {
             gaps.push(format!("{:02}:{:02}", start as u64 / 60, start as u64 % 60));
         }
     }
@@ -166,6 +168,50 @@ fn baseline_gaps(proposal: &Proposal) -> Option<String> {
             gaps.join(", ")
         )
     })
+}
+
+/// Word times can be wrong even when the words are there: Nemotron sometimes
+/// packs a sentence into one 80 ms step per word, seconds before it was said.
+/// Speech is only lost if most of the row's words are missing nearby too.
+fn words_nearby(proposal: &Proposal, text: &str, start: f64, end: f64) -> bool {
+    const REACH_SECONDS: f64 = 10.0;
+    let words = |text: &str| -> Vec<String> {
+        text.split_whitespace()
+            .map(|word| {
+                word.chars()
+                    .filter(|c| c.is_alphanumeric())
+                    .flat_map(char::to_lowercase)
+                    .collect::<String>()
+            })
+            .filter(|word| !word.is_empty())
+            .collect()
+    };
+    let saved = words(text);
+    let mut nearby: Vec<_> = proposal
+        .segments
+        .iter()
+        .filter(|new| {
+            new.audio_start_time.is_some_and(|a| a < end + REACH_SECONDS)
+                && new.audio_end_time.is_some_and(|b| b > start - REACH_SECONDS)
+        })
+        .collect();
+    nearby.sort_by(|a, b| a.audio_start_time.unwrap().total_cmp(&b.audio_start_time.unwrap()));
+    let found: Vec<String> = nearby.iter().flat_map(|new| words(&new.text)).collect();
+    // Longest common subsequence, so words must also keep their order.
+    let mut row = vec![0usize; found.len() + 1];
+    for word in &saved {
+        let mut diagonal = 0;
+        for (i, other) in found.iter().enumerate() {
+            let above = row[i + 1];
+            row[i + 1] = if word == other {
+                diagonal + 1
+            } else {
+                above.max(row[i])
+            };
+            diagonal = above;
+        }
+    }
+    row[found.len()] as f64 >= saved.len() as f64 * 0.6
 }
 
 pub(crate) async fn stage(

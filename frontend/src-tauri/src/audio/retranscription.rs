@@ -277,7 +277,7 @@ async fn run_retranscription<R: Runtime>(
             audio_samples.len()
         );
         let (transcripts, analysis) =
-            nemotron_with_speakers(&app, &meeting_id, &folder_path, model.as_deref(), &audio_samples, &original)
+            nemotron_with_speakers(&app, &meeting_id, &folder_path, model.as_deref(), &audio_samples)
                 .await?;
         let transcript_sources = vec![None; transcripts.len()];
         return save_retranscription(
@@ -636,7 +636,6 @@ async fn nemotron_with_speakers<R: Runtime>(
     folder_path: &Path,
     model: Option<&str>,
     audio_samples: &[f32],
-    original: &[crate::database::models::Transcript],
 ) -> Result<(
     Vec<(String, f64, f64)>,
     crate::diarization::finalize::EnhancementSpeakerAnalysis,
@@ -671,11 +670,7 @@ async fn nemotron_with_speakers<R: Runtime>(
     )
     .await?;
     Ok((
-        super::enhancement::word_rows(
-            super::enhancement::retime_collapsed_words(meeting.words, original),
-            Some(&analysis),
-            None,
-        ),
+        super::enhancement::word_rows(meeting.words, Some(&analysis), None),
         analysis,
     ))
 }
