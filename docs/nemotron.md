@@ -15,7 +15,7 @@ AtomicChat measured both decoders within about 0.2 points of the BF16 decoder's 
 
 ## Runtime
 
-The runtime is NVIDIA's Metal build of NeMo-Speech.cpp `0.2.0+nightly.66d50d9` (Apache 2.0). NVIDIA replaces its nightly archive every day and its newest release, v0.2.0, predates Nemotron support. So the archive, checked against NVIDIA's `SHA256SUMS`, is mirrored on this fork's [`nemo-speech-66d50d9` release](https://github.com/xyzzyy/meetily/releases/tag/nemo-speech-66d50d9). Move to an NVIDIA release once one includes Nemotron support.
+The runtime is NVIDIA's Metal build of NeMo-Speech.cpp [v0.3.0](https://github.com/NVIDIA/NeMo-Speech.cpp/releases/tag/v0.3.0) (Apache 2.0), its first release with Nemotron support. It is downloaded from NVIDIA's release and checked against the SHA-256 in its `SHA256SUMS`. Existing installs show Nemotron as not downloaded until Download fetches the new runtime; the model files are kept.
 
 ## Download
 
