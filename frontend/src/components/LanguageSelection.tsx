@@ -146,7 +146,7 @@ export function LanguageSelection({
       console.log('Language preference saved:', languageCode);
 
       // Show success toast
-      const selectedLang = LANGUAGES.find(lang => lang.code === languageCode);
+      const selectedLang = availableLanguages.find(lang => lang.code === languageCode);
       const languageName = selectedLang?.name || languageCode;
       toast.success("Language preference saved", {
         description: `Transcription language set to ${languageName}`
@@ -162,7 +162,7 @@ export function LanguageSelection({
   };
 
   // Find the selected language name for display
-  const selectedLanguageName = LANGUAGES.find(
+  const selectedLanguageName = availableLanguages.find(
     lang => lang.code === selectedLanguage
   )?.name || 'Auto Detect (Original Language)';
 
@@ -203,6 +203,9 @@ export function LanguageSelection({
           <p className="text-gray-600 dark:text-ink-300">
             <strong>Current:</strong> {selectedLanguageName}
           </p>
+          {selectedLanguage === 'auto' && provider === 'nemotron' && (
+            <p className="text-amber-800 dark:text-amber-200">Nemotron receives no language hint with Auto. Select the meeting language when you know it.</p>
+          )}
           {selectedLanguage === 'auto' && provider !== 'nemotron' && (
             <div className="p-2 bg-yellow-50 dark:bg-yellow-500/10 border border-yellow-200 dark:border-yellow-500/30 rounded text-yellow-800 dark:text-yellow-200">
               <p className="font-medium">⚠️ Auto Detect may produce incorrect results</p>

@@ -374,6 +374,9 @@ export function ImportAudioDialog({
                               ))}
                             </SelectContent>
                           </Select>
+                          {selectedModel?.provider === 'nemotron' && (
+                            <p className="text-xs text-muted-foreground">Auto sends no language hint. Select the meeting language when you know it.</p>
+                          )}
                         </div>
                       ) : (
                         <div className="space-y-2">

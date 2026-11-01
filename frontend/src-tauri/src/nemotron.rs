@@ -606,6 +606,76 @@ fn last_log_line(path: &Path) -> String {
         .take(300)
         .collect()
 }
+// Language names from NeMo-Speech.cpp v0.3.0 salm_policy.cpp.
+// Custom instructions bypass the runtime's language hint, so speaker requests
+// need the same hint in their instruction as well as the HTTP field.
+const LANGUAGE_NAMES: &[(&str, &str)] = &[
+    ("en", "English"),
+    ("ar", "Arabic"),
+    ("zh", "Chinese"),
+    ("fr", "French"),
+    ("de", "German"),
+    ("hi", "Hindi"),
+    ("it", "Italian"),
+    ("ja", "Japanese"),
+    ("es", "Spanish"),
+    ("ko", "Korean"),
+    ("pt", "Portuguese"),
+    ("ru", "Russian"),
+    ("th", "Thai"),
+    ("hy", "Armenian"),
+    ("nn", "Norwegian"),
+    ("nb", "Norwegian"),
+    ("no", "Norwegian"),
+    ("bg", "Bulgarian"),
+    ("hr", "Croatian"),
+    ("cs", "Czech"),
+    ("da", "Danish"),
+    ("nl", "Dutch"),
+    ("et", "Estonian"),
+    ("fi", "Finnish"),
+    ("el", "Greek"),
+    ("he", "Hebrew"),
+    ("hu", "Hungarian"),
+    ("id", "Indonesian"),
+    ("lv", "Latvian"),
+    ("lt", "Lithuanian"),
+    ("mt", "Maltese"),
+    ("ta", "Tamil"),
+    ("bn", "Bengali"),
+    ("pl", "Polish"),
+    ("ro", "Romanian"),
+    ("sk", "Slovak"),
+    ("sl", "Slovenian"),
+    ("sv", "Swedish"),
+    ("tr", "Turkish"),
+    ("tl", "Filipino"),
+    ("fil", "Filipino"),
+    ("uk", "Ukrainian"),
+    ("vi", "Vietnamese"),
+];
+
+fn chat_request(audio: &[f32], job: Job, language: Option<&str>) -> Value {
+    let hint = language.and_then(|code| LANGUAGE_NAMES.iter().find(|(key, _)| *key == code));
+    let mut content = vec![json!({"type": "input_audio", "input_audio": {"data": STANDARD.encode(wav(audio)), "format": "wav"}})];
+    if job == Job::SpeakerWords {
+        let instruction = match hint {
+            Some((_, name)) => format!("{SPEAKER_INSTRUCTION} The speech is in {name}."),
+            None => SPEAKER_INSTRUCTION.to_string(),
+        };
+        content.insert(0, json!({"type": "text", "text": instruction}));
+    }
+    let mut body = json!({
+        "model": "nemotron",
+        "word_timestamps": job != Job::Text,
+        "messages": [{"role": "user", "content": content}],
+    });
+    if let Some((code, _)) = hint {
+        body["language"] = json!(code);
+    }
+    body
+}
+
 impl Server {
     async fn spawn(path: &Path, decoder: &Decoder) -> Result<Self, String> {
         let port = std::net::TcpListener::bind("127.0.0.1:0")
@@ -689,7 +759,7 @@ impl Server {
             tokio::time::sleep(Duration::from_millis(500)).await;
         }
     }
-    async fn request(&mut self, audio: &[f32], job: Job) -> Result<Reply, RequestError> {
+    async fn request(&mut self, audio: &[f32], job: Job, language: Option<&str>) -> Result<Reply, RequestError> {
         // Decoding is slower than real time on some Macs.
         let timeout =
             Duration::from_secs(600) + Duration::from_secs_f64(audio.len() as f64 / 8000.0);
@@ -702,17 +772,9 @@ impl Server {
                 .post(format!("{}/v1/audio/diarizations", self.base))
                 .multipart(reqwest::multipart::Form::new().part("file", file))
         } else {
-            let mut content = vec![json!({"type": "input_audio", "input_audio": {"data": STANDARD.encode(wav(audio)), "format": "wav"}})];
-            if job == Job::SpeakerWords {
-                content.insert(0, json!({"type": "text", "text": SPEAKER_INSTRUCTION}));
-            }
             self.client
                 .post(format!("{}/v1/chat/completions", self.base))
-                .json(&json!({
-                    "model": "nemotron",
-                    "word_timestamps": job != Job::Text,
-                    "messages": [{"role": "user", "content": content}],
-                }))
+                .json(&chat_request(audio, job, language))
         };
         let response = request
             .bearer_auth(&self.key)
@@ -830,6 +892,7 @@ impl NemotronProvider {
         &self,
         audio: &[f32],
         job: Job,
+        language: Option<&str>,
         cancel: Option<&AtomicBool>,
     ) -> Result<Vec<(Reply, f64)>, TranscriptionError> {
         if audio.len() < MIN_SAMPLES {
@@ -862,10 +925,10 @@ impl NemotronProvider {
             let piece = &audio[range.clone()];
             let result = match cancel {
                 Some(flag) => tokio::select! {
-                    result = server.request(piece, job) => result,
+                    result = server.request(piece, job, language) => result,
                     _ = wait_for(flag) => return Err(TranscriptionError::EngineFailed("Cancelled.".into())),
                 },
-                None => server.request(piece, job).await,
+                None => server.request(piece, job, language).await,
             };
             match result {
                 Ok(reply) => {
@@ -898,8 +961,9 @@ impl NemotronProvider {
     pub async fn transcribe_words(
         &self,
         audio: &[f32],
+        language: Option<&str>,
     ) -> Result<Vec<(String, f64, f64)>, TranscriptionError> {
-        let parts = self.requests(audio, Job::Words, None).await?;
+        let parts = self.requests(audio, Job::Words, language, None).await?;
         Ok(words_on_timeline(parts, audio.len() as f64 / 16.0))
     }
 
@@ -910,12 +974,13 @@ impl NemotronProvider {
         &self,
         audio: &[f32],
         cancel: &AtomicBool,
+        language: Option<&str>,
     ) -> Result<MeetingTranscript, TranscriptionError> {
         let duration_ms = audio.len() as f64 / 16.0;
-        let speakers = self.requests(audio, Job::Speakers, Some(cancel)).await?;
-        let text = self.requests(audio, Job::Words, Some(cancel)).await?;
+        let speakers = self.requests(audio, Job::Speakers, None, Some(cancel)).await?;
+        let text = self.requests(audio, Job::Words, language, Some(cancel)).await?;
         let mut words = words_on_timeline(text, duration_ms);
-        match self.requests(audio, Job::SpeakerWords, Some(cancel)).await {
+        match self.requests(audio, Job::SpeakerWords, language, Some(cancel)).await {
             Ok(timed) => words = times_from(words, &words_on_timeline(timed, duration_ms)),
             Err(error) if cancel.load(Ordering::SeqCst) => return Err(error),
             Err(error) => log::warn!("Nemotron kept its plain word times: {error}"),
@@ -1154,9 +1219,9 @@ impl TranscriptionProvider for NemotronProvider {
     async fn transcribe(
         &self,
         audio: Vec<f32>,
-        _language: Option<String>,
+        language: Option<String>,
     ) -> Result<TranscriptResult, TranscriptionError> {
-        let parts = self.requests(&audio, Job::Text, None).await?;
+        let parts = self.requests(&audio, Job::Text, language.as_deref(), None).await?;
         Ok(TranscriptResult {
             text: parts
                 .into_iter()
@@ -1184,6 +1249,26 @@ impl TranscriptionProvider for NemotronProvider {
 mod tests {
     use super::*;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[test]
+    fn language_hint_reaches_plain_and_speaker_word_requests() {
+        for job in [Job::Text, Job::Words, Job::SpeakerWords] {
+            let body = chat_request(&[0.0; 320], job, Some("fr"));
+            assert_eq!(body["language"], "fr");
+            assert_eq!(body["word_timestamps"], job != Job::Text);
+            if job == Job::SpeakerWords {
+                assert_eq!(body["messages"][0]["content"][0]["text"],
+                    format!("{SPEAKER_INSTRUCTION} The speech is in French."));
+            }
+            for language in [None, Some("auto"), Some("auto-translate"), Some("haw")] {
+                let body = chat_request(&[0.0; 320], job, language);
+                assert!(body.get("language").is_none());
+                if job == Job::SpeakerWords {
+                    assert_eq!(body["messages"][0]["content"][0]["text"], SPEAKER_INSTRUCTION);
+                }
+            }
+        }
+    }
 
     fn sparse(path: &Path, artifact: &Artifact) {
         let file = gguf(path, artifact);
@@ -1537,7 +1622,7 @@ mod tests {
         let provider = NemotronProvider::new(root, decoder, Some(server));
         let started = std::time::Instant::now();
         let meeting = provider
-            .transcribe_meeting(&samples, &AtomicBool::new(false))
+            .transcribe_meeting(&samples, &AtomicBool::new(false), None)
             .await
             .unwrap();
         println!(

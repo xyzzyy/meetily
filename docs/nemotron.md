@@ -31,6 +31,8 @@ Meetily starts `nemo-speech serve` on a free loopback port with a random API key
 - Enhance without speaker labels sends sentence-length segments and builds rows from the model's word times.
 - Enhance with speaker labels on (the app's speaker setting) sends the whole recording for speakers, up to one hour per request, and the text in one minute pieces. It uses the model's own speakers. Their turns go through Meetily's speaker matching, so remembered voices are still named. Rows end where the speaker changes. Speaker numbers start again in each hour of a longer recording.
 
+Select the meeting language in Settings, Import or Enhance to send a language hint. The list uses the codes in NeMo-Speech.cpp v0.3.0 `salm_policy.cpp::language_names`. Auto sends no hint. A hint also goes into the speaker instruction because the runtime uses custom instructions as written. Language selection does not prevent invented text; its effect on mixed-language meetings is untested.
+
 The server log is `models/nemotron/server.log`.
 
 The runtime can report a successful alignment but return no word times for a nonempty transcript. Meetily checks that the timed words retain all returned text. It retries a failed section in pieces of up to 20 seconds. If a shorter section still has incomplete times, Enhance reports an error and keeps the saved transcript.

@@ -23,9 +23,14 @@ export interface FunAsrModelInfo {
 
 export const FUNASR_SUPPORTED_LANGUAGES = new Set(['auto', 'en', 'zh', 'ja']);
 
+// NeMo-Speech.cpp v0.3.0, src/speechlm/salm_policy.cpp::language_names.
+export const NEMOTRON_SUPPORTED_LANGUAGES = new Set(['auto', 'en', 'ar', 'zh', 'fr', 'de', 'hi', 'it', 'ja', 'es', 'ko', 'pt', 'ru', 'th', 'hy', 'nn', 'nb', 'no', 'bg', 'hr', 'cs', 'da', 'nl', 'et', 'fi', 'el', 'he', 'hu', 'id', 'lv', 'lt', 'mt', 'ta', 'bn', 'pl', 'ro', 'sk', 'sl', 'sv', 'tr', 'tl', 'fil', 'uk', 'vi']);
+
 /** The languages a transcription provider accepts, from a full language list. */
-export function languagesForProvider<T extends { code: string }>(provider: string | undefined, languages: T[]): T[] {
-  if (provider === 'nemotron') return languages.filter(language => language.code === 'auto');
+export function languagesForProvider<T extends { code: string; name: string }>(provider: string | undefined, languages: T[]): T[] {
+  if (provider === 'nemotron') return languages
+    .filter(language => NEMOTRON_SUPPORTED_LANGUAGES.has(language.code))
+    .map(language => language.code === 'auto' ? { ...language, name: 'Auto (No language hint)' } : language);
   return provider === 'funasr'
     ? languages.filter((language) => FUNASR_SUPPORTED_LANGUAGES.has(language.code))
     : languages;
