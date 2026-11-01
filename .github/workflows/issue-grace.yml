@@ -1,0 +1,82 @@
+name: issue-grace
+
+# Anyone can use /reopen on an issue with invalid-template. Reopening an issue
+# with invalid-template-again needs a maintainer. A successful command leaves
+# only template-grace. Commands do not check templates on closed issues.
+# At 04:00 UTC, check all open issues, including older issues without grace.
+# Closed issues have no automatic checks or cleanup.
+
+on:
+  issue_comment:
+    types: [created]
+  schedule:
+    - cron: "0 4 * * *"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Report the nightly checks without changing issues"
+        type: boolean
+        default: false
+
+jobs:
+  reopen:
+    if: >-
+      github.event_name == 'issue_comment' &&
+      github.event.issue.state == 'closed' &&
+      !github.event.issue.pull_request &&
+      contains(github.event.comment.body, '/reopen')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    concurrency:
+      group: issue-template-${{ github.event.issue.number }}
+      cancel-in-progress: false
+      queue: max
+    permissions:
+      issues: write
+      contents: read
+    steps:
+      - name: Check out issue checks
+        uses: actions/checkout@v4
+        with:
+          sparse-checkout: .github/scripts
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+
+      - name: Handle /reopen
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const path = require("path");
+            const { reopen } = require(
+              path.join(process.env.GITHUB_WORKSPACE, ".github/scripts/issue-workflows.js")
+            );
+            await reopen({ context, github, core });
+
+  sweep:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    concurrency:
+      group: issue-template-nightly
+      cancel-in-progress: false
+      queue: max
+    permissions:
+      issues: write
+      contents: read
+    steps:
+      - name: Check out issue checks
+        uses: actions/checkout@v4
+        with:
+          sparse-checkout: .github/scripts
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+
+      - name: Check all open issues
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const path = require("path");
+            const { sweep } = require(
+              path.join(process.env.GITHUB_WORKSPACE, ".github/scripts/issue-workflows.js")
+            );
+            await sweep({ context, github, core });

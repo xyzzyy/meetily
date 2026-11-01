@@ -2,7 +2,7 @@
 
 This document provides a quick overview of all available CI/CD workflows in this repository.
 
-**Note:** Most build/release workflows run manually (`workflow_dispatch`). Three run automatically: `pr-build.yml` (pull requests and pushes to `main`), `opencode-review.yml` (pull-request events), and `issue-enforce.yml` (issue events).
+**Note:** Most build/release workflows run manually (`workflow_dispatch`). Four run automatically: `pr-build.yml` (pull requests and pushes to `main`), `opencode-review.yml` (pull-request events), `issue-enforce.yml` (issue events), and `issue-grace.yml` (`/reopen` comments and a nightly check of all open issues).
 
 ## Workflow Files
 
@@ -184,23 +184,71 @@ This document provides a quick overview of all available CI/CD workflows in this
 
 ### 9. **issue-enforce.yml** - Issue Template Checks
 
-**Purpose:** Check open issues against the required fields in the four issue forms, including issues made through `gh` or the API.
+**Purpose:** Check open issues against the same required fields as the issue forms.
 
-**Behavior:**
-- Checks every author, including maintainers, on `opened`, `reopened`, and `edited` issue events.
-- Uses `.github/scripts/issue-template.js` to check title prefixes, required sections, and required boxes. Form definitions and Markdown parsing rules stay the same.
-- Posts an explanation with the missing information and form links, adds `invalid-template`, and closes an incomplete issue.
-- After an author edits a closed issue, a maintainer can reopen it. Reopened issues have the same check. The author can also open a new issue with the matching form.
-- Removes `invalid-template` and adds the matching type label when a corrected issue is reopened. Existing triage labels stay in place.
-- Checks the current state, title, body, and labels before each write. If the issue changes, that pass stops. The next issue event can start a new check.
-- Reuses a closure explanation after a partial API failure. A changed report or a new reopen gets a fresh explanation.
-- Keeps pending events in the queue for that issue, with cancellation disabled.
+**Key Features:**
+- Applies the same template rules to every author and actor, including maintainers
+- Recognizes the `[BUG]`, `[FEATURE]`, `[DOCS]`, and `[QUESTION]` title prefixes
+- Requires information in each required section and checks each required box
+- Accepts checked tasks in bullet or ordered lists, with optional notes after the required text
+- Keeps deeper Markdown headings inside their field and ignores code samples when checking required boxes
+- Ignores headings and task-list text inside raw HTML blocks; hidden HTML comments cannot complete required fields
+- Keeps code fences within their list item, including after a nested quote, and handles HTML blocks after a list, quote, or GFM table ends
+- Comments with the current failures, adds `invalid-template`, and closes incomplete issues
+- Allows partial edits while `template-grace` is present; a complete correction removes all three template labels
+- Keeps grace for incomplete issues until the nightly check; removing the label starts a normal template check
+- Explains label changes when an issue follows its template
+- Does no work on closed issues
+- Checks the current state, title, body, and labels before each automatic change; a changed issue stops that pass
+- Stopped passes leave the issue for its next event or nightly check; GitHub API calls are separate operations
+- Shares a queue with `/reopen` jobs; waiting jobs remain queued instead of replacing earlier requests
+- Uses `.github/scripts/issue-workflows.js` with the nightly workflow, so both use the same checks and closure explanations
 
-There is no `/reopen` bot command, grace period, or nightly sweep. Closed issues have no automatic checks or label cleanup. The old `template-grace` and `invalid-template-again` labels have no effect. The next check of an open issue removes them and preserves the maintainer's type-label choice. This change does not delete repository labels or scan old issues.
+**Triggers:**
+- Automatically on open issue events (`opened`, `reopened`, `edited`)
+- Automatically when someone removes `template-grace` from an open issue
 
-Tests run in `pr-build.yml`. Run them locally with `node --test .github/scripts/issue-workflows.test.cjs`.
+**Use When:**
+- Runs automatically; no manual dispatch is needed
 
-`actionlint` 1.7.12 does not recognize GitHub's `queue` field. Use its exact compatibility filter: `-ignore 'unexpected key "queue" for "concurrency" section'`. Queue settings also have a direct test.
+---
+
+### 10. **issue-grace.yml** - Reopen and Nightly Checks
+
+**Purpose:** Let users reopen a template-closed issue and let maintainers grant more grace after an unsuccessful correction.
+
+**Key Features:**
+- Anyone can comment `/reopen` on a closed issue with `invalid-template`; reopening an issue with `invalid-template-again` needs a maintainer
+- A successful command reopens the issue and leaves only `template-grace` of the three template labels
+- `template-grace` permits partial edits until the next nightly check at 04:00 UTC; a complete correction ends grace
+- `invalid-template-again` marks an issue closed after an unsuccessful grace period; a maintainer can use `/reopen` to replace it with `template-grace`
+- Maintainers with triage, write, maintain, or admin access can use `/reopen` without a limit
+- Checks the command author's current permissions when a later reopen needs a maintainer
+- Checks no title or body while an issue is closed; only an explicit `/reopen` request can process a closed issue
+- A failed command rolls back new request labels and keeps an existing maintainer-only label; the bot reports any rollback failure
+- A failed API response triggers a state check before rollback; a confirmed open issue keeps only `template-grace` of the template labels
+- If the state check also fails, the bot keeps the labels and explains the uncertainty
+- Each command response explains the action or refusal
+- The nightly check covers **all open issues**, including older issues without a grace label
+- Complete issues stay open; the bot removes `template-grace`, `invalid-template`, and `invalid-template-again`, including on a complete edit during grace
+- Incomplete issues receive a comment with the current failures and close. The first closure leaves only `invalid-template`; closure after grace leaves only `invalid-template-again`. Other labels, such as `bug` and `enhancement`, stay in place
+- A retry of a failed closure reuses the explanation for the same invalid state; a changed report or new reopen cycle gets a fresh explanation
+- A GitHub rate-limit response stops and fails the nightly check; it does not continue API calls for the remaining issues
+- Closed issues have no scheduled checks or automatic label cleanup
+- A manual closure leaves the labels alone; closed issues remain outside the nightly check
+- Retained grace after a manual close and reopen remains allowed intentionally
+- Comments without `/reopen` skip the command job; the script accepts only the command itself, ignoring case and surrounding whitespace
+- Uses `queue: max` with cancellation disabled; GitHub permits up to 100 waiting jobs in each queue and cancels new arrivals beyond that limit
+- Tests run in `pr-build.yml`; run them locally with `node --test .github/scripts/issue-workflows.test.cjs`
+- `actionlint` 1.7.12 does not recognize GitHub's `queue` field. Use its exact compatibility filter: `-ignore 'unexpected key "queue" for "concurrency" section'`. Queue settings also have direct tests.
+
+**Triggers:**
+- Automatically on issue comments (`/reopen`)
+- Nightly at 04:00 UTC
+- Manual dispatch (`workflow_dispatch`) for the nightly checks, with an optional dry run
+
+**Use When:**
+- Runs automatically; use manual dispatch to preview or start the nightly checks
 
 ---
 
