@@ -1016,20 +1016,23 @@ fn times_from(
             .filter_map(|(i, j)| j.map(|j| (i, j)))
             .collect();
         for pair in pairs.windows(2) {
-            let (i, j) = pair[0];
+            let (mut i, mut j) = pair[0];
             let (next_i, next_j) = pair[1];
-            let distance = (timed[j].1 - words[first + i].1).abs();
-            if i + 1 < next_i
-                && matches(i + 1, j - cursor)
-                && (timed[j].1 - words[first + i + 1].1).abs() < distance
-            {
+            loop {
+                let distance = |i: usize, j: usize| (timed[j].1 - words[first + i].1).abs();
+                let nearest = (i + 1..next_i)
+                    .map(|k| (k, j))
+                    .chain((j + 1..next_j).map(|k| (i, k)))
+                    .filter(|&(i, j)| matches(i, j - cursor))
+                    .min_by(|&(a, b), &(c, d)| distance(a, b).total_cmp(&distance(c, d)));
+                let Some((near_i, near_j)) = nearest
+                    .filter(|&(near_i, near_j)| distance(near_i, near_j) < distance(i, j))
+                else {
+                    break;
+                };
                 matched[first + i] = None;
-                matched[first + i + 1] = Some(j);
-            } else if j + 1 < next_j
-                && matches(i, j + 1 - cursor)
-                && (timed[j + 1].1 - words[first + i].1).abs() < distance
-            {
-                matched[first + i] = Some(j + 1);
+                matched[first + near_i] = Some(near_j);
+                (i, j) = (near_i, near_j);
             }
         }
         if let Some(last_match) = matched[first..last].iter().rev().flatten().next() {
@@ -1709,6 +1712,34 @@ mod tests {
             ("yes", 27_000.0, 27_500.0),
         ]);
         assert_eq!(times_from(plain, &tagged), tagged);
+    }
+
+    #[test]
+    fn repeated_word_ties_choose_the_nearest_of_three_tagged_repeats() {
+        let plain = timed(&[("yes", 25_000.0, 25_500.0), ("okay", 26_000.0, 26_500.0)]);
+        let tagged = timed(&[
+            ("yes", 20_000.0, 20_500.0),
+            ("yes", 22_000.0, 22_500.0),
+            ("yes", 25_000.0, 25_500.0),
+            ("okay", 26_000.0, 26_500.0),
+        ]);
+
+        assert_eq!(times_from(plain.clone(), &tagged), plain);
+    }
+
+    #[test]
+    fn repeated_word_ties_choose_the_nearest_of_three_plain_repeats() {
+        let plain = timed(&[
+            ("yes", 20_000.0, 20_500.0),
+            ("yes", 22_000.0, 22_500.0),
+            ("yes", 25_000.0, 25_500.0),
+            ("okay", 26_000.0, 26_500.0),
+        ]);
+        let tagged = timed(&[("yes", 25_000.0, 25_500.0), ("okay", 26_000.0, 26_500.0)]);
+
+        let words = times_from(plain.clone(), &tagged);
+        assert_eq!(words[2], tagged[0]);
+        assert_eq!(words, plain);
     }
 
     #[test]
