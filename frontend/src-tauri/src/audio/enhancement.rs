@@ -2533,6 +2533,22 @@ mod tests {
                 .unwrap();
             assert_eq!(staged.warnings.len(), usize::from(warned), "{text}: {:?}", staged.warnings);
         }
+        // Words on either side of a real hole in a long row do not hide it.
+        let words: Vec<String> = (1..=20).map(|i| format!("w{i}")).collect();
+        proposal.original[0].transcript = words.join(" ");
+        proposal.original[0].audio_start_time = Some(50.0);
+        proposal.original[0].audio_end_time = Some(70.0);
+        proposal.segments = vec![
+            segment(&words[..10].join(" "), 50.0, 60.0),
+            segment(&words[17..].join(" "), 67.0, 70.0),
+        ];
+        let id = super::super::enhancement_review::stage(&core, &feature, proposal)
+            .await
+            .unwrap();
+        let staged = super::super::enhancement_review::load(&feature, "m1", &id)
+            .await
+            .unwrap();
+        assert!(staged.warnings[0].contains("speech at 00:50"), "{:?}", staged.warnings);
     }
 
     #[tokio::test]
