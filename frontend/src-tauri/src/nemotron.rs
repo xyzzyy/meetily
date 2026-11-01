@@ -496,7 +496,7 @@ fn parse_word_reply(body: &Value) -> Result<Reply, String> {
     let timed = formatting.replace_all(&timed_text, "");
     // Silence is returned without a decoder run. Generated tokens with no
     // retained text are a failed decode, not evidence that this clip was silent.
-    let empty_decode = reply.text.is_empty()
+    let empty_decode = text.is_empty()
         && body
             .pointer("/usage/completion_tokens")
             .and_then(Value::as_u64)
@@ -1534,7 +1534,10 @@ mod tests {
         let mut body = json!({"choices": [{"message": {"content": ""}}]});
         assert!(parse_word_reply(&body).is_ok());
         body["usage"] = json!({"completion_tokens": 2000});
-        assert!(parse_word_reply(&body).is_err());
+        for text in ["", "...", "！？", " \t"] {
+            body["choices"][0]["message"]["content"] = json!(text);
+            assert!(parse_word_reply(&body).is_err(), "generated empty decode: {text:?}");
+        }
     }
 
     #[test]
