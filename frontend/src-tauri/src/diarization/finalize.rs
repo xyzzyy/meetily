@@ -794,23 +794,24 @@ fn label_existing_transcripts(
                     speakers.entry(id).or_insert((0.0, window)).0 += overlap;
                 }
             }
-            overlap_ranges.sort_by(|a, b| a.0.total_cmp(&b.0));
-            let mut overlap_seconds = 0.0;
-            let mut cursor = start;
-            for (a, b) in overlap_ranges {
-                overlap_seconds += (b - cursor.max(a)).max(0.0);
-                cursor = cursor.max(b);
-            }
+            let overlap_seconds = covered_seconds(start, overlap_ranges);
             let is_overlap = duration > 0.0 && overlap_seconds / duration >= 0.5;
             let best = speakers
                 .into_iter()
                 .max_by(|a, b| a.1 .0.total_cmp(&b.1 .0).then_with(|| b.0.cmp(a.0)))
                 .filter(|(_, (seconds, _))| duration > 0.0 && seconds / duration >= 0.5);
-            let window = best.as_ref().map(|(_, (_, window))| *window);
+            let nearby = if is_overlap || best.is_some() {
+                None
+            } else if row.audio_start_time.is_some() && row.audio_end_time.is_some() {
+                nearby_speaker(start, end, windows)
+            } else {
+                None
+            };
+            let window = best.as_ref().map(|(_, (_, window))| *window).or(nearby);
             let speaker_id = if is_overlap {
                 None
             } else {
-                best.as_ref().map(|(id, _)| (*id).to_string())
+                window.and_then(|window| window.speaker_id.clone())
             };
             let speaker_label = if is_overlap {
                 "Multiple speakers".to_string()
@@ -863,6 +864,52 @@ fn label_existing_transcripts(
             }
         })
         .collect()
+}
+
+/// Recognizer word times can run past the voice that speaker analysis found,
+/// so a short row such as a sentence's last word can fall just outside its
+/// speaker's window. Such a row takes the speaker when every window within
+/// this distance belongs to that one speaker and does not overlap another.
+const NEARBY_SPEAKER_SECONDS: f64 = 0.5;
+
+fn nearby_speaker(start: f64, end: f64, windows: &[FinalWindow]) -> Option<&FinalWindow> {
+    let pad = NEARBY_SPEAKER_SECONDS;
+    let distance = |window: &FinalWindow| (window.start - end).max(start - window.end).max(0.0);
+    let near = windows
+        .iter()
+        .filter(|window| distance(window) <= pad)
+        .collect::<Vec<_>>();
+    let nearest = near
+        .iter()
+        .copied()
+        .min_by(|a, b| distance(a).total_cmp(&distance(b)))?;
+    nearest.speaker_id.as_ref()?;
+    if near
+        .iter()
+        .any(|window| window.is_overlap || window.speaker_id != nearest.speaker_id)
+    {
+        return None;
+    }
+    // The padded windows must still cover half the row, so a long row with
+    // little voice near its edge stays unknown.
+    let duration = end - start;
+    let ranges = near
+        .iter()
+        .map(|window| (start.max(window.start - pad), end.min(window.end + pad)))
+        .collect();
+    (duration <= 0.0 || covered_seconds(start, ranges) / duration >= 0.5).then_some(nearest)
+}
+
+/// Total length of `ranges`, counting shared time once.
+fn covered_seconds(start: f64, mut ranges: Vec<(f64, f64)>) -> f64 {
+    ranges.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let mut covered = 0.0;
+    let mut cursor = start;
+    for (a, b) in ranges {
+        covered += (b - cursor.max(a)).max(0.0);
+        cursor = cursor.max(b);
+    }
+    covered
 }
 
 fn passes_quality_gates(assigned_coverage: f64, transcription_success_rate: f64) -> bool {
@@ -2544,6 +2591,49 @@ mod tests {
         let result = label_existing_transcripts(&[live_row("t1", 0.0, 60.0)], &windows, &labels);
         assert!(!result[0].is_overlap);
         assert_eq!(result[0].speaker_label, "Alice");
+    }
+
+    #[test]
+    fn a_word_just_past_its_speakers_window_takes_that_speaker() {
+        let windows = rebuild_windows(&[
+            source_interval("system", "a", 0.0, 2.0),
+            source_interval("system", "b", 5.0, 7.0),
+        ]);
+        let labels = HashMap::from([("a".to_string(), "Alice".to_string())]);
+        let rows = vec![
+            live_row("tail", 1.9, 2.3),
+            live_row("collapsed", 2.2, 2.2),
+            live_row("far", 2.6, 2.9),
+        ];
+        let result = label_existing_transcripts(&rows, &windows, &labels);
+        assert_eq!(result[0].speaker_label, "Alice");
+        assert_eq!(result[0].speaker_id.as_deref(), Some("a"));
+        assert_eq!(result[0].source, "system");
+        assert_eq!(result[0].confidence, 0.0, "no voice sample from a guess");
+        assert_eq!(result[1].speaker_label, "Alice");
+        assert_eq!(result[2].speaker_label, "Unknown speaker");
+    }
+
+    #[test]
+    fn a_word_near_two_speakers_or_without_times_stays_unknown() {
+        let windows = rebuild_windows(&[
+            source_interval("system", "a", 0.0, 2.0),
+            source_interval("system", "b", 2.6, 4.0),
+        ]);
+        let labels = HashMap::from([
+            ("a".to_string(), "Alice".to_string()),
+            ("b".to_string(), "Bob".to_string()),
+        ]);
+        let mut untimed = live_row("untimed", 0.0, 0.0);
+        untimed.audio_start_time = None;
+        untimed.audio_end_time = None;
+        let result = label_existing_transcripts(
+            &[live_row("between", 2.1, 2.5), untimed],
+            &windows,
+            &labels,
+        );
+        assert_eq!(result[0].speaker_label, "Unknown speaker");
+        assert_eq!(result[1].speaker_label, "Unknown speaker");
     }
 
     #[test]
