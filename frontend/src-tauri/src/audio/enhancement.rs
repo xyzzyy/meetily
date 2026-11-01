@@ -164,7 +164,10 @@ pub(crate) fn retime_collapsed_words(
         .filter_map(|row| Some((row.audio_start_time?, row.audio_end_time?, &row.transcript)))
         .filter(|(start, end, _)| start.is_finite() && end.is_finite() && end > start)
         .collect();
-    rows.sort_by(|a, b| a.0.total_cmp(&b.0));
+    // Latest first: a row's packed words can sit over an earlier row, or be
+    // swept along after it, so each row takes its own words before an earlier
+    // row is judged.
+    rows.sort_by(|a, b| b.0.total_cmp(&a.0));
     for (start, end, text) in rows {
         let (start, end) = (start * 1000.0, end * 1000.0);
         if words.iter().any(|w| w.1 < end && w.2 > start) {
@@ -1441,6 +1444,24 @@ mod tests {
         assert!(words[14].1 >= 546_040.0 && words[15].2 <= 547_400.0);
         assert!(words.windows(2).all(|pair| pair[0].2 <= pair[1].1 + 1e-6));
         assert_eq!(words[16], collapsed_reply()[16]);
+    }
+
+    #[test]
+    fn consecutive_collapsed_rows_each_get_their_own_time() {
+        let saved = [
+            saved_row("one two three four five six", 10.0, 14.0),
+            saved_row("seven eight nine ten eleven twelve", 16.0, 21.0),
+        ];
+        let mut words: Vec<_> = "one two three four five six seven eight nine ten eleven twelve"
+            .split(' ')
+            .enumerate()
+            .map(|(i, text)| (text.to_string(), 8_000.0 + i as f64 * 80.0, 8_080.0 + i as f64 * 80.0))
+            .collect();
+        words.push(("next".into(), 25_000.0, 25_300.0));
+        let words = retime_collapsed_words(words, &saved);
+        assert_eq!((words[0].1, words[5].2.round()), (10_000.0, 14_000.0));
+        assert_eq!((words[6].1, words[11].2.round()), (16_000.0, 21_000.0));
+        assert_eq!(words[12].1, 25_000.0);
     }
 
     #[test]
