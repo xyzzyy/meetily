@@ -955,8 +955,9 @@ fn times_from(
 ) -> Vec<(String, f64, f64)> {
     /// Words per matching block, which bounds memory on long recordings.
     const BLOCK: usize = 300;
-    /// How far past a block the same words can be timed.
+    /// Maximum difference between matching word starts.
     const REACH_MS: f64 = 30_000.0;
+    const MIN_WIDTH_MS: f64 = 1.0;
     let key = |text: &str| -> String {
         text.chars()
             .filter(|c| c.is_alphanumeric())
@@ -976,11 +977,17 @@ fn times_from(
             .unwrap_or(timed.len());
         let a: Vec<String> = words[first..lookahead].iter().map(|w| key(&w.0)).collect();
         let b: Vec<String> = timed[cursor..end].iter().map(|w| key(&w.0)).collect();
+        let matches = |i: usize, j: usize| {
+            !a[i].is_empty()
+                && a[i] == b[j]
+                && (timed[cursor + j].1 - words[first + i].1).abs() <= REACH_MS
+                && timed[cursor + j].2 > timed[cursor + j].1
+        };
         // Longest common subsequence, traced from the start.
         let mut table = vec![vec![0u32; b.len() + 1]; a.len() + 1];
         for i in (0..a.len()).rev() {
             for j in (0..b.len()).rev() {
-                table[i][j] = if !a[i].is_empty() && a[i] == b[j] {
+                table[i][j] = if matches(i, j) {
                     table[i + 1][j + 1] + 1
                 } else {
                     table[i + 1][j].max(table[i][j + 1])
@@ -990,7 +997,7 @@ fn times_from(
         let (mut i, mut j) = (0, 0);
         // Include the next block in the LCS, but save only this block's matches.
         while i < last - first && j < b.len() {
-            if !a[i].is_empty() && a[i] == b[j] {
+            if matches(i, j) {
                 matched[first + i] = Some(cursor + j);
                 i += 1;
                 j += 1;
@@ -1035,11 +1042,12 @@ fn times_from(
         }
         i = run.end;
     }
-    // Keep the timeline in order.
+    // Keep starts in order and give every word a positive duration, even
+    // when its matched neighbours leave no room.
     let mut previous = 0.0;
     for word in &mut words {
         word.1 = word.1.max(previous);
-        word.2 = word.2.max(word.1);
+        word.2 = word.2.max(word.1 + MIN_WIDTH_MS);
         previous = word.1;
     }
     words
@@ -1605,6 +1613,38 @@ mod tests {
         assert!(at("uh") >= 543_488.0 && at("uh") < 543_808.0, "{words:?}");
         assert_eq!(at("Sounds"), 546_844.0);
         assert!(words.windows(2).all(|pair| pair[0].1 <= pair[1].1));
+    }
+
+    #[test]
+    fn zero_length_tagged_words_get_positive_times_between_neighbours() {
+        let plain = timed(&[("before", 0.0, 80.0), ("word", 100.0, 120.0), ("after", 200.0, 400.0)]);
+        for (next_start, zero_start) in [(300.0_f64, 150.0), (100.0, 100.0)] {
+            let tagged = timed(&[
+                ("before", 0.0, 100.0),
+                ("word", zero_start, zero_start),
+                ("after", next_start, 400.0),
+            ]);
+            let words = times_from(plain.clone(), &tagged);
+            assert_eq!(words[1], ("word".into(), 100.0, next_start.max(101.0)));
+            assert!(words.iter().all(|word| word.2 > word.1), "{words:?}");
+            assert!(words.windows(2).all(|pair| pair[0].1 <= pair[1].1), "{words:?}");
+        }
+    }
+
+    #[test]
+    fn repeated_words_take_times_from_the_nearby_occurrence() {
+        let plain = timed(&[
+            ("hello", 0.0, 500.0),
+            ("yes", 600_000.0, 600_500.0),
+            ("done", 601_000.0, 601_500.0),
+        ]);
+        let tagged = timed(&[
+            ("hello", 0.0, 500.0),
+            ("yes", 10_000.0, 10_500.0),
+            ("yes", 600_000.0, 600_500.0),
+            ("done", 601_000.0, 601_500.0),
+        ]);
+        assert_eq!(times_from(plain.clone(), &tagged), plain);
     }
 
     #[test]
