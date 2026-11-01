@@ -63,7 +63,8 @@ sha2 = "0.10"
 
 
 [dependencies]
-serde_json = "1.0"
+# Stored Enhance reviews must read back the exact row times they saved.
+serde_json = { version = "1.0", features = ["float_roundtrip"] }
 base64 = "0.22"
 serde = { version = "1.0", features = ["derive"] }
 sha2 = "0.10"

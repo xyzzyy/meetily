@@ -1959,6 +1959,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_staged_review_reads_back_the_exact_saved_rows() {
+        let (_dir, core, feature, _) = publication_fixture().await;
+        // 1.7 - 1.68 is stored as 0.020000000000000018. A fast float parser
+        // read it back one bit off, so Apply always saw a changed transcript.
+        sqlx::query("UPDATE transcripts SET audio_start_time=1.68,audio_end_time=1.7,duration=? WHERE id='old'")
+            .bind(1.7f64 - 1.68)
+            .execute(&core).await.unwrap();
+        let original = crate::diarization::finalize::load_transcripts(&core, "m1")
+            .await
+            .unwrap();
+        let id = staged_review(&core, &feature, &original).await;
+        let staged = super::super::enhancement_review::load(&feature, "m1", &id)
+            .await
+            .unwrap();
+        assert_eq!(
+            serde_json::to_string(&staged.original).unwrap(),
+            serde_json::to_string(&original).unwrap()
+        );
+    }
+
+    #[tokio::test]
     async fn a_finished_proposal_keeps_saved_words_and_manual_speaker_data() {
         let (_dir, core, feature, original) = publication_fixture().await;
         let before = super::super::enhancement_review::speaker_snapshot(&feature, "m1")
