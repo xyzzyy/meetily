@@ -104,3 +104,12 @@ test('a rejected cancel leaves the run tracked', async () => {
   await send('retranscription-error', { meeting_id: 'meeting', error: 'Model crashed' });
   expect(error).toHaveBeenCalledTimes(1);
 });
+
+test('a run that ends right as the popup is minimized still gets its notice', async () => {
+  await act(async () => { ctx.openEnhancement('meeting', '/audio'); ctx.markStarted('meeting'); });
+  await act(async () => {
+    ctx.setDialogOpen(false);
+    handlers.get('retranscription-complete')!({ payload: { meeting_id: 'meeting', warning: null } });
+  });
+  expect(success).toHaveBeenCalledTimes(1);
+});

@@ -55,20 +55,25 @@ export function EnhancementRunProvider({ children }: { children: ReactNode }) {
   const router = useRouter();
   const [run, setRun] = useState<EnhancementRun | null>(null);
   const [dialog, setDialog] = useState<EnhancementDialogState | null>(null);
+  // Event handlers read the popup state between renders, so it changes here with the state.
   const dialogRef = useRef(dialog);
-  useEffect(() => { dialogRef.current = dialog; }, [dialog]);
+  const showDialog = useCallback((next: EnhancementDialogState | null) => {
+    dialogRef.current = next;
+    setDialog(next);
+  }, []);
   const folderPaths = useRef(new Map<string, string | null>());
   // A cancelled run still reports progress and its end while it stops; neither needs a notice.
   const cancelledMeetingRef = useRef<string | null>(null);
 
   const openEnhancement = useCallback((meetingId: string, meetingFolderPath?: string | null) => {
     if (meetingFolderPath !== undefined) folderPaths.current.set(meetingId, meetingFolderPath);
-    setDialog({ meetingId, meetingFolderPath: folderPaths.current.get(meetingId) ?? null, open: true });
-  }, []);
+    showDialog({ meetingId, meetingFolderPath: folderPaths.current.get(meetingId) ?? null, open: true });
+  }, [showDialog]);
 
   const setDialogOpen = useCallback((open: boolean) => {
-    setDialog(current => current && { ...current, open });
-  }, []);
+    const current = dialogRef.current;
+    if (current) showDialog({ ...current, open });
+  }, [showDialog]);
 
   const viewMeeting = useCallback((meetingId: string) => {
     const onMeeting = window.location.pathname.startsWith('/meeting-details')
