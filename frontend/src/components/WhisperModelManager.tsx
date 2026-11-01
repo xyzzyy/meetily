@@ -197,7 +197,7 @@ export function ModelManager({
           setModels(prevModels =>
             prevModels.map(model =>
               model.name === modelName
-                ? { ...model, status: 'Available' as ModelStatus }
+                ? { ...model, status: 'Available' as ModelStatus, is_shared: false }
                 : model
             )
           );
@@ -391,6 +391,7 @@ export function ModelManager({
     <TranscriptionModelCard
       key={model.name}
       displayName={getDisplayName(model.name)}
+      isShared={model.is_shared}
       icon={getModelIcon(model.accuracy)}
       description={getModelTagline(model.name, model.speed, model.accuracy)}
       details={[formatFileSize(model.size_mb), `${model.accuracy} accuracy`, `${model.speed} processing`]}

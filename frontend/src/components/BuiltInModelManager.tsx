@@ -13,6 +13,7 @@ import { formatSummaryModelSizeLabelFromMb } from '@/lib/onboarding-summary-mode
 
 interface ModelInfo {
   name: string;
+  is_shared?: boolean;
   display_name: string;
   status: {
     type: 'not_downloaded' | 'downloading' | 'available' | 'corrupted' | 'error';
@@ -422,7 +423,7 @@ export function BuiltInModelManager({
                         <RefreshCw className="mr-2 h-4 w-4" />
                         Retry
                       </Button>
-                      <Button
+                      {!model.is_shared && <Button
                         variant="outline"
                         size="sm"
                         onClick={(e) => {
@@ -432,11 +433,11 @@ export function BuiltInModelManager({
                       >
                         <Trash2 className="mr-2 h-4 w-4" />
                         Delete
-                      </Button>
+                      </Button>}
                     </>
                   )}
                   {/* Available - Show small trash icon */}
-                  {isAvailable && !modelIsDownloading && (
+                  {isAvailable && !modelIsDownloading && !model.is_shared && (
                     <button
                       className="p-2 rounded hover:bg-gray-100 dark:hover:bg-ink-800 transition-colors text-gray-500 dark:text-ink-400 hover:text-red-600 dark:hover:text-red-400"
                       onClick={(e) => {
@@ -454,12 +455,18 @@ export function BuiltInModelManager({
                 {model.description && (
                   <p className="mb-1">{model.description}</p>
                 )}
+                {!modelIsDownloading && model.is_shared !== undefined && (
+                  <p className="mb-1 text-xs text-gray-500 dark:text-ink-400">
+                    {model.is_shared ? 'Shared from official Meetily. Read-only in Branch.'
+                      : isAvailable || isCorrupted ? 'Saved in Meetily Branch.' : 'Downloads are saved in Meetily Branch.'}
+                  </p>
+                )}
                 {(isError || isCorrupted) && (
                   <p className="mb-1 text-xs text-red-600 dark:text-red-400">
                     {isError && typeof model.status === 'object' && 'Error' in model.status
                       ? (model.status as any).Error
                       : isCorrupted
-                      ? 'File is corrupted. Retry download or delete.'
+                      ? model.is_shared ? 'The shared model files are damaged. Retry to download a copy for Branch.' : 'File is corrupted. Retry download or delete.'
                       : 'An error occurred'}
                   </p>
                 )}

@@ -55,8 +55,8 @@ afterEach(async () => {
   if (renderer) await act(async () => renderer!.unmount());
   renderer = undefined;
 });
-async function show() {
-  await act(async () => { renderer = create(<FunAsrModelManager selectedModel="previous" onModelSelect={selected} autoSave />); });
+async function show(selectedModel = "previous") {
+  await act(async () => { renderer = create(<FunAsrModelManager selectedModel={selectedModel} onModelSelect={selected} autoSave />); });
 }
 function selectButton() {
   return renderer!.root.findAllByType('button').find(button => button.props.className?.includes('min-w-0'))!;
@@ -242,3 +242,72 @@ test('the note says a selected model that is not installed is not ready', async 
   expect(text).toContain('is selected but not ready');
   expect(text).not.toContain('for transcription');
 });
+
+for (const encoderShared of [false, true]) {
+  for (const decoderShared of [false, true]) {
+    test(`storage notices and deletion match encoder=${encoderShared}, decoder=${decoderShared}`, async () => {
+      available = [{ ...model, encoder_is_shared: encoderShared, decoder_is_shared: decoderShared }];
+      await show();
+      const text = JSON.stringify(renderer!.toJSON());
+      const notice = encoderShared && decoderShared ? 'Shared from official Meetily. Read-only in Branch.'
+        : encoderShared ? 'Decoder saved in Meetily Branch. Encoder shared from official Meetily.'
+        : decoderShared ? 'Encoder saved in Meetily Branch. Decoder shared from official Meetily.'
+        : 'Saved in Meetily Branch.';
+      expect(text).toContain(notice);
+      const remove = renderer!.root.findAllByType('button').find(button => button.props['aria-label'] === 'Delete Nano Q4');
+      expect(Boolean(remove)).toBe(!decoderShared);
+      await act(async () => { await selectButton().props.onClick(); });
+      expect(selected).toHaveBeenCalledWith(model.name);
+      if (remove) {
+        await act(async () => { await remove.props.onClick(); });
+        expect(confirm.mock.calls[0]?.[0]).toContain('Files from official Meetily stay unchanged');
+      }
+    });
+  }
+}
+for (const selectedModel of ['previous', model.name]) {
+  for (const encoderShared of [false, true]) {
+    test(`Branch partial cleanup preserves a ready shared model (selected=${selectedModel}, encoderShared=${encoderShared})`, async () => {
+      available = [{ ...model, encoder_is_shared: encoderShared, decoder_is_shared: true, has_partial_download: true }];
+      await show(selectedModel);
+      const remove = renderer!.root.findAllByType('button').find(button => button.props['aria-label'] === 'Delete Nano Q4');
+      expect(remove).toBeDefined();
+      await act(async () => { await remove!.props.onClick(); });
+      expect(confirm.mock.calls[0]?.[0]).toContain('partial');
+      expect(invoke).toHaveBeenCalledWith('funasr_delete_model', { modelName: model.name, partialOnly: true });
+      expect(errorToast).not.toHaveBeenCalled();
+      expect(selectButton().props.disabled).toBe(false);
+      expect(selected).not.toHaveBeenCalled();
+    });
+  }
+}
+
+test('partial cleanup does not allow deletion of a selected Branch model', async () => {
+  available = [{ ...model, encoder_is_shared: false, decoder_is_shared: false, has_partial_download: true }];
+  await show(model.name);
+  const remove = renderer!.root.findAllByType('button').find(button => button.props['aria-label'] === 'Delete Nano Q4');
+  await act(async () => { await remove!.props.onClick(); });
+  expect(errorToast).toHaveBeenCalledWith('Select another model before deleting this one');
+  expect(confirm).not.toHaveBeenCalled();
+  expect(invoke.mock.calls.some(([command]) => command === 'funasr_delete_model')).toBe(false);
+});
+
+for (const encoderShared of [false, true]) {
+  for (const decoderShared of [false, true]) {
+    test(`incomplete model source notice is accurate for encoder=${encoderShared}, decoder=${decoderShared}`, async () => {
+      available = [{ ...model, status: 'Missing', encoder_available: false,
+        encoder_is_shared: encoderShared, decoder_is_shared: decoderShared }];
+      await show();
+      const text = JSON.stringify(renderer!.toJSON());
+      expect(text).toContain('Downloads are saved in Meetily Branch.');
+      expect(text).not.toContain('Encoder saved in Meetily Branch.');
+      expect(text).not.toContain('Decoder saved in Meetily Branch.');
+      if (encoderShared && decoderShared) expect(text).toContain('Encoder and decoder are shared from official Meetily.');
+      else if (encoderShared) expect(text).toContain('Encoder is shared from official Meetily.');
+      else if (decoderShared) expect(text).toContain('Decoder is shared from official Meetily.');
+      if (encoderShared || decoderShared) expect(text).toContain('Shared files are read-only in Branch.');
+      expect(selectButton().props.disabled).toBe(true);
+      expect(renderer!.root.findAllByType('button').some(button => button.props.children?.includes?.('Download'))).toBe(true);
+    });
+  }
+}
