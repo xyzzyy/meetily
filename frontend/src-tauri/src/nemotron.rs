@@ -487,6 +487,13 @@ fn parse_word_reply(body: &Value) -> Result<Reply, String> {
         .map(|word| word.text.as_str())
         .collect::<Vec<_>>()
         .join(" ");
+    // The runtime times Chinese, Japanese and Thai per character and omits
+    // punctuation. Compare retained speech, keeping combining marks (Thai
+    // vowels, for example), while ignoring those formatting differences.
+    static FORMATTING: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let formatting = FORMATTING.get_or_init(|| regex::Regex::new(r"[\s\p{P}]").unwrap());
+    let text = formatting.replace_all(&reply.text, "");
+    let timed = formatting.replace_all(&timed_text, "");
     // Silence is returned without a decoder run. Generated tokens with no
     // retained text are a failed decode, not evidence that this clip was silent.
     let empty_decode = reply.text.is_empty()
@@ -496,10 +503,7 @@ fn parse_word_reply(body: &Value) -> Result<Reply, String> {
             .unwrap_or(0)
             > 0;
     if empty_decode
-        || reply
-            .text
-            .split_whitespace()
-            .ne(timed_text.split_whitespace())
+        || text != timed
         || reply
             .words
             .iter()
@@ -1495,6 +1499,33 @@ mod tests {
         ]);
         assert!(parse_word_reply(&body).is_ok());
         body["transcription"]["words"][1]["end"] = json!(0.2);
+        assert!(parse_word_reply(&body).is_err());
+    }
+
+    #[test]
+    fn character_word_times_retain_chinese_japanese_and_thai_text() {
+        for (text, timed) in [
+            ("你好，世界！", vec!["你", "好", "世", "界"]),
+            ("こんにちは。", vec!["こ", "ん", "に", "ち", "は"]),
+            ("สวัสดี โลก!", vec!["ส", "วั", "ส", "ดี", "โ", "ล", "ก"]),
+        ] {
+            let words: Vec<_> = timed.iter().enumerate().map(|(i, text)| {
+                json!({"word": text, "start": i as f64, "end": i as f64 + 0.5})
+            }).collect();
+            let mut body = json!({
+                "choices": [{"message": {"content": text}}],
+                "transcription": {"words": words}
+            });
+            assert!(parse_word_reply(&body).is_ok(), "{text}");
+            body["transcription"]["words"].as_array_mut().unwrap().pop();
+            assert!(parse_word_reply(&body).is_err(), "missing character: {text}");
+        }
+        // Thai vowel marks are part of the speech, even though they are not
+        // alphanumeric. Dropping one must still fail the completeness check.
+        let body = json!({
+            "choices": [{"message": {"content": "ดี"}}],
+            "transcription": {"words": [{"word": "ด", "start": 0.0, "end": 0.5}]}
+        });
         assert!(parse_word_reply(&body).is_err());
     }
 
