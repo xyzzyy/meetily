@@ -39,6 +39,7 @@ pub mod anthropic;
 pub mod api;
 pub mod audio;
 pub mod config;
+pub mod custom_openai;
 pub mod console_utils;
 pub mod database;
 pub mod diarization;
@@ -819,6 +820,7 @@ pub fn run() {
             // Custom OpenAI commands
             api::api_save_custom_openai_config,
             api::api_get_custom_openai_config,
+            custom_openai::get_custom_openai_models,
             api::api_test_custom_openai_connection,
             // Summary commands
             summary::commands::api_process_transcript,

@@ -12,7 +12,7 @@ async function openMeeting(page: Page, {
   segmentCount?: number;
   summary?: string;
   longRowIndex?: number;
-  summaryProvider?: 'ollama' | 'openai';
+  summaryProvider?: 'ollama' | 'openai' | 'custom-openai';
 } = {}) {
     const errors = collectAppErrors(page);
 
@@ -25,6 +25,10 @@ async function openMeeting(page: Page, {
         summaryKey: summaryProvider === 'openai' ? 'saved-test-key' : null as string | null,
         confirmRemoval: false,
         deletedProviders: [] as string[],
+        customConfig: { endpoint: 'http://old-server:8000/v1', model: 'old-model', apiKey: null as string | null },
+        modelRequests: [] as unknown[],
+        modelDiscoveryError: false,
+        savedModelConfig: null as unknown,
       };
       const listeners = new Map<number, { event: string; handler: number }>();
       let modelsReady = false;
@@ -77,6 +81,7 @@ async function openMeeting(page: Page, {
                 return id;
               }
               case 'plugin:event|unlisten': listeners.delete(args.eventId); return null;
+              case 'plugin:event|emit':
               case 'plugin:window|set_theme':
               case 'set_language_preference':
               case 'plugin:store|save':
@@ -133,6 +138,14 @@ async function openMeeting(page: Page, {
               };
               case 'api_get_api_key': return args.provider === 'openai' ? testSettings.summaryKey : null;
               case 'api_get_auto_generate_setting': return false;
+              case 'api_get_custom_openai_config': return testSettings.customConfig;
+              case 'get_custom_openai_models':
+                testSettings.modelRequests.push(args);
+                if (testSettings.modelDiscoveryError) throw new Error('Server unavailable');
+                return ['local-mlx', 'local-gguf'];
+              case 'api_save_custom_openai_config': testSettings.customConfig = args as typeof testSettings.customConfig; return null;
+              case 'api_save_model_config': testSettings.savedModelConfig = args; return null;
+              case 'api_set_auto_generate_setting': return null;
               case 'get_openai_models': return [{ id: 'test-model' }];
               case 'plugin:dialog|message': return testSettings.confirmRemoval ? 'Remove key' : 'Cancel';
               case 'api_delete_api_key':
@@ -427,4 +440,32 @@ test('a completion event updates the notice without waiting for the status poll'
     await expect(notice).toHaveCount(0);
   }
   expect(errors).toEqual([]);
+});
+
+
+test('LM Studio preset discovers and saves a local summary model', async ({ page }) => {
+  const errors = await openMeeting(page, { summaryProvider: 'custom-openai' });
+  await page.getByTitle('Summary Settings').click();
+  await expect(page.locator('#custom-endpoint')).toHaveValue('http://old-server:8000/v1');
+  await page.getByRole('button', { name: 'Use LM Studio', exact: true }).click();
+  await expect(page.locator('#custom-endpoint')).toHaveValue('http://localhost:1234/v1');
+  await expect(page.locator('#custom-api-key')).toHaveValue('');
+  await page.getByRole('button', { name: 'Fetch Models', exact: true }).click();
+  await page.locator('#custom-model-list').selectOption('local-mlx');
+  await expect(page.locator('#custom-model')).toHaveValue('local-mlx');
+  await page.screenshot({ path: test.info().outputPath('lm-studio-settings.png') });
+  await page.getByRole('button', { name: 'Save', exact: true }).click();
+  const saved = await page.evaluate(() => (window as any).__MEETILY_TEST_SETTINGS__);
+  expect(saved.modelRequests).toEqual([{ endpoint: 'http://localhost:1234/v1', apiKey: null }]);
+  expect(saved.customConfig).toMatchObject({ endpoint: 'http://localhost:1234/v1', model: 'local-mlx', apiKey: null });
+  expect(saved.savedModelConfig).toMatchObject({ provider: 'custom-openai', model: 'local-mlx' });
+  await page.getByTitle('Summary Settings').click();
+  await expect(page.locator('#custom-model')).toHaveValue('local-mlx');
+  await page.evaluate(() => { (window as any).__MEETILY_TEST_SETTINGS__.modelDiscoveryError = true; });
+  await page.getByRole('button', { name: 'Fetch Models', exact: true }).click();
+  await expect(page.getByRole('status').filter({ hasText: 'Cannot fetch models' })).toBeVisible();
+  await expect(page.locator('#custom-model')).toHaveValue('local-mlx');
+  await page.locator('#custom-model').fill('manual-model');
+  await expect(page.getByRole('button', { name: 'Save', exact: true })).toBeEnabled();
+  expect(errors.filter(error => !error.includes('Server unavailable'))).toEqual([]);
 });
