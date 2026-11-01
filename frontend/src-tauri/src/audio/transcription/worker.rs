@@ -258,13 +258,39 @@ async fn wait_for_transcription_workers(
     }
 }
 
+/// Stop accepting chunks as soon as the last worker drops its receiver.
+async fn dispatch_transcription_chunks(
+    mut receiver: tokio::sync::mpsc::UnboundedReceiver<AudioChunk>,
+    work_sender: &tokio::sync::mpsc::UnboundedSender<AudioChunk>,
+    chunks_queued: &AtomicU64,
+) -> Result<(), String> {
+    loop {
+        tokio::select! {
+            biased;
+            _ = work_sender.closed() => {
+                return Err("The speech recognition worker stopped during recording".to_string());
+            }
+            chunk = receiver.recv() => {
+                let Some(chunk) = chunk else { return Ok(()); };
+                let queued = chunks_queued.fetch_add(1, Ordering::SeqCst) + 1;
+                info!(
+                    "Dispatching chunk {} to workers (total queued: {})",
+                    chunk.chunk_id, queued
+                );
+                work_sender.send(chunk).map_err(|_| {
+                    "The speech recognition worker stopped during recording".to_string()
+                })?;
+            }
+        }
+    }
+}
+
 /// Run the transcription workers and report failures or missing chunks.
 pub fn start_transcription_task<R: Runtime>(
     app: AppHandle<R>,
     transcription_receiver: tokio::sync::mpsc::UnboundedReceiver<AudioChunk>,
-) -> (tokio::task::JoinHandle<Result<(), String>>, tokio::sync::oneshot::Receiver<Result<(), String>>) {
-    let (init_sender, init_receiver) = tokio::sync::oneshot::channel();
-    let task = tokio::spawn(async move {
+) -> tokio::task::JoinHandle<Result<(), String>> {
+    tokio::spawn(async move {
         info!("🚀 Starting optimized parallel transcription task - guaranteeing zero chunk loss");
 
         // Initialize transcription engine (Whisper or Parakeet based on config)
@@ -273,15 +299,9 @@ pub fn start_transcription_task<R: Runtime>(
             Ok(engine) => engine,
             Err(e) => {
                 error!("Failed to initialize transcription engine: {}", e);
-                // The recording owner must stop capture. It runs outside this
-                // task, because shutdown waits for this task to finish.
-                let _ = init_sender.send(Err(e.clone()));
                 return Err(e);
             }
         };
-        // A closed channel before this signal means that initialization did
-        // not finish, for example because this task panicked.
-        let _ = init_sender.send(Ok(()));
 
         // Create parallel workers for faster processing while preserving ALL chunks
         const NUM_WORKERS: usize = 1; // Serial processing ensures transcripts emit in chronological order
@@ -566,20 +586,14 @@ pub fn start_transcription_task<R: Runtime>(
             worker_handles.push(worker_handle);
         }
 
-        // Main dispatcher: receive chunks and distribute to workers
-        let mut receiver = transcription_receiver;
-        while let Some(chunk) = receiver.recv().await {
-            let queued = chunks_queued.fetch_add(1, Ordering::SeqCst) + 1;
-            info!(
-                "📥 Dispatching chunk {} to workers (total queued: {})",
-                chunk.chunk_id, queued
-            );
-
-            if let Err(_) = work_sender.send(chunk) {
-                error!("❌ Failed to send chunk to workers - this should not happen!");
-                break;
-            }
-        }
+        // Only workers may keep this receiver alive. Otherwise a failed
+        // worker leaves a live queue that accepts audio with no consumer.
+        drop(work_receiver);
+        let dispatch_result = dispatch_transcription_chunks(
+            transcription_receiver,
+            &work_sender,
+            &chunks_queued,
+        ).await;
 
         // Signal that input is finished
         input_finished.store(true, Ordering::SeqCst);
@@ -640,6 +654,7 @@ pub fn start_transcription_task<R: Runtime>(
         }
 
         worker_result?;
+        dispatch_result?;
         let queued = chunks_queued.load(Ordering::SeqCst);
         let completed = chunks_completed.load(Ordering::SeqCst);
         if queued != completed {
@@ -647,8 +662,7 @@ pub fn start_transcription_task<R: Runtime>(
         }
         info!("✅ Parallel transcription task completed - all workers finished, ready for model unload");
         Ok(())
-    });
-    (task, init_receiver)
+    })
 }
 
 /// Transcribe audio chunk using the appropriate provider (Whisper, Parakeet, or trait-based)
@@ -870,6 +884,80 @@ fn format_recording_time(seconds: f64) -> String {
         #[tokio::test]
         async fn completed_workers_return_success() {
             assert!(wait_for_transcription_workers(vec![tokio::spawn(async {})]).await.is_ok());
+        }
+
+        #[tokio::test]
+        async fn active_worker_panic_stops_dispatch_without_closing_audio_input() {
+            let (audio_sender, audio_receiver) = tokio::sync::mpsc::unbounded_channel();
+            let (work_sender, mut work_receiver) = tokio::sync::mpsc::unbounded_channel();
+            let (ready_sender, ready) = tokio::sync::oneshot::channel();
+            let (fail, failure) = tokio::sync::oneshot::channel();
+            let worker = tokio::spawn(async move {
+                let _chunk: AudioChunk = work_receiver.recv().await.unwrap();
+                ready_sender.send(()).unwrap();
+                failure.await.unwrap();
+                panic!("Injected live worker panic");
+            });
+            let dispatcher = tokio::spawn(async move {
+                let queued = AtomicU64::new(0);
+                let result = dispatch_transcription_chunks(audio_receiver, &work_sender, &queued).await;
+                drop(work_sender);
+                wait_for_transcription_workers(vec![worker]).await?;
+                result
+            });
+            audio_sender.send(chunk(0.0, None, 1600, 16000)).unwrap();
+            ready.await.unwrap();
+            fail.send(()).unwrap();
+            let error = tokio::time::timeout(std::time::Duration::from_secs(2), dispatcher)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap_err();
+            assert!(error.contains("Injected live worker panic"), "{error}");
+            assert!(
+                audio_sender.send(chunk(1.0, None, 1600, 16000)).is_err(),
+                "failed dispatch must not retain an input queue with no consumer"
+            );
+        }
+
+        #[tokio::test]
+        async fn closed_worker_receiver_is_detected_without_new_audio() {
+            let (_audio_sender, audio_receiver) = tokio::sync::mpsc::unbounded_channel();
+            let (work_sender, work_receiver) = tokio::sync::mpsc::unbounded_channel();
+            drop(work_receiver);
+            let queued = AtomicU64::new(0);
+            let error = tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                dispatch_transcription_chunks(audio_receiver, &work_sender, &queued),
+            )
+            .await
+            .unwrap()
+            .unwrap_err();
+            assert!(error.contains("stopped during recording"));
+            assert_eq!(queued.load(Ordering::SeqCst), 0);
+        }
+
+        #[tokio::test]
+        async fn normal_stop_dispatches_every_buffered_chunk_in_order() {
+            let (audio_sender, audio_receiver) = tokio::sync::mpsc::unbounded_channel();
+            let (work_sender, mut work_receiver) = tokio::sync::mpsc::unbounded_channel();
+            for id in 0..3 {
+                let mut audio = chunk(id as f64, None, 1600, 16000);
+                audio.chunk_id = id;
+                audio_sender.send(audio).unwrap();
+            }
+            drop(audio_sender);
+            let queued = AtomicU64::new(0);
+            dispatch_transcription_chunks(audio_receiver, &work_sender, &queued)
+                .await
+                .unwrap();
+            drop(work_sender);
+            let mut ids = Vec::new();
+            while let Some(audio) = work_receiver.recv().await {
+                ids.push(audio.chunk_id);
+            }
+            assert_eq!(ids, vec![0, 1, 2]);
+            assert_eq!(queued.load(Ordering::SeqCst), 3);
         }
 
         #[test]
