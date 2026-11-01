@@ -207,7 +207,9 @@ fn words(text: &str) -> Vec<String> {
 
 /// Word times can be wrong even when the words are there: Nemotron sometimes
 /// packs a sentence into one 80 ms step per word, seconds before it was said.
-/// Speech is only lost if most of the expected words are missing nearby too.
+/// A stretch counts as lost unless at least 60% of its expected words are
+/// found nearby, in order. This errs toward a warning, which never discards
+/// the run.
 fn words_nearby(proposal: &Proposal, expected: &[String], start: f64, end: f64) -> bool {
     const REACH_SECONDS: f64 = 10.0;
     let mut nearby: Vec<_> = proposal
