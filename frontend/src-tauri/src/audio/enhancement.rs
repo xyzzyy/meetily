@@ -2569,7 +2569,7 @@ mod tests {
         let staged = super::super::enhancement_review::load(&feature, "m1", &id)
             .await
             .unwrap();
-        assert!(staged.warnings[0].contains("speech at 00:50"), "{:?}", staged.warnings);
+        assert!(staged.warnings[0].contains("speech at 01:02"), "{:?}", staged.warnings);
     }
 
     #[tokio::test]

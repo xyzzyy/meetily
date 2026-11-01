@@ -158,7 +158,7 @@ fn baseline_gaps(proposal: &Proposal) -> Option<String> {
         // Saved rows have no word times, so estimate a stretch's words from
         // their place in the row.
         let saved = words(&row.transcript);
-        let lost = uncovered.into_iter().any(|(from, to)| {
+        let lost = uncovered.into_iter().find(|&(from, to)| {
             let place = |i: usize| start + (i as f64 + 0.5) / saved.len() as f64 * (end - start);
             let mut expected: Vec<String> = (0..saved.len())
                 .filter(|&i| (from..=to).contains(&place(i)))
@@ -174,8 +174,8 @@ fn baseline_gaps(proposal: &Proposal) -> Option<String> {
             }
             !words_nearby(proposal, &expected, from, to)
         });
-        if lost {
-            gaps.push(format!("{:02}:{:02}", start as u64 / 60, start as u64 % 60));
+        if let Some((from, _)) = lost {
+            gaps.push(format!("{:02}:{:02}", from as u64 / 60, from as u64 % 60));
         }
     }
     gaps.dedup();

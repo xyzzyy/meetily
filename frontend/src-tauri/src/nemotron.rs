@@ -1029,6 +1029,7 @@ fn times_from(
         let from = (run.start > 0).then(|| words[run.start - 1].2);
         let to = words.get(run.end).map(|w| w.1);
         if let (Some(from), Some(to)) = (from, to) {
+            let from = from.min(to);
             let step = (to - from).max(0.0) / run.len() as f64;
             for (n, k) in run.clone().enumerate() {
                 words[k].1 = from + step * n as f64;
@@ -1613,6 +1614,22 @@ mod tests {
         assert!(at("uh") >= 543_488.0 && at("uh") < 543_808.0, "{words:?}");
         assert_eq!(at("Sounds"), 546_844.0);
         assert!(words.windows(2).all(|pair| pair[0].1 <= pair[1].1));
+    }
+
+    #[test]
+    fn overlapping_tagged_words_keep_the_right_matched_start() {
+        let plain = timed(&[
+            ("a", 0.0, 100.0),
+            ("b", 100.0, 200.0),
+            ("c", 300.0, 400.0),
+            ("d", 500.0, 600.0),
+        ]);
+        let tagged = timed(&[("a", 0.0, 100.0), ("b", 100.0, 500.0), ("d", 300.0, 600.0)]);
+        let words = times_from(plain, &tagged);
+        assert_eq!(words[3], ("d".into(), 300.0, 600.0));
+        assert!(words[2].1 >= words[1].1 && words[2].1 <= words[3].1, "{words:?}");
+        assert!(words.iter().all(|word| word.2 >= word.1 + 1.0), "{words:?}");
+        assert!(words.windows(2).all(|pair| pair[0].1 <= pair[1].1), "{words:?}");
     }
 
     #[test]
