@@ -181,35 +181,36 @@ pub(crate) fn retime_collapsed_words(
             .iter()
             .map(|&i| tokens(&words[i].0).concat())
             .collect();
-        // Longest common subsequence of the saved and new words.
+        // Longest common subsequence of the saved and new words. Trace it
+        // from the end, so a sentence said twice gives this row the later copy.
         let mut table = vec![vec![0usize; found.len() + 1]; expected.len() + 1];
-        for a in (0..expected.len()).rev() {
-            for b in (0..found.len()).rev() {
-                table[a][b] = if expected[a] == found[b] {
-                    table[a + 1][b + 1] + 1
+        for a in 0..expected.len() {
+            for b in 0..found.len() {
+                table[a + 1][b + 1] = if expected[a] == found[b] {
+                    table[a][b] + 1
                 } else {
-                    table[a + 1][b].max(table[a][b + 1])
+                    table[a][b + 1].max(table[a + 1][b])
                 };
             }
         }
-        let matched = table[0][0];
+        let matched = table[expected.len()][found.len()];
         if matched < 4 || (matched as f64) < expected.len() as f64 * 0.6 {
             continue;
         }
-        let (mut a, mut b, mut first, mut last) = (0, 0, None, 0);
-        while a < expected.len() && b < found.len() {
-            if expected[a] == found[b] {
-                first.get_or_insert(candidates[b]);
-                last = candidates[b];
-                a += 1;
-                b += 1;
-            } else if table[a + 1][b] >= table[a][b + 1] {
-                a += 1;
+        let (mut a, mut b, mut first, mut last) = (expected.len(), found.len(), 0, None);
+        while a > 0 && b > 0 {
+            if expected[a - 1] == found[b - 1] {
+                last.get_or_insert(candidates[b - 1]);
+                first = candidates[b - 1];
+                a -= 1;
+                b -= 1;
+            } else if table[a - 1][b] >= table[a][b - 1] {
+                a -= 1;
             } else {
-                b += 1;
+                b -= 1;
             }
         }
-        let first = first.unwrap();
+        let last = last.unwrap();
         let count = last + 1 - first;
         let packed_ms = words[last].2 - words[first].1;
         if count as f64 <= packed_ms / 1000.0 * MAX_WORDS_PER_SECOND {
@@ -1458,10 +1459,20 @@ mod tests {
             .map(|(i, text)| (text.to_string(), 8_000.0 + i as f64 * 80.0, 8_080.0 + i as f64 * 80.0))
             .collect();
         words.push(("next".into(), 25_000.0, 25_300.0));
-        let words = retime_collapsed_words(words, &saved);
-        assert_eq!((words[0].1, words[5].2.round()), (10_000.0, 14_000.0));
-        assert_eq!((words[6].1, words[11].2.round()), (16_000.0, 21_000.0));
-        assert_eq!(words[12].1, 25_000.0);
+        let check = |words: Vec<(String, f64, f64)>, saved: &[Transcript]| {
+            let words = retime_collapsed_words(words, saved);
+            assert_eq!((words[0].1, words[5].2.round()), (10_000.0, 14_000.0));
+            assert_eq!((words[6].1, words[11].2.round()), (16_000.0, 21_000.0));
+            assert_eq!(words[12].1, 25_000.0);
+        };
+        check(words.clone(), &saved);
+        // A sentence said twice: each row takes its own copy.
+        let repeated = "yes I think that makes sense";
+        let saved = [saved_row(repeated, 10.0, 14.0), saved_row(repeated, 16.0, 21.0)];
+        for (word, text) in words.iter_mut().zip(repeated.split(' ').cycle()) {
+            word.0 = text.into();
+        }
+        check(words, &saved);
     }
 
     #[test]
