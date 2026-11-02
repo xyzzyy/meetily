@@ -224,11 +224,14 @@ pub async fn funasr_cancel_download(model_name: String) -> Result<bool, String> 
 }
 
 #[tauri::command]
-pub async fn funasr_delete_model(model_name: String) -> Result<String, String> {
-    engine()?
-        .delete_model(&model_name)
-        .await
-        .map_err(|error| error.to_string())?;
+pub async fn funasr_delete_model(model_name: String, partial_only: Option<bool>) -> Result<String, String> {
+    let engine = engine()?;
+    let result = if partial_only.unwrap_or(false) {
+        engine.delete_partial_files(&model_name).await
+    } else {
+        engine.delete_model(&model_name).await
+    };
+    result.map_err(|error| error.to_string())?;
     Ok(format!("Deleted {model_name}"))
 }
 

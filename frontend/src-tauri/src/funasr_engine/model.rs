@@ -74,6 +74,10 @@ pub struct ModelInfo {
     pub name: String,
     pub display_name: String,
     pub path: PathBuf,
+    #[serde(default)]
+    pub encoder_is_shared: bool,
+    #[serde(default)]
+    pub decoder_is_shared: bool,
     pub encoder_available: bool,
     pub has_partial_download: bool,
     pub has_orphaned_encoder: bool,

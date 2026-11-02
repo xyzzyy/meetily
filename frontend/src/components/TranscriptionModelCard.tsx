@@ -42,6 +42,9 @@ export function modelCardStatus(status: EngineModelStatus, options: CardStatusOp
 
 interface TranscriptionModelCardProps {
   displayName: string;
+  isShared?: boolean;
+  storageNote?: string;
+  canDelete?: boolean;
   icon?: string;
   description?: string;
   details?: string[];
@@ -63,6 +66,9 @@ const deleteIconClass = 'text-gray-400 dark:text-ink-400 hover:text-red-600 dark
 
 export function TranscriptionModelCard({
   displayName,
+  isShared,
+  storageNote,
+  canDelete,
   icon,
   description,
   details = [],
@@ -78,6 +84,10 @@ export function TranscriptionModelCard({
   onDelete,
 }: TranscriptionModelCardProps) {
   const available = status.kind === 'available';
+  const deletionAllowed = canDelete ?? !isShared;
+  const sourceNote = storageNote ?? (isShared === undefined ? undefined
+    : isShared ? 'Shared from official Meetily. Read-only in Branch.'
+    : available || status.kind === 'corrupted' ? 'Saved in Meetily Branch.' : 'Downloads are saved in Meetily Branch.');
   const isSelected = selected && available;
   const partial = (status.kind === 'missing' || status.kind === 'error') && status.partial;
 
@@ -131,7 +141,7 @@ export function TranscriptionModelCard({
                 <span className="h-2 w-2 rounded-full bg-green-500" aria-hidden="true" />
                 Ready
               </span>
-              <Button
+              {deletionAllowed && <Button
                 variant="ghost"
                 size="icon"
                 className={`h-8 w-8 ${deleteIconClass} ${isSelected ? 'opacity-50' : ''}`}
@@ -141,13 +151,13 @@ export function TranscriptionModelCard({
                 onClick={selectionLocked ? undefined : onDelete}
               >
                 <Trash2 className="h-4 w-4" />
-              </Button>
+              </Button>}
             </>
           )}
 
           {(status.kind === 'missing' || status.kind === 'error') && (
             <>
-              {partial && (
+              {partial && deletionAllowed && (
                 <Button
                   variant="ghost"
                   size="icon"
@@ -168,7 +178,7 @@ export function TranscriptionModelCard({
 
           {status.kind === 'corrupted' && (
             <>
-              <Button
+              {deletionAllowed && <Button
                 variant="ghost"
                 size="icon"
                 className={`h-8 w-8 ${deleteIconClass}`}
@@ -177,7 +187,7 @@ export function TranscriptionModelCard({
                 onClick={onDelete}
               >
                 <Trash2 className="h-4 w-4" />
-              </Button>
+              </Button>}
               <Button variant="blue" size="sm" onClick={onDownload}>
                 <RotateCcw className="h-4 w-4" />
                 Re-download
@@ -186,6 +196,12 @@ export function TranscriptionModelCard({
           )}
         </div>
       </div>
+
+      {sourceNote && status.kind !== 'downloading' && (
+        <p className="mt-2 text-xs text-gray-500 dark:text-ink-400">
+          {sourceNote}
+        </p>
+      )}
 
       {status.kind === 'downloading' && (
         <div className="mt-3 space-y-1.5 border-t border-gray-200 dark:border-ink-800 pt-3">
@@ -227,7 +243,7 @@ export function TranscriptionModelCard({
       )}
       {status.kind === 'corrupted' && (
         <p className="mt-2 text-xs text-orange-700 dark:text-orange-300">
-          The model files are incomplete or damaged. Delete them or download the model again.
+          {isShared ? 'The shared model files are damaged. Download a copy for Branch.' : 'The model files are incomplete or damaged. Delete them or download the model again.'}
         </p>
       )}
     </div>
