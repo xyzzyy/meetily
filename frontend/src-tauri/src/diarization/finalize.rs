@@ -402,7 +402,7 @@ async fn run_inner<R: Runtime>(
     }
 
     emit_progress(app, meeting_id, "rebuilding_windows", 45, None);
-    let mut windows = rebuild_windows(&response.intervals);
+    let mut windows = rebuild_windows(&drop_microphone_echo(&response.intervals));
     stabilize_speaker_ids(&mut windows, live_speakers);
     let assigned_coverage = assignment_coverage(&windows, live_transcripts);
     if windows.iter().any(|window| window.is_overlap) {
@@ -1025,6 +1025,84 @@ fn resolve_sidecar_binary() -> Result<PathBuf> {
         .into_iter()
         .find(|path| path.exists())
         .ok_or_else(|| anyhow!("Bundled diarization sidecar is missing"))
+}
+
+/// Laptop speakers play the other side of a call into the microphone. The
+/// microphone track then has a voice that talks almost only while the system
+/// track talks, and every remote turn looks like two people speaking. For such
+/// a voice, drop its microphone speech while the system track has speech; the
+/// system track already holds that speech. Its remaining speech is kept.
+fn drop_microphone_echo(intervals: &[SidecarInterval]) -> Vec<SidecarInterval> {
+    const ECHO_SHARE: f64 = 0.8;
+    let valid = |interval: &&SidecarInterval| {
+        interval.start.is_finite() && interval.end.is_finite() && interval.end > interval.start
+    };
+    let mut system = intervals
+        .iter()
+        .filter(valid)
+        .filter(|interval| interval.source == "system")
+        .map(|interval| (interval.start, interval.end))
+        .collect::<Vec<_>>();
+    system.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let mut system_speech: Vec<(f64, f64)> = Vec::new();
+    for (start, end) in system {
+        match system_speech.last_mut() {
+            Some(last) if start <= last.1 => last.1 = last.1.max(end),
+            _ => system_speech.push((start, end)),
+        }
+    }
+    let outside_system = |start: f64, end: f64| {
+        let mut pieces = Vec::new();
+        let mut cursor = start;
+        for &(speech_start, speech_end) in &system_speech {
+            if speech_end <= cursor || speech_start >= end {
+                continue;
+            }
+            if speech_start > cursor {
+                pieces.push((cursor, speech_start));
+            }
+            cursor = cursor.max(speech_end);
+        }
+        if cursor < end {
+            pieces.push((cursor, end));
+        }
+        pieces
+    };
+    let mut speech: HashMap<&str, (f64, f64)> = HashMap::new();
+    for interval in intervals
+        .iter()
+        .filter(valid)
+        .filter(|interval| interval.source == "microphone")
+    {
+        let solo = outside_system(interval.start, interval.end)
+            .iter()
+            .map(|(start, end)| end - start)
+            .sum::<f64>();
+        let entry = speech.entry(&interval.speaker_id).or_default();
+        entry.0 += interval.end - interval.start;
+        entry.1 += solo;
+    }
+    let echo = speech
+        .into_iter()
+        .filter(|(_, (total, solo))| (total - solo) / total >= ECHO_SHARE)
+        .map(|(speaker, _)| speaker)
+        .collect::<BTreeSet<_>>();
+    intervals
+        .iter()
+        .flat_map(|interval| {
+            if interval.source != "microphone" || !echo.contains(interval.speaker_id.as_str()) {
+                return vec![interval.clone()];
+            }
+            outside_system(interval.start, interval.end)
+                .into_iter()
+                .map(|(start, end)| SidecarInterval {
+                    start,
+                    end,
+                    ..interval.clone()
+                })
+                .collect()
+        })
+        .collect()
 }
 
 fn rebuild_windows(intervals: &[SidecarInterval]) -> Vec<FinalWindow> {
@@ -2256,6 +2334,50 @@ mod tests {
             .iter()
             .filter(|window| window.end <= 1.0 || window.start >= 2.0)
             .all(|window| !window.is_overlap));
+    }
+
+    #[test]
+    fn remote_speech_heard_by_the_microphone_is_not_a_second_speaker() {
+        // Laptop speakers: the microphone hears the remote side as its own
+        // voice, plus one short phrase of local speech.
+        let intervals = [
+            source_interval("system", "remote", 0.0, 10.0),
+            source_interval("microphone", "echo", 0.0, 10.0),
+            source_interval("system", "remote", 12.0, 20.0),
+            source_interval("microphone", "echo", 12.0, 20.0),
+            source_interval("microphone", "echo", 20.0, 21.0),
+            source_interval("microphone", "local", 22.0, 30.0),
+            source_interval("microphone", "local", 30.0, 31.0),
+            source_interval("system", "remote", 30.0, 31.0),
+        ];
+        let rows = [
+            live_row("remote", 0.0, 10.0),
+            live_row("local", 22.0, 30.0),
+            live_row("both", 30.0, 31.0),
+        ];
+        let labels = HashMap::from([
+            ("remote".to_string(), "Remote".to_string()),
+            ("local".to_string(), "Local".to_string()),
+        ]);
+        let before = label_existing_transcripts(&rows, &rebuild_windows(&intervals), &labels);
+        assert_eq!(before[0].speaker_label, "Multiple speakers");
+
+        let windows = rebuild_windows(&drop_microphone_echo(&intervals));
+        let after = label_existing_transcripts(&rows, &windows, &labels);
+        assert_eq!(after[0].speaker_label, "Remote");
+        assert_eq!(after[1].speaker_label, "Local");
+        assert!(
+            after[2].is_overlap,
+            "real simultaneous speech stays ambiguous"
+        );
+        assert!(
+            windows
+                .iter()
+                .any(|w| w.speaker_id.as_deref() == Some("echo")
+                    && w.start == 20.0
+                    && w.end == 21.0),
+            "keep microphone speech while the system track is silent"
+        );
     }
 
     fn enhancement_analysis(intervals: &[SidecarInterval]) -> EnhancementSpeakerAnalysis {
