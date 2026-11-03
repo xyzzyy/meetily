@@ -302,6 +302,12 @@ impl ContinuousVadProcessor {
             self.process_chunk(&padded_chunk)?;
         }
 
+        // A candidate below the minimum is not yet a speech segment.
+        if self.in_speech && !self.minimum_passed {
+            self.current_speech.clear();
+            self.in_speech = false;
+        }
+
         // Force end any ongoing speech
         if self.in_speech && !self.current_speech.is_empty() {
             let real_sample_count = real_end_sample
@@ -558,6 +564,27 @@ where
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn stop_discards_speech_before_the_minimum_duration() {
+        let audio = generate_test_audio_with_speech(5.0, 16000);
+        let mut live = super::ContinuousVadProcessor::new(16000, 500).unwrap();
+        let mut endpoint = None;
+        for (index, chunk) in audio.chunks_exact(512).enumerate() {
+            assert!(live.process_audio(chunk).unwrap().is_empty());
+            if live.in_speech {
+                endpoint = Some((index + 1) * 512);
+                break;
+            }
+        }
+        let endpoint = endpoint.expect("fixture must start a speech candidate");
+        assert!(!live.minimum_passed);
+        assert!(super::batch_speech_segments(&audio[..endpoint], 500, |_, _| true)
+            .unwrap().is_empty());
+        assert!(live.flush().unwrap().is_empty());
+        assert!(!live.in_speech);
+        assert!(live.current_speech.is_empty());
+    }
+
     #[test]
     fn live_detection_matches_batch_and_keeps_the_named_audio() {
         let audio = generate_test_audio_with_speech(30.0, 16000);
