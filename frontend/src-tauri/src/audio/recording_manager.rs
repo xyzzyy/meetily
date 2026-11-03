@@ -643,6 +643,17 @@ impl RecordingManager {
         self.recording_saver.get_meeting_folder().map(|p| p.clone())
     }
 
+    /// Create the meeting folder under `base_folder`, as starting a recording does.
+    #[cfg(test)]
+    pub(crate) fn prepare_meeting_folder_at_for_test(
+        &mut self,
+        base_folder: &std::path::PathBuf,
+        meeting_name: &str,
+    ) -> Result<()> {
+        self.recording_saver
+            .initialize_meeting_folder_at(base_folder, meeting_name, false)
+    }
+
     /// Take ownership of the device event receiver for use by a background processor.
     pub fn take_device_event_receiver(&mut self) -> Option<mpsc::UnboundedReceiver<DeviceEvent>> {
         self.device_event_receiver.take()
