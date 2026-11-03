@@ -8,6 +8,7 @@ pub mod parakeet_provider;
 pub mod funasr_provider;
 pub mod engine;
 pub mod worker;
+mod live_context;
 
 // Re-export commonly used types
 pub use provider::{TranscriptionError, TranscriptionProvider, TranscriptResult};
