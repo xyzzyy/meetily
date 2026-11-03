@@ -282,7 +282,7 @@ impl RecordingSaver {
 
     /// Prepare storage under the supplied base path. Publish saver state only
     /// after the folder, audio saver, and initial metadata are ready.
-    fn initialize_meeting_folder_at(
+    pub(super) fn initialize_meeting_folder_at(
         &mut self,
         base_folder: &PathBuf,
         meeting_name: &str,

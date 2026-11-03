@@ -459,11 +459,11 @@ pub async fn start_recording_with_meeting_name<R: Runtime>(
     // Emit success event
     let start_event_result = app.emit(
         "recording-started",
-        serde_json::json!({
-            "message": "Recording started successfully with parallel processing",
-            "devices": ["Default Microphone", "Default System Audio"],
-            "workers": 3
-        }),
+        recording_started_payload(
+            &RECORDING_MANAGER,
+            "Recording started successfully with parallel processing",
+            ["Default Microphone".to_string(), "Default System Audio".to_string()],
+        ),
     )
     .map_err(|e| e.to_string());
 
@@ -645,14 +645,14 @@ pub async fn start_recording_with_devices_and_meeting<R: Runtime>(
     // Emit success event
     let start_event_result = app.emit(
         "recording-started",
-        serde_json::json!({
-            "message": "Recording started with custom devices and parallel processing",
-            "devices": [
+        recording_started_payload(
+            &RECORDING_MANAGER,
+            "Recording started with custom devices and parallel processing",
+            [
                 mic_device_name.unwrap_or_else(|| "Default Microphone".to_string()),
-                system_device_name.unwrap_or_else(|| "Default System Audio".to_string())
+                system_device_name.unwrap_or_else(|| "Default System Audio".to_string()),
             ],
-            "workers": 3
-        }),
+        ),
     )
     .map_err(|e| e.to_string());
 
@@ -1300,14 +1300,31 @@ pub async fn get_recording_state() -> serde_json::Value {
 /// Returns the path if a meeting name was set and folder structure initialized
 #[tauri::command]
 pub async fn get_meeting_folder_path() -> Result<Option<String>, String> {
-    let manager_guard = RECORDING_MANAGER.lock().unwrap();
-    if let Some(manager) = manager_guard.as_ref() {
-        Ok(manager
-            .get_meeting_folder()
-            .map(|p| p.to_string_lossy().to_string()))
-    } else {
-        Ok(None)
-    }
+    Ok(meeting_folder_of(&RECORDING_MANAGER))
+}
+
+/// Folder of the recording held by `manager`, if any.
+fn meeting_folder_of(manager: &Mutex<Option<RecordingManager>>) -> Option<String> {
+    let manager_guard = manager.lock().unwrap();
+    manager_guard
+        .as_ref()
+        .and_then(|manager| manager.get_meeting_folder())
+        .map(|path| path.to_string_lossy().to_string())
+}
+
+/// Payload of `recording-started`. It carries the folder so the frontend can
+/// save it with the crash-recovery record from the start.
+fn recording_started_payload(
+    manager: &Mutex<Option<RecordingManager>>,
+    message: &str,
+    devices: [String; 2],
+) -> serde_json::Value {
+    serde_json::json!({
+        "message": message,
+        "devices": devices,
+        "workers": 3,
+        "folder_path": meeting_folder_of(manager)
+    })
 }
 
 /// Get accumulated transcript segments from current recording session
@@ -1795,6 +1812,37 @@ mod unload_tests {
     fn unknown_providers_do_not_fall_back_to_whisper() {
         assert_eq!(model_to_unload(Some("deepgram")), ModelUnload::None);
         assert_eq!(model_to_unload(Some("bogus")), ModelUnload::None);
+    }
+}
+
+#[cfg(test)]
+mod recording_started_tests {
+    use super::{recording_started_payload, RecordingManager};
+    use std::sync::Mutex;
+
+    fn devices() -> [String; 2] {
+        ["Microphone".to_string(), "System audio".to_string()]
+    }
+
+    #[test]
+    fn start_event_carries_the_started_recording_folder() {
+        let base = tempfile::tempdir().unwrap();
+        let mut started = RecordingManager::new();
+        started
+            .prepare_meeting_folder_at_for_test(&base.path().to_path_buf(), "Standup")
+            .unwrap();
+        let folder = started.get_meeting_folder().unwrap();
+        assert!(folder.starts_with(base.path()));
+
+        let payload = recording_started_payload(&Mutex::new(Some(started)), "Started", devices());
+        assert_eq!(payload["folder_path"], folder.to_string_lossy().as_ref());
+        assert_eq!(payload["devices"], serde_json::json!(["Microphone", "System audio"]));
+    }
+
+    #[test]
+    fn start_event_has_no_folder_without_a_recording() {
+        let payload = recording_started_payload(&Mutex::new(None), "Started", devices());
+        assert!(payload["folder_path"].is_null());
     }
 }
 

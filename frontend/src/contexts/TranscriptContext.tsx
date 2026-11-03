@@ -92,7 +92,7 @@ export function TranscriptProvider({ children }: { children: ReactNode }) {
         await indexedDBService.init();
 
         // Listen for recording-started event
-        unlistenRecordingStarted = await recordingService.onRecordingStarted(async () => {
+        unlistenRecordingStarted = await recordingService.onRecordingStarted(async (payload) => {
           try {
             // Generate unique meeting ID
             const meetingId = `meeting-${Date.now()}`;
@@ -116,27 +116,12 @@ export function TranscriptProvider({ children }: { children: ReactNode }) {
               lastUpdated: Date.now(),
               transcriptCount: 0,
               savedToSQLite: false,
-              folderPath: undefined // Will update shortly
+              // Saved with the record so a crash can never leave it without the folder
+              folderPath: payload?.folder_path ?? undefined
             });
 
             // Synchronize meeting title to state (fixes tray stop title issue)
             setMeetingTitle(effectiveTitle);
-
-            // Fetch folder path from backend and update metadata
-            // This ensures folder path is persisted even if app crashes
-            try {
-              const { invoke } = await import('@tauri-apps/api/core');
-              const folderPath = await invoke<string>('get_meeting_folder_path');
-              if (folderPath) {
-                const metadata = await indexedDBService.getMeetingMetadata(meetingId);
-                if (metadata) {
-                  metadata.folderPath = folderPath;
-                  await indexedDBService.saveMeetingMetadata(metadata);
-                }
-              }
-            } catch (error) {
-              // Non-fatal - will be set on stop if recording completes normally
-            }
           } catch (error) {
             console.error('Failed to initialize meeting in IndexedDB:', error);
           }
