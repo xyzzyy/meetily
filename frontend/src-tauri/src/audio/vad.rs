@@ -218,7 +218,7 @@ impl ContinuousVadProcessor {
         // Inference frames are independent of capture callback size.
         while self.buffer.len() >= self.chunk_size {
             let chunk: Vec<f32> = self.buffer.drain(..self.chunk_size).collect();
-            self.process_chunk(&chunk)?;
+            self.process_chunk(&chunk, chunk.len())?;
 
             // Extract any completed speech segments
             while let Some(segment) = self.speech_segments.pop_front() {
@@ -291,6 +291,7 @@ impl ContinuousVadProcessor {
         // Process any remaining buffered audio
         if !self.buffer.is_empty() {
             let remaining = self.buffer.clone();
+            let real_samples = remaining.len();
             self.buffer.clear();
 
             // Pad to chunk size if needed
@@ -299,7 +300,7 @@ impl ContinuousVadProcessor {
                 padded_chunk.resize(self.chunk_size, 0.0);
             }
 
-            self.process_chunk(&padded_chunk)?;
+            self.process_chunk(&padded_chunk, real_samples)?;
         }
 
         // A candidate below the minimum is not yet a speech segment.
@@ -358,7 +359,7 @@ impl ContinuousVadProcessor {
         Ok(completed_segments)
     }
 
-    fn process_chunk(&mut self, chunk: &[f32]) -> Result<()> {
+    fn process_chunk(&mut self, chunk: &[f32], real_samples: usize) -> Result<()> {
         if self.current_speech.len() > 1_000_000 {
             warn!(
                 "VAD: Accumulated speech buffer is large: {} samples ({:.1}s)",
@@ -385,6 +386,8 @@ impl ContinuousVadProcessor {
             .map_err(|e| anyhow!("VAD processing failed: {e:?}"))?
             .first()
             .ok_or_else(|| anyhow!("VAD returned no probability"))?;
+        // Padding is needed for inference, but is not captured audio.
+        let chunk = &chunk[..real_samples];
         let per_ms = VAD_SAMPLE_RATE as usize / 1000;
         let config = self.config;
         if probability < config.negative_speech_threshold {
@@ -564,6 +567,34 @@ where
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn stop_counts_real_samples_at_the_minimum_duration() {
+        let audio = generate_test_audio_with_speech(5.0, 16000);
+        for tail in [1, 416, 417] {
+            let mut live = super::ContinuousVadProcessor::new(16000, 500).unwrap();
+            let mut endpoint = None;
+            for (index, chunk) in audio.chunks_exact(512).enumerate() {
+                assert!(live.process_audio(chunk).unwrap().is_empty());
+                if live.in_speech && live.speech_samples == 7 * 512 {
+                    endpoint = Some((index + 1) * 512);
+                    break;
+                }
+            }
+            let endpoint = endpoint.expect("fixture must start a speech candidate");
+            let end = endpoint + tail;
+            assert!(live.process_audio(&audio[endpoint..end]).unwrap().is_empty());
+            assert!(live.in_speech);
+            assert_eq!(live.speech_samples, 7 * 512);
+            assert!(!live.minimum_passed);
+            // The 250 ms minimum is 4000 real post-start samples. Padding
+            // must not promote a candidate at or below that boundary.
+            let segments = live.flush().unwrap();
+            assert_eq!(segments.is_empty(), tail <= 416, "tail={tail}");
+            assert!(!live.in_speech);
+            assert!(live.current_speech.is_empty());
+        }
+    }
+
     #[test]
     fn stop_discards_speech_before_the_minimum_duration() {
         let audio = generate_test_audio_with_speech(5.0, 16000);
