@@ -23,14 +23,13 @@ The Download button fetches the runtime archive, the encoder and the chosen deco
 
 ## Transcription
 
-Live speech detection scores supported 512-sample frames. The previous 480-sample frames could omit speech before it reached the model. In a replay of a 150-second section, the old detector retained about 57 seconds; the batch detector retained about 132 seconds with the same speech thresholds. Short, incorrect lines can thus come from missing audio as well as insufficient model context.
+Live speech detection scores supported 512-sample frames. The previous 480-sample frames could omit speech before it reached the model. In a replay of a 150-second section, the old detector retained about 57 seconds; the corrected live detector retained about 132 seconds with the same speech thresholds. Q2 recovered continuous sentences from those segments without an added context wait. Recognition errors remained.
 
 Finish or cancel any Nemotron download in Settings before you start transcription. If a download or another model load is in progress, Meetily shows an error instead of waiting at "Loading Nemotron".
 
 Meetily starts `nemo-speech serve` on a free loopback port with a random API key in its environment, and stops it when transcription ends. Audio goes to `/v1/chat/completions` as 16 kHz mono WAV. One text request covers up to one minute, cut at a quiet point. Longer requests can come back with fluent text that nobody said, and the runtime still reports it as aligned: on a 17 minute meeting, one 5 minute request returned an invented talk about database sharding.
 
-- Live recording groups nearby short speech segments within a 30 second window. It keeps the silence between segments and waits up to 30 seconds for more context. Stop sends any remaining speech. Short isolated clips can still give incorrect text, even with English selected: a 2.23 second English clip returned Russian, while its 30 second context returned English. Grouping reduced this language error in a test of the affected recording, but word errors remained.
-- Import sends each speech segment and uses the text.
+- Live recording and import send each speech segment and use the text.
 - Enhance without speaker labels sends sentence-length segments and builds rows from the model's word times.
 - Enhance with speaker labels on (the app's speaker setting) sends the whole recording for speakers, up to one hour per request, and the text in one minute pieces. It uses the model's own speakers. Their turns go through Meetily's speaker matching, so remembered voices are still named. Rows end where the speaker changes. Speaker numbers start again in each hour of a longer recording.
 

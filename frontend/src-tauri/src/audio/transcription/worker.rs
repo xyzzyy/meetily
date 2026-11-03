@@ -568,20 +568,7 @@ pub fn start_transcription_task<R: Runtime>(
 
         // Main dispatcher: receive chunks and distribute to workers
         let mut receiver = transcription_receiver;
-        let mut pending = None;
-        let needs_context = transcription_engine.provider_name() == "Nemotron";
-        loop {
-            let chunk = if needs_context {
-                super::live_context::next_context(
-                    &mut receiver,
-                    &mut pending,
-                    std::time::Duration::from_secs(30),
-                )
-                .await
-            } else {
-                receiver.recv().await
-            };
-            let Some(chunk) = chunk else { break };
+        while let Some(chunk) = receiver.recv().await {
             let queued = chunks_queued.fetch_add(1, Ordering::SeqCst) + 1;
             info!(
                 "📥 Dispatching chunk {} to workers (total queued: {})",
