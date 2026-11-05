@@ -25,6 +25,8 @@ The Download button fetches the runtime archive, the encoder and the chosen deco
 
 Live speech detection scores supported 512-sample frames. The previous 480-sample frames could omit speech before it reached the model. In a replay of a 150-second section, the old detector retained about 57 seconds; the corrected live detector retained about 132 seconds with the same speech thresholds. Q2 recovered continuous sentences from those segments without an added context wait. Recognition errors remained.
 
+A [controlled speech preservation test](live-vad-proof.md) also checks a specific ten-second interval: the old detector sent none of its 160,000 samples to transcription; the corrected detector sent all of them unchanged. This proves the audio-loss fix for that case. It does not establish a Branch-versus-stable regression.
+
 Finish or cancel any Nemotron download in Settings before you start transcription. If a download or another model load is in progress, Meetily shows an error instead of waiting at "Loading Nemotron".
 
 Meetily starts `nemo-speech serve` on a free loopback port with a random API key in its environment, and stops it when transcription ends. Audio goes to `/v1/chat/completions` as 16 kHz mono WAV. One text request covers up to one minute, cut at a quiet point. Longer requests can come back with fluent text that nobody said, and the runtime still reports it as aligned: on a 17 minute meeting, one 5 minute request returned an invented talk about database sharding.

@@ -636,6 +636,49 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires MEETILY_VAD_PCM and MEETILY_VAD_SPEECH_START/END (seconds)"]
+    fn recording_keeps_confirmed_speech() {
+        // Use a private recording decoded to mono 16 kHz little-endian f32.
+        // The interval must be checked against the recording, not VAD output.
+        let bytes = std::fs::read(std::env::var("MEETILY_VAD_PCM").unwrap()).unwrap();
+        assert_eq!(bytes.len() % 4, 0);
+        let audio: Vec<f32> = bytes.chunks_exact(4)
+            .map(|value| f32::from_le_bytes(value.try_into().unwrap()))
+            .collect();
+        let sample_index = |name| {
+            let seconds: f64 = std::env::var(name).unwrap().parse().unwrap();
+            assert!(seconds.is_finite() && seconds >= 0.0);
+            (seconds * 16000.0).round() as usize
+        };
+        let start = sample_index("MEETILY_VAD_SPEECH_START");
+        let end = sample_index("MEETILY_VAD_SPEECH_END");
+        assert!(start < end && end <= audio.len());
+        let mut retained = vec![false; end - start];
+        let mut live = super::ContinuousVadProcessor::new(16000, 500).unwrap();
+        let mut segments = Vec::new();
+        for chunk in audio.chunks(9600) {
+            segments.extend(live.process_audio(chunk).unwrap());
+        }
+        segments.extend(live.flush().unwrap());
+        for segment in segments {
+            let offset = (segment.start_timestamp_ms * 16.0).round() as usize;
+            let first = start.max(offset);
+            let last = end.min(offset + segment.samples.len());
+            if first < last {
+                assert_eq!(
+                    &segment.samples[first - offset..last - offset],
+                    &audio[first..last],
+                    "retained samples must match their source position"
+                );
+                retained[first - start..last - start].fill(true);
+            }
+        }
+        let count = retained.iter().filter(|&&value| value).count();
+        println!("Confirmed speech samples forwarded: {count}/{}", end - start);
+        assert_eq!(count, end - start, "confirmed speech was removed before transcription");
+    }
+
+    #[test]
     #[ignore = "requires MEETILY_VAD_AUDIO and MEETILY_VAD_OUTPUT"]
     fn replay_live_and_batch_detection() {
         let audio = crate::audio::decoder::decode_audio_file(std::path::Path::new(
