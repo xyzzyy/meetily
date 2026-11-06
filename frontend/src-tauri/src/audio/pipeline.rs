@@ -15,6 +15,7 @@ use super::capture_resampler::CaptureResampler;
 use super::devices::AudioDevice;
 use super::diarization_stems::StemWindow;
 use super::recording_state::{AudioChunk, AudioError, DeviceType, RecordingState, SourceActivity};
+use super::source_gate::SourceGatedInput;
 use super::vad::{ContinuousVadProcessor, SpeechSegment};
 
 /// How long a silence must last before the VAD closes a speech segment, and
@@ -762,6 +763,8 @@ pub struct AudioPipeline {
     transcription_sender: mpsc::UnboundedSender<AudioChunk>,
     state: Arc<RecordingState>,
     vad_processor: ContinuousVadProcessor,
+    /// Silences each source outside its own speech before the transcription mix.
+    source_gate: SourceGatedInput,
     sample_rate: u32,
     chunk_id_counter: u64,
     // Performance optimization: reduce logging frequency
@@ -846,6 +849,8 @@ impl AudioPipeline {
             VAD_REDEMPTION_TIME_MS
         );
 
+        let source_gate = SourceGatedInput::new(sample_rate, VAD_REDEMPTION_TIME_MS)?;
+
         // Initialize professional audio mixing components
         let ring_buffer = AudioMixerRingBuffer::new(sample_rate);
         let mixer = ProfessionalAudioMixer::new(sample_rate);
@@ -858,6 +863,7 @@ impl AudioPipeline {
             transcription_sender,
             state,
             vad_processor,
+            source_gate,
             sample_rate,
             chunk_id_counter: 0,
             // Performance optimization: reduce logging frequency
@@ -987,8 +993,33 @@ impl AudioPipeline {
         // Previous 2x gain was causing excessive limiting/distortion
         let mixed_with_gain = mixed_clean;
 
-        // STEP 3: Send mixed audio for transcription (VAD + Whisper)
-        match self.vad_processor.process_audio(&mixed_with_gain) {
+        // STEP 3: Transcribe each source only inside its own speech. Steady
+        // noise on one source must not hide speech on the other (see source_gate).
+        let (gated_mic, gated_sys) = self.source_gate.push(&mic_window, &sys_window);
+        self.transcribe_gated(&gated_mic, &gated_sys);
+
+        // STEP 4: Send mixed audio for recording (WAV file)
+        if let Some(ref sender) = self.recording_sender_for_mixed {
+            let recording_chunk = AudioChunk {
+                data: mixed_with_gain.clone(),
+                sample_rate: self.sample_rate,
+                timestamp,
+                end_timestamp: None,
+                chunk_id: self.chunk_id_counter,
+                device_type: DeviceType::Microphone, // Mixed audio
+                source_activity: None,
+            };
+            let _ = sender.send(recording_chunk);
+        }
+    }
+
+    /// Mix gated source audio and send its speech segments for transcription.
+    fn transcribe_gated(&mut self, microphone: &[f32], system: &[f32]) {
+        if microphone.is_empty() && system.is_empty() {
+            return;
+        }
+        let mixed = self.mixer.mix_window(microphone, system);
+        match self.vad_processor.process_audio(&mixed) {
             Ok(speech_segments) => {
                 for segment in speech_segments {
                     let duration_ms = segment.end_timestamp_ms - segment.start_timestamp_ms;
@@ -1032,20 +1063,6 @@ impl AudioPipeline {
                 warn!("⚠️ VAD error: {}", e);
             }
         }
-
-        // STEP 4: Send mixed audio for recording (WAV file)
-        if let Some(ref sender) = self.recording_sender_for_mixed {
-            let recording_chunk = AudioChunk {
-                data: mixed_with_gain.clone(),
-                sample_rate: self.sample_rate,
-                timestamp,
-                end_timestamp: None,
-                chunk_id: self.chunk_id_counter,
-                device_type: DeviceType::Microphone, // Mixed audio
-                source_activity: None,
-            };
-            let _ = sender.send(recording_chunk);
-        }
     }
 
     fn flush_remaining_audio(&mut self) -> Result<()> {
@@ -1057,6 +1074,9 @@ impl AudioPipeline {
         if let Some((mic_window, sys_window)) = self.ring_buffer.extract_remaining() {
             self.process_window(mic_window, sys_window, self.source_timeline_seconds);
         }
+        // Release the audio still waiting for its source speech decision.
+        let (gated_mic, gated_sys) = self.source_gate.finish();
+        self.transcribe_gated(&gated_mic, &gated_sys);
 
         let final_segments = self.vad_processor.flush();
         forward_final_segments(final_segments, |segment| {
@@ -1604,6 +1624,64 @@ mod tests {
                 .system_active
         );
     }
+    /// Replays saved microphone and system stems (mono f32 at 48 kHz) through
+    /// the live pipeline and writes every transcription segment it sends.
+    #[tokio::test]
+    #[ignore = "requires MEETILY_REPLAY_MICROPHONE, MEETILY_REPLAY_SYSTEM, and MEETILY_REPLAY_OUTPUT"]
+    async fn replay_saved_stems_through_live_pipeline() {
+        let read = |key: &str| -> Vec<f32> {
+            let path = std::env::var(key).unwrap_or_else(|_| panic!("set {key}"));
+            std::fs::read(path)
+                .unwrap()
+                .chunks_exact(4)
+                .map(|bytes| f32::from_le_bytes(bytes.try_into().unwrap()))
+                .collect()
+        };
+        let microphone = read("MEETILY_REPLAY_MICROPHONE");
+        let system = read("MEETILY_REPLAY_SYSTEM");
+        let output = std::path::PathBuf::from(
+            std::env::var("MEETILY_REPLAY_OUTPUT").expect("set MEETILY_REPLAY_OUTPUT"),
+        );
+        std::fs::create_dir_all(&output).unwrap();
+        let (pipeline, sender, _recording, _stems, mut transcription) = pipeline_for_test(48000);
+        let task = tokio::spawn(pipeline.run());
+        // 10 ms capture callbacks, alternating sources as the capture streams do.
+        for (id, (mic, sys)) in microphone.chunks(480).zip(system.chunks(480)).enumerate() {
+            for (device_type, data) in [(DeviceType::Microphone, mic), (DeviceType::System, sys)] {
+                sender
+                    .send(AudioChunk {
+                        data: data.to_vec(),
+                        sample_rate: 48000,
+                        timestamp: id as f64 * 0.01,
+                        end_timestamp: None,
+                        chunk_id: id as u64,
+                        device_type,
+                        source_activity: None,
+                    })
+                    .unwrap();
+            }
+        }
+        drop(sender);
+        task.await.unwrap().unwrap();
+        let mut segments = Vec::new();
+        while let Ok(chunk) = transcription.try_recv() {
+            let path = output.join(format!("{:04}.f32", segments.len()));
+            let bytes: Vec<u8> = chunk.data.iter().flat_map(|s| s.to_le_bytes()).collect();
+            std::fs::write(&path, bytes).unwrap();
+            segments.push(serde_json::json!({
+                "start": chunk.timestamp,
+                "end": chunk.end_timestamp,
+                "samples": chunk.data.len(),
+                "path": path,
+            }));
+        }
+        std::fs::write(
+            output.join("segments.json"),
+            serde_json::to_vec_pretty(&segments).unwrap(),
+        )
+        .unwrap();
+    }
+
     #[tokio::test]
     async fn stop_drains_capture_before_pipeline_closes() {
         use super::super::device_detection::InputDeviceKind;
