@@ -187,6 +187,12 @@ impl ContinuousVadProcessor {
         })
     }
 
+    /// Start of confirmed speech that has not ended yet, in ms from the session start.
+    pub(crate) fn open_speech_start_ms(&self) -> Option<f64> {
+        self.in_speech
+            .then(|| self.speech_start_sample as f64 * 1000.0 / VAD_SAMPLE_RATE as f64)
+    }
+
     /// Process incoming audio samples and return any complete speech segments
     /// Handles resampling from input sample rate to 16kHz for VAD processing
     pub fn process_audio(&mut self, samples: &[f32]) -> Result<Vec<SpeechSegment>> {
