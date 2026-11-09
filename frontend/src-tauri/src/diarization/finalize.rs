@@ -571,6 +571,12 @@ pub(crate) async fn prepare_enhancement_from_turns<R: Runtime>(
     .await
 }
 
+// The mixed recognition path has no capture-source tags to disambiguate echo.
+// Use the same echo rule as final speaker refinement before building overlaps.
+fn enhancement_windows(intervals: &[SidecarInterval]) -> Vec<FinalWindow> {
+    rebuild_windows(&drop_microphone_echo(intervals))
+}
+
 async fn analysis_from_intervals<R: Runtime>(
     app: &AppHandle<R>,
     old_speakers: &[crate::database::repositories::diarization::TranscriptSpeakerMetadata],
@@ -579,7 +585,7 @@ async fn analysis_from_intervals<R: Runtime>(
     mut quality_flags: Vec<String>,
     cancelled: &AtomicBool,
 ) -> Result<EnhancementSpeakerAnalysis> {
-    let mut windows = rebuild_windows(intervals);
+    let mut windows = enhancement_windows(intervals);
     stabilize_speaker_ids(&mut windows, old_speakers);
     if windows.iter().any(|window| window.is_overlap) {
         quality_flags.push("overlap_detected".into());
@@ -2424,6 +2430,44 @@ mod tests {
                     && w.start == 20.0
                     && w.end == 21.0),
             "keep microphone speech while the system track is silent"
+        );
+    }
+
+    #[test]
+    fn mixed_enhancement_labels_do_not_count_microphone_echo_as_a_speaker() {
+        let intervals = [
+            source_interval("system", "remote", 0.0, 10.0),
+            source_interval("microphone", "echo", 0.0, 10.0),
+            source_interval("microphone", "local", 12.0, 20.0),
+            source_interval("microphone", "local", 20.0, 21.0),
+            source_interval("system", "remote", 20.0, 21.0),
+        ];
+        let rows = [
+            live_row("remote", 0.0, 10.0),
+            live_row("local", 12.0, 20.0),
+            live_row("both", 20.0, 21.0),
+        ];
+        let before = enhancement_analysis(&intervals)
+            .label_with_sources(&rows, &[None, None, None])
+            .unwrap();
+        assert_eq!(before.transcripts[0].speaker_label, "Multiple speakers");
+        let result = EnhancementSpeakerAnalysis {
+            windows: enhancement_windows(&intervals),
+            labels: HashMap::from([
+                ("remote".into(), "Remote".into()),
+                ("local".into(), "Local".into()),
+            ]),
+            quality_flags: vec![],
+        }
+        .label_with_sources(&rows, &[None, None, None])
+        .unwrap();
+        assert_eq!(result.transcripts[0].speaker_label, "Remote");
+        assert_eq!(result.transcripts[0].source, "system");
+        assert!(!result.transcripts[0].is_overlap);
+        assert_eq!(result.transcripts[1].speaker_label, "Local");
+        assert!(
+            result.transcripts[2].is_overlap,
+            "keep real simultaneous speech ambiguous"
         );
     }
 
