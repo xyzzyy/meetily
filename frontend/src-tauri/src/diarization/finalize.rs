@@ -469,6 +469,7 @@ pub(crate) async fn prepare_enhancement<R: Runtime>(
     app: &AppHandle<R>,
     meeting_id: &str,
     folder: &Path,
+    mixed_capture: bool,
     cancelled: &AtomicBool,
 ) -> Result<EnhancementSpeakerAnalysis> {
     check_cancelled_flag(cancelled)?;
@@ -511,6 +512,7 @@ pub(crate) async fn prepare_enhancement<R: Runtime>(
         &old_speakers,
         &request.sources,
         &intervals,
+        mixed_capture,
         quality_flags,
         cancelled,
     )
@@ -565,6 +567,7 @@ pub(crate) async fn prepare_enhancement_from_turns<R: Runtime>(
         &old_speakers,
         &sources,
         &intervals,
+        false,
         vec!["mixed_audio".to_string(), "model_speakers".to_string()],
         cancelled,
     )
@@ -573,8 +576,12 @@ pub(crate) async fn prepare_enhancement_from_turns<R: Runtime>(
 
 // The mixed recognition path has no capture-source tags to disambiguate echo.
 // Use the same echo rule as final speaker refinement before building overlaps.
-fn enhancement_windows(intervals: &[SidecarInterval]) -> Vec<FinalWindow> {
-    rebuild_windows(&drop_microphone_echo(intervals))
+fn enhancement_windows(intervals: &[SidecarInterval], mixed_capture: bool) -> Vec<FinalWindow> {
+    if mixed_capture {
+        rebuild_windows(&drop_microphone_echo(intervals))
+    } else {
+        rebuild_windows(intervals)
+    }
 }
 
 async fn analysis_from_intervals<R: Runtime>(
@@ -582,10 +589,11 @@ async fn analysis_from_intervals<R: Runtime>(
     old_speakers: &[crate::database::repositories::diarization::TranscriptSpeakerMetadata],
     sources: &[SidecarSource],
     intervals: &[SidecarInterval],
+    mixed_capture: bool,
     mut quality_flags: Vec<String>,
     cancelled: &AtomicBool,
 ) -> Result<EnhancementSpeakerAnalysis> {
-    let mut windows = enhancement_windows(intervals);
+    let mut windows = enhancement_windows(intervals, mixed_capture);
     stabilize_speaker_ids(&mut windows, old_speakers);
     if windows.iter().any(|window| window.is_overlap) {
         quality_flags.push("overlap_detected".into());
@@ -2452,7 +2460,7 @@ mod tests {
             .unwrap();
         assert_eq!(before.transcripts[0].speaker_label, "Multiple speakers");
         let result = EnhancementSpeakerAnalysis {
-            windows: enhancement_windows(&intervals),
+            windows: enhancement_windows(&intervals, true),
             labels: HashMap::from([
                 ("remote".into(), "Remote".into()),
                 ("local".into(), "Local".into()),
@@ -3025,10 +3033,10 @@ mod tests {
 
     #[test]
     fn enhancement_labels_keep_simultaneous_capture_sources_separate() {
-        let windows = rebuild_windows(&[
+        let windows = enhancement_windows(&[
             source_interval("microphone", "local", 0.0, 5.0),
             source_interval("system", "remote", 0.0, 5.0),
-        ]);
+        ], false);
         let rows = vec![
             live_row("local-row", 0.0, 5.0),
             live_row("remote-row", 0.0, 5.0),

@@ -363,6 +363,34 @@ fn correlated_envelopes(samples: &[f32], reference: &[f32], threshold: f64) -> b
     false
 }
 
+/// Share the recognition choice with speaker analysis so source-tagged speech
+/// keeps its source windows, including real simultaneous microphone speech.
+pub(crate) fn use_mixed_capture(audio: &EnhancementAudio) -> bool {
+    if audio.tracks.is_empty() {
+        return true;
+    }
+    // A microphone with loud pickup can also hold independent local replies.
+    // Decode the complete mix once; do not remove microphone speech based on
+    // a volume pattern averaged across a reply. Check fixed six-second windows
+    // before VAD so this choice does not depend on a model's input context.
+    let mic = audio
+        .tracks
+        .iter()
+        .find(|(source, _)| source == "microphone");
+    let system = audio.tracks.iter().find(|(source, _)| source == "system");
+    if let (Some((_, mic)), Some((_, system))) = (mic, system) {
+        const WINDOW: usize = 6 * 16000;
+        return mic
+            .samples
+            .chunks(WINDOW)
+            .enumerate()
+            .any(|(index, samples)| {
+                loud_microphone_pickup(samples, index * WINDOW, &system.samples)
+            });
+    }
+    false
+}
+
 /// Detect speech on each retained input. A quiet microphone must not change
 /// the words decoded from the system input. Keep both inputs on one timeline.
 pub(crate) fn recognition_inputs(
@@ -385,30 +413,8 @@ pub(crate) fn recognition_inputs(
         .map(RecognitionInput::mixed)
         .collect())
     };
-    if audio.tracks.is_empty() {
+    if use_mixed_capture(audio) {
         return mixed_inputs(&mut progress);
-    }
-    // A microphone with loud pickup can also hold independent local replies.
-    // Decode the complete mix once; do not remove microphone speech based on
-    // a volume pattern averaged across a reply. Check fixed six-second windows
-    // before VAD so this choice does not depend on a model's input context.
-    let mic = audio
-        .tracks
-        .iter()
-        .find(|(source, _)| source == "microphone");
-    let system = audio.tracks.iter().find(|(source, _)| source == "system");
-    if let (Some((_, mic)), Some((_, system))) = (mic, system) {
-        const WINDOW: usize = 6 * 16000;
-        if mic
-            .samples
-            .chunks(WINDOW)
-            .enumerate()
-            .any(|(index, samples)| {
-                loud_microphone_pickup(samples, index * WINDOW, &system.samples)
-            })
-        {
-            return mixed_inputs(&mut progress);
-        }
     }
     let mut inputs = Vec::new();
     // Joined context includes pauses. Recovery must measure coverage by the
