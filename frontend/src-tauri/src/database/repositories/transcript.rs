@@ -122,13 +122,18 @@ impl TranscriptsRepository {
 
     /// Helper function to extract a snippet of text around the first match of a query.
     fn get_match_context(transcript: &str, query: &str) -> String {
-        let transcript_lower = transcript.to_lowercase();
-        let query_lower = query.to_lowercase();
+        const CONTEXT_BYTES: usize = 100;
 
-        match transcript_lower.find(&query_lower) {
-            Some(match_index) => {
-                let start_index = match_index.saturating_sub(100);
-                let end_index = (match_index + query.len() + 100).min(transcript.len());
+        match find_case_insensitive(transcript, &query.to_lowercase()) {
+            Some((match_start, match_end)) => {
+                let start_index = floor_char_boundary(
+                    transcript,
+                    match_start.saturating_sub(CONTEXT_BYTES),
+                );
+                let end_index = ceil_char_boundary(
+                    transcript,
+                    (match_end + CONTEXT_BYTES).min(transcript.len()),
+                );
 
                 let mut context = String::new();
                 if start_index > 0 {
@@ -145,10 +150,88 @@ impl TranscriptsRepository {
     }
 }
 
+/// Byte range of the first case-insensitive match of `query_lower` in `text`.
+/// Searching the original text keeps the offsets valid where lowercasing changes
+/// a character's length (for example the Turkish capital dotted I).
+fn find_case_insensitive(text: &str, query_lower: &str) -> Option<(usize, usize)> {
+    if query_lower.is_empty() {
+        return Some((0, 0));
+    }
+    for (start, _) in text.char_indices() {
+        let mut lowered = String::new();
+        let mut end = start;
+        for (offset, character) in text[start..].char_indices() {
+            lowered.extend(character.to_lowercase());
+            end = start + offset + character.len_utf8();
+            if lowered.len() >= query_lower.len() {
+                break;
+            }
+        }
+        if lowered == query_lower {
+            return Some((start, end));
+        }
+    }
+    None
+}
+
+/// Largest character boundary at or below `index`.
+fn floor_char_boundary(text: &str, mut index: usize) -> usize {
+    while !text.is_char_boundary(index) {
+        index -= 1;
+    }
+    index
+}
+
+/// Smallest character boundary at or above `index`.
+fn ceil_char_boundary(text: &str, mut index: usize) -> usize {
+    while index < text.len() && !text.is_char_boundary(index) {
+        index += 1;
+    }
+    index
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use sqlx::sqlite::SqlitePoolOptions;
+
+    #[test]
+    fn match_context_never_splits_accented_text() {
+        let words = ["la reunión", "planificación", "del año", "próximo", "cuánto", "también", "equipo"];
+        for prefix in 0..60 {
+            let mut before = String::new();
+            let mut word = prefix;
+            while before.len() < 150 + prefix {
+                before.push_str(words[word % words.len()]);
+                before.push(' ');
+                word += 3;
+            }
+            let after = "y luego revisamos también el próximo año con el equipo completo ".repeat(3);
+            let text = format!("{before}presupuesto {after}");
+            let context = TranscriptsRepository::get_match_context(&text, "presupuesto");
+            assert!(context.contains("presupuesto"), "prefix {prefix}: {context}");
+        }
+    }
+
+    #[test]
+    fn match_context_is_case_insensitive_and_keeps_surrounding_text() {
+        let context = TranscriptsRepository::get_match_context("Hola, el PRESUPUESTO es claro.", "presupuesto");
+        assert_eq!(context, "Hola, el PRESUPUESTO es claro.");
+    }
+
+    #[test]
+    fn match_context_handles_characters_whose_lowercase_is_longer() {
+        // The dotted capital I lowercases to two characters, shifting byte offsets.
+        let text = format!("{} budget review {}", "İ".repeat(80), "x".repeat(150));
+        let context = TranscriptsRepository::get_match_context(&text, "budget");
+        assert!(context.contains("budget"));
+    }
+
+    #[test]
+    fn match_context_falls_back_to_the_start_without_a_match() {
+        let text = "é".repeat(300);
+        assert_eq!(TranscriptsRepository::get_match_context(&text, "zzz").chars().count(), 200);
+    }
 
     async fn migrated_test_pool() -> SqlitePool {
         let pool = SqlitePoolOptions::new()
