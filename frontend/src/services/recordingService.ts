@@ -16,6 +16,11 @@ export interface RecordingState {
   active_duration: number | null;
 }
 
+export interface RecordingStartedPayload {
+  message: string;
+  folder_path?: string | null;
+}
+
 export interface RecordingStoppedPayload {
   message: string;
   folder_path?: string;
@@ -135,8 +140,10 @@ export class RecordingService {
    * @param callback - Function to call when recording starts
    * @returns Promise that resolves to unlisten function
    */
-  async onRecordingStarted(callback: () => void): Promise<UnlistenFn> {
-    return listen('recording-started', callback);
+  async onRecordingStarted(callback: (payload: RecordingStartedPayload) => void): Promise<UnlistenFn> {
+    return listen<RecordingStartedPayload>('recording-started', (event) => {
+      callback(event.payload);
+    });
   }
 
   /**
