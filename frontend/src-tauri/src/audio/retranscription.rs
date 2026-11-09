@@ -309,6 +309,7 @@ async fn run_retranscription<R: Runtime>(
                 &app,
                 &meeting_id,
                 &folder_path,
+                super::enhancement::use_mixed_capture(&decoded),
                 &RETRANSCRIPTION_CANCELLED,
             )
             .await?,
