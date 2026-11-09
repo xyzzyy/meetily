@@ -311,21 +311,17 @@ fn weak_cross_track_pickup(
 }
 
 /// A loudspeaker can reach the microphone near normal speech level. Require
-/// a much closer volume pattern here than for faint pickup. Only reject the
-/// microphone copy when the system input is at least as loud.
-fn loud_microphone_pickup(
-    segment: &super::vad::SpeechSegment,
-    other: &super::decoder::DecodedAudio,
-) -> bool {
-    let from = (segment.start_timestamp_ms * 16.0).round() as usize;
-    let to = (segment.end_timestamp_ms * 16.0).round() as usize;
-    let Some(reference) = other.samples.get(from..to) else {
+/// a much closer volume pattern here than for faint pickup. Use one mixed
+/// transcription pass when this happens; the microphone can also hold a reply.
+fn loud_microphone_pickup(samples: &[f32], from: usize, other: &[f32]) -> bool {
+    let Some(reference) = other.get(from..from + samples.len()) else {
         return false;
     };
-    let count = segment.samples.len().min(reference.len());
-    count >= 16000
-        && rms(reference) >= rms(&segment.samples[..count])
-        && correlated_envelopes(&segment.samples[..count], &reference[..count], 0.9)
+    // Keep the existing weak-pickup path for a microphone at least ten times
+    // quieter than the system input. Either input can be louder otherwise.
+    samples.len() >= 16000
+        && rms(samples) > rms(reference) * 0.1
+        && correlated_envelopes(samples, reference, 0.9)
 }
 
 fn correlated_envelopes(samples: &[f32], reference: &[f32], threshold: f64) -> bool {
@@ -377,8 +373,8 @@ pub(crate) fn recognition_inputs(
     mut progress: impl FnMut(u32, usize) -> bool,
 ) -> Result<Vec<RecognitionInput>> {
     let policy = engine.enhancement_input_policy();
-    if audio.tracks.is_empty() {
-        return Ok(recognition_speech_segments_with_context(
+    let mixed_inputs = |progress: &mut dyn FnMut(u32, usize) -> bool| {
+        Ok(recognition_speech_segments_with_context(
             &audio.mixed,
             pause_ms,
             known_speech,
@@ -387,7 +383,32 @@ pub(crate) fn recognition_inputs(
         )?
         .into_iter()
         .map(RecognitionInput::mixed)
-        .collect());
+        .collect())
+    };
+    if audio.tracks.is_empty() {
+        return mixed_inputs(&mut progress);
+    }
+    // A microphone with loud pickup can also hold independent local replies.
+    // Decode the complete mix once; do not remove microphone speech based on
+    // a volume pattern averaged across a reply. Check fixed six-second windows
+    // before VAD so this choice does not depend on a model's input context.
+    let mic = audio
+        .tracks
+        .iter()
+        .find(|(source, _)| source == "microphone");
+    let system = audio.tracks.iter().find(|(source, _)| source == "system");
+    if let (Some((_, mic)), Some((_, system))) = (mic, system) {
+        const WINDOW: usize = 6 * 16000;
+        if mic
+            .samples
+            .chunks(WINDOW)
+            .enumerate()
+            .any(|(index, samples)| {
+                loud_microphone_pickup(samples, index * WINDOW, &system.samples)
+            })
+        {
+            return mixed_inputs(&mut progress);
+        }
     }
     let mut inputs = Vec::new();
     // Joined context includes pauses. Recovery must measure coverage by the
@@ -410,10 +431,7 @@ pub(crate) fn recognition_inputs(
         track_levels.push((source.as_str(), track.samples.as_slice(), typical_level));
         let retained: Vec<_> = spans
             .into_iter()
-            .filter(|segment| {
-                !weak_cross_track_pickup(segment, other, typical_level)
-                    && !(source == "microphone" && loud_microphone_pickup(segment, other))
-            })
+            .filter(|segment| !weak_cross_track_pickup(segment, other, typical_level))
             .collect();
         speech_ranges.extend(
             detected
@@ -1512,6 +1530,10 @@ mod tests {
             weak_cross_track_pickup(&quiet, &other, 0.004),
             "reject weak copies of the same speech pattern"
         );
+        assert!(
+            !loud_microphone_pickup(&quiet.samples, 0, &other.samples),
+            "weak pickup must keep the separate-source path"
+        );
         other.samples.fill(0.0);
         assert!(
             !weak_cross_track_pickup(&quiet, &other, 0.004),
@@ -1527,7 +1549,7 @@ mod tests {
             !weak_cross_track_pickup(&quiet, &other, 0.004),
             "independent overlapping speech must remain"
         );
-        assert!(!loud_microphone_pickup(&quiet, &other));
+        assert!(!loud_microphone_pickup(&quiet.samples, 0, &other.samples));
         quiet.samples = waveform(0.05, 0.0);
         other.samples = waveform(0.1, 0.0);
         assert!(
@@ -1535,8 +1557,13 @@ mod tests {
             "comparable voices must remain"
         );
         assert!(
-            loud_microphone_pickup(&quiet, &other),
-            "loud matching pickup must also be rejected"
+            loud_microphone_pickup(&quiet.samples, 0, &other.samples),
+            "loud matching pickup must use one mixed pass"
+        );
+        quiet.samples = waveform(0.101, 0.0);
+        assert!(
+            loud_microphone_pickup(&quiet.samples, 0, &other.samples),
+            "pickup just above system level must also use one pass"
         );
         quiet.samples = std::iter::repeat(0.0)
             .take(800)
@@ -1544,11 +1571,72 @@ mod tests {
             .take(other.samples.len())
             .collect();
         assert!(
-            loud_microphone_pickup(&quiet, &other),
+            loud_microphone_pickup(&quiet.samples, 0, &other.samples),
             "keep the system copy of delayed pickup"
         );
+        // A short reply can hide inside a long, highly correlated echo span.
+        for (i, sample) in quiet
+            .samples
+            .iter_mut()
+            .enumerate()
+            .skip(2 * 16000)
+            .take(16000)
+        {
+            *sample += 0.03 * (i as f32 * 0.071).sin();
+        }
+        assert!(loud_microphone_pickup(&quiet.samples, 0, &other.samples));
+        let mixed = super::super::decoder::DecodedAudio {
+            samples: quiet
+                .samples
+                .iter()
+                .zip(&other.samples)
+                .map(|(a, b)| a + b)
+                .collect(),
+            ..other.clone()
+        };
+        let audio = EnhancementAudio {
+            mixed,
+            tracks: vec![
+                (
+                    "microphone".into(),
+                    super::super::decoder::DecodedAudio {
+                        samples: quiet.samples.clone(),
+                        ..other.clone()
+                    },
+                ),
+                ("system".into(), other.clone()),
+            ],
+        };
+        let baseline: Transcript = serde_json::from_value(serde_json::json!({
+            "id":"reply", "meeting_id":"test", "transcript":"Local reply", "timestamp":"",
+            "audio_start_time":2.0, "audio_end_time":3.0, "duration":1.0
+        }))
+        .unwrap();
+        let inputs = recognition_inputs(
+            &audio,
+            super::super::common::BatchEngine::Whisper,
+            500,
+            &[baseline],
+            |_, _| true,
+        )
+        .unwrap();
+        assert!(!inputs.is_empty());
+        assert!(
+            inputs.iter().all(|input| input.source.is_none()),
+            "decode both tracks once"
+        );
+        let input = inputs
+            .iter()
+            .find(|input| input.start_timestamp_ms <= 2500.0 && input.end_timestamp_ms > 2500.0)
+            .unwrap();
+        let offset = (input.start_timestamp_ms * 16.0).round() as usize;
+        assert_eq!(
+            &input.samples[2 * 16000 - offset..3 * 16000 - offset],
+            &audio.mixed.samples[2 * 16000..3 * 16000],
+            "retain every sample of the independent reply"
+        );
         other.samples.fill(0.0);
-        assert!(!loud_microphone_pickup(&quiet, &other));
+        assert!(!loud_microphone_pickup(&quiet.samples, 0, &other.samples));
         // A track whose speech is normally loud: a faint span under a loud
         // other track is bleed, even without a matching volume pattern.
         quiet.samples = waveform(0.003, 0.0);
