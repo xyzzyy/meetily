@@ -288,7 +288,6 @@ fn weak_cross_track_pickup(
     other: &super::decoder::DecodedAudio,
     typical_level: f64,
 ) -> bool {
-    const FRAME: usize = 160; // 10 ms at 16 kHz
     let from = (segment.start_timestamp_ms * 16.0).round() as usize;
     let to = (segment.end_timestamp_ms * 16.0).round() as usize;
     let Some(reference) = other.samples.get(from..to) else {
@@ -308,9 +307,32 @@ fn weak_cross_track_pickup(
     if level >= 0.01 || count < 16000 {
         return false;
     }
+    correlated_envelopes(&segment.samples[..count], &reference[..count], 0.65)
+}
+
+/// A loudspeaker can reach the microphone near normal speech level. Require
+/// a much closer volume pattern here than for faint pickup. Only reject the
+/// microphone copy when the system input is at least as loud.
+fn loud_microphone_pickup(
+    segment: &super::vad::SpeechSegment,
+    other: &super::decoder::DecodedAudio,
+) -> bool {
+    let from = (segment.start_timestamp_ms * 16.0).round() as usize;
+    let to = (segment.end_timestamp_ms * 16.0).round() as usize;
+    let Some(reference) = other.samples.get(from..to) else {
+        return false;
+    };
+    let count = segment.samples.len().min(reference.len());
+    count >= 16000
+        && rms(reference) >= rms(&segment.samples[..count])
+        && correlated_envelopes(&segment.samples[..count], &reference[..count], 0.9)
+}
+
+fn correlated_envelopes(samples: &[f32], reference: &[f32], threshold: f64) -> bool {
+    const FRAME: usize = 160; // 10 ms at 16 kHz
     let envelope = |samples: &[f32]| samples.chunks_exact(FRAME).map(rms).collect::<Vec<_>>();
-    let local = envelope(&segment.samples[..count]);
-    let remote = envelope(&reference[..count]);
+    let local = envelope(samples);
+    let remote = envelope(reference);
     for lag in -50i32..=50 {
         // Allow capture and playback delay up to 500 ms.
         let a = lag.max(0) as usize;
@@ -338,7 +360,7 @@ fn weak_cross_track_pickup(
         }
         let n = n as f64;
         let variance = (xx - x * x / n) * (yy - y * y / n);
-        if variance > 1e-20 && (xy - x * y / n) / variance.sqrt() >= 0.65 {
+        if variance > 1e-20 && (xy - x * y / n) / variance.sqrt() >= threshold {
             return true;
         }
     }
@@ -388,7 +410,10 @@ pub(crate) fn recognition_inputs(
         track_levels.push((source.as_str(), track.samples.as_slice(), typical_level));
         let retained: Vec<_> = spans
             .into_iter()
-            .filter(|segment| !weak_cross_track_pickup(segment, other, typical_level))
+            .filter(|segment| {
+                !weak_cross_track_pickup(segment, other, typical_level)
+                    && !(source == "microphone" && loud_microphone_pickup(segment, other))
+            })
             .collect();
         speech_ranges.extend(
             detected
@@ -1502,12 +1527,28 @@ mod tests {
             !weak_cross_track_pickup(&quiet, &other, 0.004),
             "independent overlapping speech must remain"
         );
+        assert!(!loud_microphone_pickup(&quiet, &other));
         quiet.samples = waveform(0.05, 0.0);
         other.samples = waveform(0.1, 0.0);
         assert!(
             !weak_cross_track_pickup(&quiet, &other, 0.004),
             "comparable voices must remain"
         );
+        assert!(
+            loud_microphone_pickup(&quiet, &other),
+            "loud matching pickup must also be rejected"
+        );
+        quiet.samples = std::iter::repeat(0.0)
+            .take(800)
+            .chain(other.samples.iter().map(|sample| sample * 0.75))
+            .take(other.samples.len())
+            .collect();
+        assert!(
+            loud_microphone_pickup(&quiet, &other),
+            "keep the system copy of delayed pickup"
+        );
+        other.samples.fill(0.0);
+        assert!(!loud_microphone_pickup(&quiet, &other));
         // A track whose speech is normally loud: a faint span under a loud
         // other track is bleed, even without a matching volume pattern.
         quiet.samples = waveform(0.003, 0.0);
