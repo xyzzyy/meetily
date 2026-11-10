@@ -110,21 +110,20 @@ async fn initialize_live_diarization<R: Runtime>(app: &AppHandle<R>) -> Option<D
         warn!("Live speaker labels disabled because the WeSpeaker model is unavailable");
         return None;
     }
-    let profiles = SpeakerProfilesRepository::list(state.speaker_store.pool())
-        .await
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|profile| {
-            profile.model_version == crate::diarization::models::EMBEDDING_MODEL_VERSION
-        })
-        .map(|profile| (profile.id, profile.name, profile.embedding))
-        .collect();
+    let profiles = SpeakerProfilesRepository::recognition_profiles(
+        state.speaker_store.pool(),
+        crate::diarization::models::EMBEDDING_MODEL_VERSION,
+    )
+    .await
+    .unwrap_or_default();
 
-    tokio::task::spawn_blocking(move || DiarizationSession::with_profiles(&model_path, profiles))
-        .await
-        .ok()?
-        .map_err(|error| warn!("Unable to start live speaker recognition: {error}"))
-        .ok()
+    tokio::task::spawn_blocking(move || {
+        DiarizationSession::with_voice_profiles(&model_path, profiles)
+    })
+    .await
+    .ok()?
+    .map_err(|error| warn!("Unable to start live speaker recognition: {error}"))
+    .ok()
 }
 
 fn assign_live_speaker(

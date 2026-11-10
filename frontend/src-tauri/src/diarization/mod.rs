@@ -7,5 +7,6 @@ pub mod fbank;
 pub mod finalize;
 pub mod models;
 pub mod operations;
+pub mod profile_matching;
 pub mod session;
 pub mod types;
