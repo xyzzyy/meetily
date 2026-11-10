@@ -92,3 +92,13 @@ const madior = { id: 'profile-1', name: 'Scrum Master Madior', modelVersion: 'v1
   assert.ok(text(tree).includes('Type a name to remember this speaker'));
 }
 console.log('Speaker attribution picker: all checks passed');
+
+// An older voiceprint can still name a speaker, but it is not shown as ready
+// for automatic recognition after the feature recipe changes.
+{
+  const button = makeButton([{ ...madior, recognitionReady: false }]);
+  const [voice] = items(button.render());
+  assert.ok(text(voice).includes('Name only'));
+  voice.props.onSelect();
+  assert.equal(JSON.stringify(button.attributed[0].attribution), JSON.stringify({ profileId: madior.id }));
+}

@@ -201,6 +201,8 @@ export interface SpeakerProfile {
   id: string;
   name: string;
   modelVersion: string;
+  /** False when the saved voice needs a new sample for automatic recognition. */
+  recognitionReady?: boolean;
   sampleCount: number;
   speechSeconds: number;
   /** How many meeting speakers make up this voice. */

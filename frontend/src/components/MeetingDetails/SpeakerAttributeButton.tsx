@@ -102,7 +102,7 @@ export function SpeakerAttributeButton({
                   >
                     <span className="truncate">{profile.name}</span>
                     <span className="ml-auto shrink-0 text-[11px] tabular-nums text-muted-foreground">
-                      {Math.round(profile.speechSeconds)}s
+                      {profile.recognitionReady === false ? 'Name only' : `${Math.round(profile.speechSeconds)}s`}
                     </span>
                   </CommandItem>
                 ))}

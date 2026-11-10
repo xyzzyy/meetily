@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use tauri::{AppHandle, Emitter, Runtime};
 
 /// WeSpeaker CAM++ speaker-embedding model (Apache-2.0, exported to ONNX by
-/// the sherpa-onnx project). ~28 MB. Input: fbank [1, T, 80]; output: [1, 192].
+/// the sherpa-onnx project). ~28 MB. Input: fbank [1, T, 80]; output: [1, 512].
 /// NOTE: "recongition" is the canonical (misspelled) sherpa-onnx release tag.
 pub const EMBEDDING_MODEL_FILENAME: &str = "wespeaker_en_voxceleb_CAM++.onnx";
 pub const EMBEDDING_MODEL_URL: &str =
@@ -19,7 +19,9 @@ pub const EMBEDDING_MODEL_URL: &str =
 pub const EMBEDDING_MODEL_SHA256: &str =
     "c46fad10b5f81e1aa4a60c162714208577093655076c5450f8c469e522ec54ef";
 pub const EMBEDDING_MODEL_SIZE: u64 = 29_292_684;
-pub const EMBEDDING_MODEL_VERSION: &str = "wespeaker-campp-voxceleb-2023";
+// Include the feature recipe: voiceprints made before PCM16 scaling cannot be
+// compared safely with corrected embeddings, even though the model is unchanged.
+pub const EMBEDDING_MODEL_VERSION: &str = "wespeaker-campp-voxceleb-2023-pcm16-v2";
 
 /// Branch-owned diarization model directory. Downloads and deletions use this.
 pub fn models_dir<R: Runtime>(app: &AppHandle<R>) -> Result<PathBuf, String> {
