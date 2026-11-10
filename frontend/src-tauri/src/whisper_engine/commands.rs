@@ -106,6 +106,7 @@ fn discover_models_standalone() -> Result<Vec<ModelInfo>, String> {
 
         models.push(ModelInfo {
             name: name.to_string(),
+            is_shared: !model_path.starts_with(&whisper_dir),
             path: model_path,
             size_mb,
             status,

@@ -166,7 +166,7 @@ export function ParakeetModelManager({
             setModels(prevModels =>
               prevModels.map(model =>
                 model.name === modelName
-                  ? { ...model, status: 'Available' as ModelStatus }
+                  ? { ...model, status: 'Available' as ModelStatus, is_shared: false }
                   : model
               )
             );
@@ -392,6 +392,7 @@ export function ParakeetModelManager({
         return (
           <TranscriptionModelCard
             key={model.name}
+            isShared={model.is_shared}
             displayName={getModelDisplayName(model.name)}
             icon={displayInfo?.icon || '📦'}
             description={displayInfo?.tagline || model.description}
