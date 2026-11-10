@@ -7,7 +7,7 @@ use super::fbank::{FbankComputer, NUM_MEL_BINS};
 use ndarray::Array3;
 use ort::execution_providers::CPUExecutionProvider;
 use ort::inputs;
-use ort::session::builder::GraphOptimizationLevel;
+use ort::session::builder::{GraphOptimizationLevel, SessionBuilder};
 use ort::session::Session;
 use ort::value::TensorRef;
 use std::path::Path;
@@ -29,13 +29,20 @@ pub struct EmbeddingExtractor {
     fbank: FbankComputer,
 }
 
+// ORT 1.22 Pad_Fusion changes ceil-mode AveragePool boundary divisors in
+// this model. Keep the explicit Pad node so it uses the correct exclude-pad
+// path. Upstream pooling fix: microsoft/onnxruntime#29629.
+fn embedding_session_builder() -> Result<SessionBuilder, ort::Error> {
+    Session::builder()?
+        .with_execution_providers(vec![CPUExecutionProvider::default().build()])?
+        .with_optimization_level(GraphOptimizationLevel::Level3)?
+        .with_disabled_optimizers("Pad_Fusion")?
+        .with_intra_threads(2)
+}
+
 impl EmbeddingExtractor {
     pub fn new(model_path: &Path) -> Result<Self, EmbeddingError> {
-        let session = Session::builder()?
-            .with_execution_providers(vec![CPUExecutionProvider::default().build()])?
-            .with_optimization_level(GraphOptimizationLevel::Level3)?
-            .with_intra_threads(2)?
-            .commit_from_file(model_path)?;
+        let session = embedding_session_builder()?.commit_from_file(model_path)?;
 
         // Resolve I/O names dynamically ("feats"/"embs" for WeSpeaker exports)
         let input_name = session
@@ -98,5 +105,30 @@ impl EmbeddingExtractor {
             }
         }
         Ok(vec)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ceil_mode_pooling_keeps_the_partial_window_divisor() {
+        // Opset 14: explicit zero Pad -> AveragePool(k=100, stride=100,
+        // ceil_mode=1). The last window has 49 real samples. Pad_Fusion in
+        // ORT 1.22 changes its divisor to 100, corrupting CAM++ features.
+        let model = include_bytes!("../../tests/fixtures/ceil_mode_pool.onnx");
+        let mut session = embedding_session_builder()
+            .unwrap()
+            .commit_from_memory(model)
+            .unwrap();
+        let values: Vec<f32> = (1..=349).map(|n| n as f32).collect();
+        let outputs = session
+            .run(inputs!["input" =>
+                ort::value::Tensor::from_array(([1usize, 1, 349], values)).unwrap()
+            ])
+            .unwrap();
+        let (_, result) = outputs["output"].try_extract_tensor::<f32>().unwrap();
+        assert_eq!(result, &[50.5, 150.5, 250.5, 325.0]);
     }
 }
