@@ -2,6 +2,9 @@ import { afterAll, afterEach, beforeEach, describe, expect, mock, test } from 'b
 import { act, create, type ReactTestRenderer } from 'react-test-renderer';
 import type { MeetingMetadata, PaginatedTranscriptsResponse } from '../../src/types';
 
+const originalEvent = { ...await import('@tauri-apps/api/event') };
+let onProgress: (event: { payload: { meetingId: string; status: string } }) => void;
+mock.module('@tauri-apps/api/event', () => ({ ...originalEvent, listen: async (_name: string, callback: typeof onProgress) => { onProgress = callback; return () => {}; } }));
 const originalCore = { ...await import('@tauri-apps/api/core') };
 type Request = {
   command: string;
@@ -15,7 +18,10 @@ const invoke = mock((command: string, args: Record<string, unknown>) => new Prom
 }));
 mock.module('@tauri-apps/api/core', () => ({ ...originalCore, invoke }));
 const { usePaginatedTranscripts } = await import('../../src/hooks/usePaginatedTranscripts');
-afterAll(() => mock.module('@tauri-apps/api/core', () => originalCore));
+afterAll(() => {
+  mock.module('@tauri-apps/api/core', () => originalCore);
+  mock.module('@tauri-apps/api/event', () => originalEvent);
+});
 
 let state: ReturnType<typeof usePaginatedTranscripts>;
 let renderer: ReactTestRenderer | undefined;
@@ -155,4 +161,18 @@ describe('paginated transcript request ownership', () => {
     await resolve(stale, metadata('A'));
     expect(requests).toHaveLength(1);
   });
+});
+
+test('refinement finishing before the first page returns replaces that stale page', async () => {
+  await show('A');
+  await resolve(request('metadata', 'A'), metadata('A'));
+  const stalePage = request('transcripts', 'A');
+  await act(async () => { onProgress({ payload: { meetingId: 'A', status: 'completed' } }); });
+  await resolve(request('metadata', 'A', 1), metadata('A'));
+  const labeled = page('A');
+  labeled.transcripts[0].speaker_label = 'Speaker 1';
+  await resolve(request('transcripts', 'A', 1), labeled);
+  await resolve(stalePage, page('A'));
+  expect(state.transcripts[0].speaker_label).toBe('Speaker 1');
+  expect(state.segments[0].speaker_label).toBe('Speaker 1');
 });

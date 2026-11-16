@@ -1,5 +1,6 @@
 import { useState, useCallback, useRef, useEffect, useMemo } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { Transcript, MeetingMetadata, PaginatedTranscriptsResponse, TranscriptSegmentData } from "@/types";
 
 const DEFAULT_PAGE_SIZE = 100;
@@ -198,13 +199,33 @@ export function usePaginatedTranscripts({
     // A new meeting or effect lifetime owns its own requests.
     useEffect(() => {
         activeMeetingIdRef.current = meetingId;
+        let disposed = false;
+        let unlisten: (() => void) | undefined;
         if (meetingId) {
-            void refetch();
+            // Subscribe before the first read. The transcript panel mounts only
+            // after that read, so it can miss refinement finishing in between.
+            void (async () => {
+                try {
+                    const cleanup = await listen<{ meetingId: string; status: string }>(
+                        'diarization-progress', event => {
+                            if (!disposed && event.payload.meetingId === meetingId
+                                && event.payload.status === 'completed') void refetch();
+                        }
+                    );
+                    if (disposed) { cleanup(); return; }
+                    unlisten = cleanup;
+                } catch (error) {
+                    console.warn('Failed to subscribe to speaker updates:', error);
+                }
+                if (!disposed) void refetch();
+            })();
         } else {
             reset();
         }
 
         return () => {
+            disposed = true;
+            unlisten?.();
             requestIdRef.current += 1;
             activeMeetingIdRef.current = null;
         };
