@@ -77,6 +77,9 @@ export async function installUsageDesktop(page: Page, provider = 'localWhisper')
             case 'plugin:store|save':
             case 'plugin:resources|close':
             case 'whisper_init': return null;
+            case 'parakeet_init': return null;
+            case 'parakeet_has_available_models': return false;
+            case 'parakeet_get_available_models': return [];
             case 'plugin:store|load': return 1;
             case 'plugin:store|has': return store.has(args.key);
             case 'plugin:store|get': return [store.get(args.key), store.has(args.key)];

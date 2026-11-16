@@ -11,6 +11,8 @@ for (const provider of ['localWhisper', 'funasr', 'nemotron', 'parakeet']) {
     await expect(page.getByRole('button', { name: 'Start Recording', exact: true })).toBeVisible();
     const button = page.getByRole('button', { name: 'Language', exact: true });
     if (provider === 'parakeet') {
+      await page.getByRole('button', { name: 'Start Recording', exact: true }).click();
+      await expect(page.getByRole('combobox')).toContainText('Parakeet');
       await expect(button).toHaveCount(0);
       return;
     }
