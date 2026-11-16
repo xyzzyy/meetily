@@ -6,8 +6,8 @@ export const meetingId = 'walkthrough-meeting';
 
 // A stateful Tauri boundary for one normal session. This code is loaded only by
 // Playwright; it is never imported by src/ or included in a user's app.
-export async function installUsageDesktop(page: Page) {
-  await page.addInitScript(({ transcriptText, summaryText, meetingId }) => {
+export async function installUsageDesktop(page: Page, provider = 'localWhisper') {
+  await page.addInitScript(({ transcriptText, summaryText, meetingId, provider }) => {
     type Callback = (event: { event: string; id: number; payload: unknown }) => void;
     const callbacks = new Map<number, Callback>();
     const listeners = new Map<number, { event: string; handler: number }>();
@@ -88,7 +88,7 @@ export async function installUsageDesktop(page: Page) {
             };
             case 'check_first_launch': return false;
             case 'plugin:app|version': return '0.4.1';
-            case 'api_get_transcript_config': return { provider: 'localWhisper', model: 'large-v3', apiKey: null };
+            case 'api_get_transcript_config': return { provider, model: 'large-v3', apiKey: null };
             case 'api_get_model_config': return { provider: 'ollama', model: 'fixture-model', whisperModel: 'large-v3' };
             case 'get_ollama_models': return [{ name: 'fixture-model' }];
             case 'get_meeting_folder_path':
@@ -170,7 +170,7 @@ export async function installUsageDesktop(page: Page) {
         },
       },
     });
-  }, { transcriptText, summaryText, meetingId });
+  }, { transcriptText, summaryText, meetingId, provider });
 }
 
 export async function readDesktopState(page: Page) {
