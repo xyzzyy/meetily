@@ -13,7 +13,7 @@ Users choose one of two GGUF decoders from [AtomicChat's conversion](https://hug
 
 AtomicChat measured both decoders within about 0.2 points of the BF16 decoder's word error on English, German, French and Spanish. Q2_0_M increased Chinese character error by about 1.5 points in those tests ([model card](https://huggingface.co/AtomicChat/NVIDIA-Nemotron-3.5-Transcribe-30B-A4B-GGUF)). The model weights use NVIDIA's OpenMDW 1.1 license.
 
-Q2_0_M replaces Q2_0_L. Saved Q2_0_L selections resolve to Q2_0_M and require its separate download. Loading the model list or deleting a model removes the retired L decoder and its unfinished download from the branch cache. The shared encoder and runtime are reused. The 24 GB memory guidance is retained; the published 16 GB test used CUDA, not a Mac.
+Q2_0_M replaces Q2_0_L. Saved Q2_0_L selections resolve to Q2_0_M and require its separate download. Loading the model list or deleting a model removes the retired L decoder and its unfinished download from the branch cache. Cleanup errors are logged and do not block model listing or deletion. The shared encoder and runtime are reused. The 24 GB memory guidance is retained; the published 16 GB test used CUDA, not a Mac.
 
 ## Runtime
 

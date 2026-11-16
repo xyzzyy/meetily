@@ -105,7 +105,7 @@ pub async fn nemotron_get_available_models<R: Runtime>(
     app: AppHandle<R>,
 ) -> Result<Vec<Value>, String> {
     let path = root(&app)?;
-    remove_retired_q2_l(&path).await?;
+    remove_retired_q2_l(&path).await;
     let downloading = DOWNLOADING.lock().unwrap().clone();
     Ok(DECODERS
         .iter()
@@ -375,21 +375,20 @@ pub async fn nemotron_cancel_download() {
 }
 /// The retired decoder is not usable by this version. Remove its cached files
 /// without removing either current decoder, the encoder or the runtime.
-async fn remove_retired_q2_l(path: &Path) -> Result<(), String> {
+async fn remove_retired_q2_l(path: &Path) {
     let file = path.join("gguf/NVIDIA-Nemotron-3.5-Transcribe-30B-A4B-AD-Q2_0_L.gguf");
     for target in [partial(&file), file] {
         match tokio::fs::remove_file(target).await {
             Ok(()) => {},
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {},
-            Err(error) => return Err(format!("Could not remove the retired Q2_0_L file: {error}")),
+            Err(error) => log::warn!("Could not remove the retired Q2_0_L file: {error}"),
         }
     }
-    Ok(())
 }
 /// Removes a decoder. The last decoder also removes the shared encoder, the
 /// runtime and every other file in the Nemotron folder.
 async fn delete(path: &Path, decoder: &Decoder) -> Result<(), String> {
-    remove_retired_q2_l(path).await?;
+    remove_retired_q2_l(path).await;
     let file = gguf(path, &decoder.file);
     for target in [partial(&file), file] {
         if target.exists() {
@@ -1394,8 +1393,8 @@ mod tests {
         std::fs::write(&old_file, "old model").unwrap();
         assert!(!ready(dir.path(), q2), "the replacement needs its own download");
         sparse(dir.path(), &q2.file);
-        remove_retired_q2_l(dir.path()).await.unwrap();
-        remove_retired_q2_l(dir.path()).await.unwrap();
+        remove_retired_q2_l(dir.path()).await;
+        remove_retired_q2_l(dir.path()).await;
         assert!(!old_file.exists());
         assert!(ready(dir.path(), q2));
     }
@@ -1436,6 +1435,25 @@ mod tests {
         assert!(!retired.exists());
         assert!(!partial(&retired).exists());
         assert!(ready(&path, &DECODERS[1]));
+    }
+
+    #[tokio::test]
+    async fn stale_cleanup_error_does_not_block_deleting_a_current_decoder() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nemotron");
+        install_runtime_stub(&path);
+        sparse(&path, &ENCODER);
+        for decoder in DECODERS {
+            sparse(&path, &decoder.file);
+        }
+        // A directory at the old filename makes remove_file return an I/O
+        // error without needing platform-specific permission changes.
+        let retired = path.join("gguf/NVIDIA-Nemotron-3.5-Transcribe-30B-A4B-AD-Q2_0_L.gguf");
+        std::fs::create_dir(&retired).unwrap();
+        delete(&path, &DECODERS[0]).await.unwrap();
+        assert!(!gguf(&path, &DECODERS[0].file).exists());
+        assert!(ready(&path, &DECODERS[1]));
+        assert!(retired.is_dir());
     }
 
     /// Serves `body` over HTTP, honouring `Range: bytes=N-` when `ranges` is
