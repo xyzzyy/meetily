@@ -29,13 +29,13 @@ pub const ENCODER: Artifact = Artifact {
 
 pub const DECODERS: &[Decoder] = &[
     Decoder {
-        id: "nemotron-3.5-transcribe-q2_0_l",
-        display_name: "Nemotron 3.5 Transcribe · Q2_0_L",
+        id: "nemotron-3.5-transcribe-q2_0_m",
+        display_name: "Nemotron 3.5 Transcribe · Q2_0_M",
         memory: "24 GB memory or more",
         file: Artifact {
-            name: "NVIDIA-Nemotron-3.5-Transcribe-30B-A4B-AD-Q2_0_L.gguf",
-            size: 15_547_824_288,
-            sha256: "67eee66a7bb205867e3f9b7c0944e287fc4d2661db2280030e1c26e6ebdea7b4",
+            name: "NVIDIA-Nemotron-3.5-Transcribe-30B-A4B-AD-Q2_0_M.gguf",
+            size: 13_572_208_800,
+            sha256: "764dc3aedbc800a96346e188d74f56fc4d0932299e4771df1bc2e1c952ceed81",
         },
     },
     Decoder {

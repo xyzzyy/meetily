@@ -8,10 +8,12 @@ Users choose one of two GGUF decoders from [AtomicChat's conversion](https://hug
 
 | Model | Decoder | With the encoder | Memory |
 |---|---|---|---|
-| Q2_0_L | 15,548 MB | 17,218 MB | 24 GB or more |
+| Q2_0_M | 13,572 MB | 15,243 MB | 24 GB or more |
 | IQ4_NL | 19,679 MB | 21,349 MB | 32 GB or more |
 
-AtomicChat measured both decoders within about 0.2 points of the BF16 decoder's word error on English, German, French and Spanish ([model card](https://huggingface.co/AtomicChat/NVIDIA-Nemotron-3.5-Transcribe-30B-A4B-GGUF)). The model weights use NVIDIA's OpenMDW 1.1 license.
+AtomicChat measured both decoders within about 0.2 points of the BF16 decoder's word error on English, German, French and Spanish. Q2_0_M increased Chinese character error by about 1.5 points in those tests ([model card](https://huggingface.co/AtomicChat/NVIDIA-Nemotron-3.5-Transcribe-30B-A4B-GGUF)). The model weights use NVIDIA's OpenMDW 1.1 license.
+
+Q2_0_M replaces Q2_0_L. Saved Q2_0_L selections resolve to Q2_0_M and require its separate download. The shared encoder and runtime are reused. The 24 GB memory guidance is retained; the published 16 GB test used CUDA, not a Mac.
 
 ## Runtime
 

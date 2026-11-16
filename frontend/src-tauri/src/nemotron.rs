@@ -1367,6 +1367,21 @@ mod tests {
         assert!(!ready(dir.path(), q2));
     }
 
+    #[test]
+    fn retired_q2_l_file_does_not_make_q2_m_ready() {
+        let dir = tempfile::tempdir().unwrap();
+        let q2 = decoder("nemotron-3.5-transcribe-q2_0_m").unwrap();
+        assert!(decoder("nemotron-3.5-transcribe-q2_0_l").is_none());
+        assert!(decoder("nemotron-3.5-transcribe-iq4_nl").is_some());
+        install_runtime_stub(dir.path());
+        sparse(dir.path(), &ENCODER);
+        let old_file = dir.path().join("gguf/NVIDIA-Nemotron-3.5-Transcribe-30B-A4B-AD-Q2_0_L.gguf");
+        std::fs::write(&old_file, "old model").unwrap();
+        assert!(!ready(dir.path(), q2), "the replacement needs its own download");
+        sparse(dir.path(), &q2.file);
+        assert!(ready(dir.path(), q2));
+    }
+
     #[tokio::test]
     async fn deleting_keeps_shared_files_until_the_last_model() {
         let dir = tempfile::tempdir().unwrap();
