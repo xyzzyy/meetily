@@ -43,6 +43,10 @@ const STALL_TIMEOUT: Duration = Duration::from_secs(30);
 /// still reported success. Every 1 minute piece of that meeting and another
 /// matched the saved transcript.
 const MAX_TEXT_SAMPLES: usize = 60 * 16000;
+/// NeMo-Speech.cpp v0.3.0 budgets 12.5 audio tokens and 6 output tokens per
+/// second, plus 152 tokens. A one-minute text request fits in 2048 cells.
+/// Speaker-only requests finish in the encoder and do not use this context.
+const TEXT_CONTEXT_TOKENS: usize = 2048;
 const RETRY_TEXT_SAMPLES: usize = 20 * 16000;
 /// Speaker turns cover up to one hour per request, the server's limit, so
 /// speaker numbers stay the same across a meeting.
@@ -719,10 +723,15 @@ impl Server {
                 "--no-ui",
             ])
             .args(["--asr.model.name", "nemotron"])
-            // Meetily sends one request at a time. One slot with a pool for an
-            // hour of audio keeps the cache near 0.5 GB on unified memory.
+            // Text requests contain at most one minute. Speaker detection can
+            // still cover an hour because it does not run the decoder.
             .args(["--asr.salm.max_sequences", "1"])
-            .args(["--asr.salm.n_ctx_per_sequence", "73728"])
+            .args(["--asr.salm.n_ctx_per_sequence", &TEXT_CONTEXT_TOKENS.to_string()])
+            .args(["--asr.salm.max_context", &TEXT_CONTEXT_TOKENS.to_string()])
+            .args(["--asr.salm.n_batch", "256"])
+            // A batch of 1 caused a Metal error on a long speaker request
+            // in local v0.3.0 tests. A batch of 2 passed those tests.
+            .args(["--asr.salm.encoder_max_batch", "2"])
             .args([
                 "--threads",
                 "8",
@@ -2109,12 +2118,19 @@ mod tests {
     #[test]
     fn text_requests_stay_short_enough_to_follow_the_audio() {
         let audio = vec![0.1f32; 17 * 60 * 16000];
-        for job in [Job::Text, Job::Words] {
+        for job in [Job::Text, Job::Words, Job::SpeakerWords] {
             let ranges = crate::audio::transcription::funasr_provider::request_ranges(
                 &audio,
                 max_request_samples(job),
             );
             assert!(ranges.iter().all(|range| range.len() <= 60 * 16000));
+            // NeMo-Speech.cpp's duration budget must fit without truncating
+            // the transcript if the request length changes later.
+            assert!(ranges.iter().all(|range| {
+                let seconds = range.len() as f64 / 16000.0;
+                let tokens = (seconds * 12.5).ceil() + (seconds * 6.0).ceil() + 152.0;
+                tokens <= TEXT_CONTEXT_TOKENS as f64
+            }));
             assert_eq!(ranges.last().unwrap().end, audio.len());
         }
         let speakers = crate::audio::transcription::funasr_provider::request_ranges(

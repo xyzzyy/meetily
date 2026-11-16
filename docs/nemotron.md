@@ -33,6 +33,8 @@ Meetily starts `nemo-speech serve` on a free loopback port with a random API key
 
 Select the meeting language in Settings, Import or Enhance to send a language hint. The list uses the codes in NeMo-Speech.cpp v0.3.0 `salm_policy.cpp::language_names`. Auto sends no hint. Enhance keeps the model transcript’s spaces and punctuation when it uses character times. A hint also goes into the speaker instruction because the runtime uses custom instructions as written. Language selection does not prevent invented text; its effect on mixed-language meetings is untested.
 
+Meetily uses one decode slot, a 2,048-token context, decoder batches of 256 and encoder batches of two. Text requests contain at most one minute of audio. The runtime needs at most 1,262 tokens for that audio, its transcript budget and prompt allowance. Speaker-only requests finish in the encoder, so they can still cover one hour with this smaller decoder context. These settings follow the runtime's [configuration](https://github.com/NVIDIA/NeMo-Speech.cpp/blob/v0.3.0/docs/salm/configuration.md) and [token budget](https://github.com/NVIDIA/NeMo-Speech.cpp/blob/v0.3.0/src/speechlm/salm_policy.cpp). An encoder batch of one caused a Metal resource error on a long speaker request in local tests; two passed.
+
 The server log is `models/nemotron/server.log`.
 
 The runtime can report a successful alignment but return no word times for a nonempty transcript. Meetily checks that the timed words retain all returned text. It retries a failed section in pieces of up to 20 seconds. If a shorter section still has incomplete times, Enhance reports an error and keeps the saved transcript.
