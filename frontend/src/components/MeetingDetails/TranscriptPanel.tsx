@@ -215,7 +215,8 @@ export function TranscriptPanel({
           qualityFlags: previous?.qualityFlags,
         }));
         if (event.payload.status === 'completed') {
-          void onRefetchTranscripts?.();
+          // The pagination hook owns refreshes even before this panel mounts.
+          if (!usePagination) void onRefetchTranscripts?.();
           void loadSpeakers();
           // Apply and Undo can restore a different status, method, and quality flags.
           void invoke<DiarizationStatus | null>('get_meeting_diarization_status', { meetingId })
@@ -225,7 +226,7 @@ export function TranscriptPanel({
       }
     ).then(cleanup => { if (disposed) cleanup(); else unlisten = cleanup; });
     return () => { disposed = true; unlisten?.(); };
-  }, [isRecording, loadSpeakers, meetingId, onRefetchTranscripts]);
+  }, [isRecording, loadSpeakers, meetingId, onRefetchTranscripts, usePagination]);
 
   const runDiarization = async (retry: boolean) => {
     if (!meetingId || !diarizationEnabled || !refinementSupported || !beginEdit()) return;

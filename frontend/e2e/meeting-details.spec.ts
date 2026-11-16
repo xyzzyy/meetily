@@ -6,19 +6,20 @@ const summaryText = 'Review the meeting notes. [00:00-00:04]';
 
 async function openMeeting(page: Page, {
   format = 'markdown', segmentCount = 1, summary = summaryText, longRowIndex,
-  summaryProvider = 'ollama',
+  summaryProvider = 'ollama', refinementDuringLoad = false,
 }: {
   format?: 'markdown' | 'blocknote' | 'empty';
   segmentCount?: number;
   summary?: string;
   longRowIndex?: number;
   summaryProvider?: 'ollama' | 'openai' | 'custom-openai';
+  refinementDuringLoad?: boolean;
 } = {}) {
     const errors = collectAppErrors(page);
 
     // Exercise the real production chunks. Only the desktop IPC boundary is
     // replaced; no React components, editors, or extensions are mocked.
-    await page.addInitScript(({ format, transcriptText, summaryText, segmentCount, longRowIndex, summaryProvider }) => {
+    await page.addInitScript(({ format, transcriptText, summaryText, segmentCount, longRowIndex, summaryProvider, refinementDuringLoad }) => {
       let callbackId = 0;
       const callbacks = new Map<number, unknown>();
       const testSettings = {
@@ -31,6 +32,7 @@ async function openMeeting(page: Page, {
         savedModelConfig: null as unknown,
       };
       const listeners = new Map<number, { event: string; handler: number }>();
+      let firstTranscriptRead = true;
       let modelsReady = false;
       let downloadQueries = 0;
       const store = new Map<string, unknown>();
@@ -103,6 +105,16 @@ async function openMeeting(page: Page, {
                 folder_path: null,
               };
               case 'api_get_meeting_transcripts': {
+                const stale = refinementDuringLoad && firstTranscriptRead;
+                firstTranscriptRead = false;
+                if (stale) {
+                  listeners.forEach((listener, id) => {
+                    if (listener.event === 'diarization-progress') {
+                      (callbacks.get(listener.handler) as Function)?.({ event: listener.event, id,
+                        payload: { meetingId: args.meetingId, status: 'completed', progress: 100 } });
+                    }
+                  });
+                }
                 const offset = args.offset ?? 0;
                 const count = Math.min(args.limit ?? 100, segmentCount - offset);
                 return {
@@ -114,7 +126,7 @@ async function openMeeting(page: Page, {
                         : number === 0 ? transcriptText : `Transcript row ${number + 1}. ${'More meeting detail. '.repeat(number % 3)}`,
                       timestamp: '10:00:00', audio_start_time: number * 10,
                       audio_end_time: number * 10 + 8, confidence: 0.98,
-                      speaker_label: 'Speaker 1',
+                      speaker_label: stale ? null : 'Speaker 1',
                     };
                   }),
                   has_more: offset + count < segmentCount, total_count: segmentCount,
@@ -176,7 +188,7 @@ async function openMeeting(page: Page, {
           },
         },
       });
-    }, { format, transcriptText, summaryText: summary, segmentCount, longRowIndex, summaryProvider });
+    }, { format, transcriptText, summaryText: summary, segmentCount, longRowIndex, summaryProvider, refinementDuringLoad });
 
     await serveProductionApp(page);
 
@@ -468,4 +480,10 @@ test('LM Studio preset discovers and saves a local summary model', async ({ page
   await page.locator('#custom-model').fill('manual-model');
   await expect(page.getByRole('button', { name: 'Save', exact: true })).toBeEnabled();
   expect(errors.filter(error => !error.includes('Server unavailable'))).toEqual([]);
+});
+
+test('first transcript page shows labels when refinement finishes during its read', async ({ page }) => {
+  const errors = await openMeeting(page, { segmentCount: 230, refinementDuringLoad: true });
+  await expect(page.locator('#segment-transcript-1')).toContainText('Speaker 1');
+  expect(errors).toEqual([]);
 });
