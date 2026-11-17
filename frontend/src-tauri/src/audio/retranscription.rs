@@ -151,15 +151,7 @@ pub async fn start_retranscription<R: Runtime>(
                 }),
             );
         }
-        Err(e) => {
-            let _ = app.emit(
-                "retranscription-error",
-                RetranscriptionError {
-                    meeting_id: meeting_id.clone(),
-                    error: e.to_string(),
-                },
-            );
-        }
+        Err(_) => {}
     }
 
     result
@@ -1078,8 +1070,8 @@ pub async fn start_retranscription_command<R: Runtime>(
     // Spawn the retranscription in a background task
     tauri::async_runtime::spawn(async move {
         let result = start_retranscription(
-            app,
-            meeting_id_clone,
+            app.clone(),
+            meeting_id_clone.clone(),
             meeting_folder_path,
             language,
             model,
@@ -1088,9 +1080,15 @@ pub async fn start_retranscription_command<R: Runtime>(
         )
         .await;
 
-        // Errors are already emitted as events in start_retranscription
-        // so we just log here for debugging
+        // Include failures before the worker starts, such as a busy meeting lock.
         if let Err(e) = result {
+            let _ = app.emit(
+                "retranscription-error",
+                RetranscriptionError {
+                    meeting_id: meeting_id_clone,
+                    error: e.to_string(),
+                },
+            );
             error!("Retranscription failed: {}", e);
         }
     });
@@ -1233,6 +1231,36 @@ pub async fn is_retranscription_in_progress_command() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn command_reports_a_busy_meeting_before_worker_start() {
+        use tauri::Listener;
+        let app = tauri::test::mock_app();
+        let meeting_id = "enhancement-start-error-test";
+        let _lock = crate::diarization::operations::try_meeting_edit(meeting_id).unwrap();
+        let (send, mut receive) = tokio::sync::mpsc::unbounded_channel();
+        app.listen("retranscription-error", move |event| {
+            let _ = send.send(event.payload().to_string());
+        });
+        start_retranscription_command(
+            app.handle().clone(),
+            meeting_id.into(),
+            "/unused".into(),
+            None,
+            None,
+            None,
+            Some(false),
+        )
+        .await
+        .unwrap();
+        let payload = tokio::time::timeout(std::time::Duration::from_secs(3), receive.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let error: serde_json::Value = serde_json::from_str(&payload).unwrap();
+        assert_eq!(error["meeting_id"], meeting_id);
+        assert!(error["error"].as_str().unwrap().contains("in progress"));
+    }
 
     #[test]
     fn test_create_transcript_segments_empty() {

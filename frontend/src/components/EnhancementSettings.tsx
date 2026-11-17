@@ -40,7 +40,7 @@ export function EnhancementSettings() {
           </Select>
         }
       />
-      {!loadingModels && !available && <p className="text-sm text-muted-foreground">Select an installed model to use Auto enhance.</p>}
+      {!loadingModels && !available && <p className="text-sm text-muted-foreground">{settings.autoEnhance ? 'Auto enhance is paused until the selected model is installed.' : 'Select an installed model to use Auto enhance.'}</p>}
       <SettingsRow title="Auto enhance" description="Enhance each recording after it is saved. The enhanced transcript is applied. You can undo it in the meeting."
         control={<Switch aria-label="Auto enhance" checked={settings.autoEnhance} disabled={!available || loadingModels}
           onCheckedChange={autoEnhance => update({ ...settings, autoEnhance })} />}

@@ -9,7 +9,9 @@ const { readEnhancementPreferences, writeEnhancementPreferences, startAutoEnhanc
 const values = new Map<string, string>();
 beforeEach(() => {
   values.clear(); invoke.mockClear();
-  invoke.mockImplementation(async () => ({ enabled: true, refinementSupported: true }));
+  invoke.mockImplementation(async command => command.endsWith('_get_available_models')
+    ? [{ name: 'model', status: 'Available' }, { name: 'nemotron-q2', status: 'Available' }]
+    : { enabled: true, postCallRefinementEnabled: true, refinementSupported: true });
   (globalThis as any).window = { localStorage: { getItem: (key: string) => values.get(key) ?? null, setItem: (key: string, value: string) => values.set(key, value) } };
 });
 afterAll(() => { mock.module('@tauri-apps/api/event', () => events); delete (globalThis as any).window; mock.module('@tauri-apps/api/core', () => core); });
@@ -44,7 +46,8 @@ test('missing audio and missing model do not start enhancement', async () => {
 test('Parakeet uses auto language and leaves speaker labels alone on unsupported devices', async () => {
   values.set('primaryLanguage', 'fr');
   writeEnhancementPreferences({ autoEnhance: true, provider: 'parakeet', model: 'model' });
-  invoke.mockImplementation(async command => command === 'get_diarization_settings' ? { enabled: true } : { refinementSupported: false });
+  invoke.mockImplementation(async command => command.endsWith('_get_available_models') ? [{ name: 'model', status: 'Available' }]
+    : command === 'get_diarization_settings' ? { enabled: true, postCallRefinementEnabled: true } : { refinementSupported: false });
   await startAutoEnhancement('meeting', '/audio');
   expect(invoke).toHaveBeenLastCalledWith('start_retranscription_command', {
     meetingId: 'meeting', meetingFolderPath: '/audio', provider: 'parakeet', model: 'model', language: null, assignSpeakers: false,
@@ -67,3 +70,20 @@ for (const event of ['retranscription-complete', 'retranscription-error']) {
     expect(ready).toBe(true);
   });
 }
+
+test('an unavailable model skips enhancement and releases the summary wait', async () => {
+  writeEnhancementPreferences({ autoEnhance: true, provider: 'nemotron', model: 'missing-model' });
+  expect(await startAutoEnhancement('missing-model-meeting', '/audio')).toBe(false);
+  await waitForAutoEnhancement('missing-model-meeting');
+  expect(invoke.mock.calls.some(([command]) => command === 'start_retranscription_command')).toBe(false);
+});
+
+test('automatic speaker assignment respects the post-call switch', async () => {
+  writeEnhancementPreferences({ autoEnhance: true, provider: 'nemotron', model: 'model' });
+  invoke.mockImplementation(async command => command.endsWith('_get_available_models') ? [{ name: 'model', status: 'Available' }]
+    : { enabled: true, postCallRefinementEnabled: false });
+  await startAutoEnhancement('no-speaker-refinement', '/audio');
+  expect(invoke).toHaveBeenLastCalledWith('start_retranscription_command', {
+    meetingId: 'no-speaker-refinement', meetingFolderPath: '/audio', provider: 'nemotron', model: 'model', language: null, assignSpeakers: false,
+  });
+});

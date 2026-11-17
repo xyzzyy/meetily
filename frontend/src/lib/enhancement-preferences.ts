@@ -51,10 +51,16 @@ export async function startAutoEnhancement(meetingId: string, meetingFolderPath:
         if (event.payload.meeting_id === meetingId) complete();
       }));
     }
-    const diarization = await invoke<{ enabled: boolean }>('get_diarization_settings');
+    await invoke(`${settings.provider}_init`);
+    const models = await invoke<{ name: string; status: unknown }[]>(`${settings.provider}_get_available_models`);
+    if (!models.some(model => model.name === settings.model && model.status === 'Available')) {
+      complete();
+      return false;
+    }
+    const diarization = await invoke<{ enabled: boolean; postCallRefinementEnabled: boolean }>('get_diarization_settings');
     const language = window.localStorage.getItem('primaryLanguage') || 'auto';
     const supportedLanguage = languagesForProvider(settings.provider, LANGUAGES).some(item => item.code === language);
-    let assignSpeakers = diarization.enabled;
+    let assignSpeakers = diarization.enabled && diarization.postCallRefinementEnabled;
     if (assignSpeakers && settings.provider !== 'nemotron') {
       const status = await invoke<{ refinementSupported: boolean }>('get_diarization_model_status');
       assignSpeakers = status.refinementSupported;

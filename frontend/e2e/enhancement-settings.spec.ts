@@ -74,6 +74,8 @@ for (const outcome of ['complete', 'error', 'navigate']) {
           await original('plugin:event|emit', { event: 'recording-stopped', payload: { folder_path: '/recordings/call', meeting_name: 'Call' } });
           return result;
         }
+        if (command === 'nemotron_init') return null;
+        if (command === 'nemotron_get_available_models') return [{ name: 'nemotron-q2', status: 'Available' }];
         if (command === 'start_retranscription_command') { started = true; return { meeting_id: args.meetingId }; }
         if (command === 'api_get_meeting_metadata' && args.meetingId === 'other-meeting') return {
           id: 'other-meeting', title: 'Other meeting', created_at: '2026-10-28T10:00:00Z', updated_at: '2026-10-28T10:00:00Z', folder_path: null,
