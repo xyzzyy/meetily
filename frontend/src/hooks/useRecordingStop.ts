@@ -6,6 +6,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { useTranscripts } from '@/contexts/TranscriptContext';
 import { useSidebar } from '@/components/Sidebar/SidebarProvider';
 import { useRecordingState, RecordingStatus } from '@/contexts/RecordingStateContext';
+import { startAutoEnhancement } from '@/lib/enhancement-preferences';
 import { storageService } from '@/services/storageService';
 import { indexedDBService } from '@/services/indexedDBService';
 import type { Transcript } from '@/types';
@@ -412,6 +413,12 @@ export function useRecordingStop(
 
           void (async () => {
             try {
+              // Enhancement also assigns speakers. Do not run both jobs on this meeting.
+              try {
+                if (await startAutoEnhancement(meetingId, folderPath)) return;
+              } catch (error) {
+                toast.error('Auto enhance could not start', { description: String(error) });
+              }
               const settings = await invoke<{ enabled: boolean; postCallRefinementEnabled: boolean }>(
                 'get_diarization_settings'
               );

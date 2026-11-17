@@ -1,6 +1,6 @@
 "use client"
 import { useSidebar } from "@/components/Sidebar/SidebarProvider";
-import { useState, useEffect, useCallback, Suspense } from "react";
+import { useState, useEffect, useCallback, useRef, Suspense } from "react";
 import { MeetingSummary, SummaryProcessResponse, Transcript } from "@/types";
 import PageContent from "./page-content";
 import { useRouter, useSearchParams } from "next/navigation";
@@ -8,6 +8,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { LoaderIcon } from "lucide-react";
 import { useConfig } from "@/contexts/ConfigContext";
 import { usePaginatedTranscripts } from "@/hooks/usePaginatedTranscripts";
+import { waitForAutoEnhancement } from "@/lib/enhancement-preferences";
 import { parseSummaryContent } from "@/lib/summary-content";
 
 interface MeetingDetailsResponse {
@@ -22,6 +23,11 @@ interface MeetingDetailsResponse {
 function MeetingDetailsContent() {
   const searchParams = useSearchParams();
   const meetingId = searchParams.get('id');
+  const autoGenerationSessionRef = useRef({ meetingId });
+  if (autoGenerationSessionRef.current.meetingId !== meetingId) {
+    autoGenerationSessionRef.current = { meetingId };
+  }
+  useEffect(() => () => { autoGenerationSessionRef.current = { meetingId: null }; }, []);
   const source = searchParams.get('source'); // Check if navigated from recording
   const { setCurrentMeeting, refetchMeetings } = useSidebar();
   const { isAutoSummary } = useConfig(); // Get auto-summary toggle state
@@ -80,9 +86,19 @@ function MeetingDetailsContent() {
       return;
     }
 
+    const session = autoGenerationSessionRef.current;
+    const isCurrent = () => autoGenerationSessionRef.current === session;
+    setHasCheckedAutoGen(true);
     try {
+      if (meetingId) {
+        await waitForAutoEnhancement(meetingId);
+        if (!isCurrent()) return;
+        await refetch();
+        if (!isCurrent()) return;
+      }
       // Check what's currently in database
       const currentConfig = await invoke('api_get_model_config') as any;
+      if (!isCurrent()) return;
 
       // If DB already has a model, use it (never override!)
       if (currentConfig && currentConfig.model) {
@@ -94,6 +110,7 @@ function MeetingDetailsContent() {
 
       // DB is empty - check if gemma3:1b exists as fallback
       const hasGemma = await checkForGemmaModel();
+      if (!isCurrent()) return;
 
       if (hasGemma) {
         console.log('💾 DB empty, using gemma3:1b as initial default');
@@ -106,6 +123,7 @@ function MeetingDetailsContent() {
           ollamaEndpoint: null,
         });
 
+        if (!isCurrent()) return;
         setShouldAutoGenerate(true);
       } else {
         console.log('⚠️ No model configured and gemma3:1b not found');
@@ -114,8 +132,8 @@ function MeetingDetailsContent() {
       console.error('❌ Failed to setup auto-generation:', error);
     }
 
-    setHasCheckedAutoGen(true);
-  }, [hasCheckedAutoGen, checkForGemmaModel, source, isAutoSummary]);
+    if (isCurrent()) setHasCheckedAutoGen(true);
+  }, [hasCheckedAutoGen, checkForGemmaModel, source, isAutoSummary, meetingId, refetch]);
 
   // Sync meeting metadata from pagination hook to meeting details state
   useEffect(() => {

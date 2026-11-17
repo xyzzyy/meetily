@@ -1,0 +1,69 @@
+import { afterAll, beforeEach, expect, mock, test } from 'bun:test';
+const events = { ...await import('@tauri-apps/api/event') };
+const handlers = new Map<string, (event: any) => void>();
+mock.module('@tauri-apps/api/event', () => ({ ...events, listen: async (name: string, handler: any) => { handlers.set(name, handler); return () => handlers.delete(name); } }));
+const core = { ...await import('@tauri-apps/api/core') };
+const invoke = mock(async (_command: string, _args?: any): Promise<any> => ({ enabled: true, refinementSupported: true }));
+mock.module('@tauri-apps/api/core', () => ({ ...core, invoke }));
+const { readEnhancementPreferences, writeEnhancementPreferences, startAutoEnhancement, waitForAutoEnhancement } = await import('../../src/lib/enhancement-preferences');
+const values = new Map<string, string>();
+beforeEach(() => {
+  values.clear(); invoke.mockClear();
+  invoke.mockImplementation(async () => ({ enabled: true, refinementSupported: true }));
+  (globalThis as any).window = { localStorage: { getItem: (key: string) => values.get(key) ?? null, setItem: (key: string, value: string) => values.set(key, value) } };
+});
+afterAll(() => { mock.module('@tauri-apps/api/event', () => events); delete (globalThis as any).window; mock.module('@tauri-apps/api/core', () => core); });
+
+test('auto enhance is off until enabled and malformed settings are safe', async () => {
+  expect(readEnhancementPreferences().autoEnhance).toBe(false);
+  expect(await startAutoEnhancement('meeting', '/audio')).toBe(false);
+  expect(invoke).not.toHaveBeenCalled();
+  values.set('enhancementPreferences', '{');
+  expect(readEnhancementPreferences()).toEqual({ autoEnhance: false, provider: '', model: '' });
+});
+
+test('a separate Nemotron model persists and starts on saved audio', async () => {
+  const settings = { autoEnhance: true, provider: 'nemotron' as const, model: 'nemotron-q2' };
+  writeEnhancementPreferences(settings);
+  expect(readEnhancementPreferences()).toEqual(settings);
+  expect(await startAutoEnhancement('meeting', '/audio')).toBe(true);
+  expect(invoke).toHaveBeenCalledWith('start_retranscription_command', {
+    meetingId: 'meeting', meetingFolderPath: '/audio', provider: 'nemotron', model: 'nemotron-q2', language: null, assignSpeakers: true,
+  });
+  expect(invoke.mock.calls.some(([command]) => command === 'api_save_transcript_config')).toBe(false);
+});
+
+test('missing audio and missing model do not start enhancement', async () => {
+  writeEnhancementPreferences({ autoEnhance: true, provider: 'nemotron', model: 'model' });
+  await expect(startAutoEnhancement('meeting', null)).rejects.toThrow('no saved audio');
+  writeEnhancementPreferences({ autoEnhance: true, provider: '', model: '' });
+  await expect(startAutoEnhancement('meeting', '/audio')).rejects.toThrow('Select a default');
+  expect(invoke).not.toHaveBeenCalled();
+});
+
+test('Parakeet uses auto language and leaves speaker labels alone on unsupported devices', async () => {
+  values.set('primaryLanguage', 'fr');
+  writeEnhancementPreferences({ autoEnhance: true, provider: 'parakeet', model: 'model' });
+  invoke.mockImplementation(async command => command === 'get_diarization_settings' ? { enabled: true } : { refinementSupported: false });
+  await startAutoEnhancement('meeting', '/audio');
+  expect(invoke).toHaveBeenLastCalledWith('start_retranscription_command', {
+    meetingId: 'meeting', meetingFolderPath: '/audio', provider: 'parakeet', model: 'model', language: null, assignSpeakers: false,
+  });
+});
+
+for (const event of ['retranscription-complete', 'retranscription-error']) {
+  test(`auto summary waits until ${event} and can then use the saved transcript`, async () => {
+    writeEnhancementPreferences({ autoEnhance: true, provider: 'nemotron', model: 'model' });
+    await startAutoEnhancement('pending-meeting', '/audio');
+    let ready = false;
+    const waiting = waitForAutoEnhancement('pending-meeting').then(() => { ready = true; });
+    await Promise.resolve();
+    expect(ready).toBe(false);
+    handlers.get(event)!({ payload: { meeting_id: 'other-meeting' } });
+    await Promise.resolve();
+    expect(ready).toBe(false);
+    handlers.get(event)!({ payload: { meeting_id: 'pending-meeting' } });
+    await waiting;
+    expect(ready).toBe(true);
+  });
+}

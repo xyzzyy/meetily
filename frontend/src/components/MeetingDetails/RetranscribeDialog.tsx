@@ -26,6 +26,7 @@ import { LANGUAGES } from '@/constants/languages';
 import { languagesForProvider } from '@/lib/funasr';
 import { useTranscriptionModels, ModelOption } from '@/hooks/useTranscriptionModels';
 import { useEnhancementRun } from '@/contexts/EnhancementRunContext';
+import { readEnhancementPreferences } from '@/lib/enhancement-preferences';
 import { compareTranscriptText } from '@/lib/transcript-comparison';
 
 interface RetranscribeDialogProps {
@@ -81,6 +82,8 @@ export function RetranscribeDialog({
   const [error, setError] = useState<string | null>(null);
   const [selectedLang, setSelectedLang] = useState(selectedLanguage || 'auto');
 
+  const enhancementPreferences = readEnhancementPreferences();
+
   // Use centralized model fetching hook
   const {
     availableModels,
@@ -90,7 +93,8 @@ export function RetranscribeDialog({
     modelNotice,
     fetchModels,
     resetSelection,
-  } = useTranscriptionModels(transcriptModelConfig);
+  } = useTranscriptionModels(enhancementPreferences.model
+    ? enhancementPreferences : transcriptModelConfig);
 
   // Stable refs for callbacks to avoid listener re-registration
   const onOpenChangeRef = useRef(onOpenChange);

@@ -29,6 +29,7 @@ function dialog(provider, loading = false, selected = true, supported = true, ch
     return [states.get(name), value => states.set(name, typeof value === 'function' ? value(states.get(name)) : value)];
   }, useEffect(effect) { effects.push(effect); }, useRef: value => ({ current: value }), useMemo: fn => fn() };
   const require = name => {
+    if (name === '@/lib/enhancement-preferences') return { readEnhancementPreferences: () => ({ model: '' }) };
     if (name === 'react') return hooks;
     if (name === 'react/jsx-runtime') return { jsx, jsxs: jsx, Fragment: 'Fragment' };
     if (name === '@/contexts/ConfigContext') return { useConfig: () => ({ selectedLanguage: 'en', transcriptModelConfig: {},

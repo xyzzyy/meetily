@@ -9,6 +9,7 @@ import { ModelManager } from './WhisperModelManager';
 import { ParakeetModelManager } from './ParakeetModelManager';
 import { FunAsrModelManager } from './FunAsrModelManager';
 import { NemotronModelManager } from './NemotronModelManager';
+import { EnhancementSettings } from './EnhancementSettings';
 import { SpeakerDiarizationSettings } from './SpeakerDiarizationSettings';
 
 
@@ -228,6 +229,7 @@ export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelCo
                         </div>
                     )}
 
+                    <EnhancementSettings />
                     <SpeakerDiarizationSettings />
                 </div>
             </div>
