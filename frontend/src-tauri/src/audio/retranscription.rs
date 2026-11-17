@@ -11,35 +11,32 @@ use log::{debug, error, info, warn};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Emitter, Manager, Runtime};
 
-/// Global flag to track if retranscription is in progress
-static RETRANSCRIPTION_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
+/// The active meeting remains available when the webview reloads.
+static RETRANSCRIPTION_MEETING: Mutex<Option<String>> = Mutex::new(None);
 
 /// Global flag to signal cancellation
 static RETRANSCRIPTION_CANCELLED: AtomicBool = AtomicBool::new(false);
 
-/// RAII guard for RETRANSCRIPTION_IN_PROGRESS flag
-/// Ensures flag is cleared even if retranscription panics or returns early
+/// Keep the active meeting until the background job ends, including on failure.
 struct RetranscriptionGuard;
 
 impl RetranscriptionGuard {
-    /// Create guard and set flag atomically
-    fn acquire() -> Result<Self, String> {
-        if RETRANSCRIPTION_IN_PROGRESS
-            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-            .is_err()
-        {
+    fn acquire(meeting_id: &str) -> Result<Self, String> {
+        let mut active = RETRANSCRIPTION_MEETING.lock().unwrap_or_else(|error| error.into_inner());
+        if active.is_some() {
             return Err("Retranscription already in progress".to_string());
         }
+        *active = Some(meeting_id.to_string());
         Ok(RetranscriptionGuard)
     }
 }
 
 impl Drop for RetranscriptionGuard {
     fn drop(&mut self) {
-        RETRANSCRIPTION_IN_PROGRESS.store(false, Ordering::SeqCst);
+        *RETRANSCRIPTION_MEETING.lock().unwrap_or_else(|error| error.into_inner()) = None;
     }
 }
 
@@ -76,7 +73,7 @@ pub struct RetranscriptionError {
 
 /// Check if retranscription is currently in progress
 pub fn is_retranscription_in_progress() -> bool {
-    RETRANSCRIPTION_IN_PROGRESS.load(Ordering::SeqCst)
+    RETRANSCRIPTION_MEETING.lock().unwrap_or_else(|error| error.into_inner()).is_some()
 }
 
 /// Cancel ongoing retranscription
@@ -96,11 +93,6 @@ pub async fn start_retranscription<R: Runtime>(
 ) -> Result<RetranscriptionResult> {
     let _speaker_operation = crate::diarization::operations::try_meeting_edit(&meeting_id)
         .map_err(|error| anyhow!(error))?;
-    // Acquire guard - ensures flag is cleared even on panic/early return
-    let _guard = RetranscriptionGuard::acquire().map_err(|e| anyhow!(e))?;
-
-    // Reset cancellation flag
-    RETRANSCRIPTION_CANCELLED.store(false, Ordering::SeqCst);
 
     let _processing = if assign_speakers {
         let state = app.state::<AppState>();
@@ -133,26 +125,6 @@ pub async fn start_retranscription<R: Runtime>(
 
     // Unload the engine after the batch job (success, failure, or cancellation)
     super::common::unload_engine_after_batch(batch_engine).await;
-
-    // Guard will automatically clear flag on drop
-    // No need for manual: RETRANSCRIPTION_IN_PROGRESS.store(false, Ordering::SeqCst);
-
-    match &result {
-        Ok(res) => {
-            let _ = app.emit(
-                "retranscription-complete",
-                serde_json::json!({
-                    "meeting_id": res.meeting_id,
-                    "segments_count": res.segments_count,
-                    "duration_seconds": res.duration_seconds,
-                    "language": res.language,
-                    "review_id": res.review_id,
-                    "warning": res.warning
-                }),
-            );
-        }
-        Err(_) => {}
-    }
 
     result
 }
@@ -1059,10 +1031,14 @@ pub async fn start_retranscription_command<R: Runtime>(
     provider: Option<String>,
     assign_speakers: Option<bool>,
 ) -> Result<RetranscriptionStarted, String> {
-    // Check if retranscription is already in progress (guard will be acquired in start_retranscription)
-    if RETRANSCRIPTION_IN_PROGRESS.load(Ordering::SeqCst) {
-        return Err("Retranscription already in progress".to_string());
+    // Recording startup uses this same lock until its engine and state are ready.
+    let admission = super::common::acquire_engine_lifecycle_lock().await;
+    if super::recording_commands::is_recording().await {
+        return Err("Wait for the recording to finish before enhancing a meeting.".into());
     }
+    let guard = RetranscriptionGuard::acquire(&meeting_id)?;
+    RETRANSCRIPTION_CANCELLED.store(false, Ordering::SeqCst);
+    drop(admission);
 
     // Clone values for the spawned task
     let meeting_id_clone = meeting_id.clone();
@@ -1080,16 +1056,26 @@ pub async fn start_retranscription_command<R: Runtime>(
         )
         .await;
 
-        // Include failures before the worker starts, such as a busy meeting lock.
-        if let Err(e) = result {
-            let _ = app.emit(
-                "retranscription-error",
-                RetranscriptionError {
+        // State is cleared before the terminal event, so reload checks cannot miss the end.
+        drop(guard);
+        match result {
+            Ok(res) => {
+                let _ = app.emit("retranscription-complete", serde_json::json!({
+                    "meeting_id": res.meeting_id,
+                    "segments_count": res.segments_count,
+                    "duration_seconds": res.duration_seconds,
+                    "language": res.language,
+                    "review_id": res.review_id,
+                    "warning": res.warning,
+                }));
+            }
+            Err(e) => {
+                let _ = app.emit("retranscription-error", RetranscriptionError {
                     meeting_id: meeting_id_clone,
                     error: e.to_string(),
-                },
-            );
-            error!("Retranscription failed: {}", e);
+                });
+                error!("Retranscription failed: {}", e);
+            }
         }
     });
 
@@ -1224,8 +1210,12 @@ pub async fn cancel_retranscription_command() -> Result<(), String> {
 }
 
 #[tauri::command]
-pub async fn is_retranscription_in_progress_command() -> bool {
-    is_retranscription_in_progress()
+pub async fn is_retranscription_in_progress_command(meeting_id: Option<String>) -> bool {
+    let active = RETRANSCRIPTION_MEETING.lock().unwrap_or_else(|error| error.into_inner());
+    match meeting_id {
+        Some(id) => active.as_ref() == Some(&id),
+        None => active.is_some(),
+    }
 }
 
 #[cfg(test)]
@@ -1260,6 +1250,21 @@ mod tests {
         let error: serde_json::Value = serde_json::from_str(&payload).unwrap();
         assert_eq!(error["meeting_id"], meeting_id);
         assert!(error["error"].as_str().unwrap().contains("in progress"));
+        assert!(!is_retranscription_in_progress_command(Some(meeting_id.into())).await);
+
+        let guard = RetranscriptionGuard::acquire("enhancement-blocks-recording-test").unwrap();
+        assert!(is_retranscription_in_progress_command(Some("enhancement-blocks-recording-test".into())).await);
+        assert!(!is_retranscription_in_progress_command(Some("other-meeting".into())).await);
+        let error = super::super::recording_commands::start_recording_with_meeting_name(
+            app.handle().clone(), None,
+        ).await.unwrap_err();
+        assert!(error.contains("Wait for enhancement"));
+        let error = super::super::recording_commands::start_recording_with_devices_and_meeting(
+            app.handle().clone(), None, None, None,
+        ).await.unwrap_err();
+        assert!(error.contains("Wait for enhancement"));
+        drop(guard);
+        assert!(!is_retranscription_in_progress_command(None).await);
     }
 
     #[test]
@@ -1340,9 +1345,6 @@ mod tests {
     fn test_cancellation_flag() {
         // Reset flag to known state
         RETRANSCRIPTION_CANCELLED.store(false, Ordering::SeqCst);
-        RETRANSCRIPTION_IN_PROGRESS.store(false, Ordering::SeqCst);
-
-        assert!(!is_retranscription_in_progress());
 
         // Test cancellation
         cancel_retranscription();

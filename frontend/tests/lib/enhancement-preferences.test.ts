@@ -12,7 +12,7 @@ beforeEach(() => {
   invoke.mockImplementation(async command => command.endsWith('_get_available_models')
     ? [{ name: 'model', status: 'Available' }, { name: 'nemotron-q2', status: 'Available' }]
     : { enabled: true, postCallRefinementEnabled: true, refinementSupported: true });
-  (globalThis as any).window = { localStorage: { getItem: (key: string) => values.get(key) ?? null, setItem: (key: string, value: string) => values.set(key, value) } };
+  (globalThis as any).window = { sessionStorage: { getItem: (key: string) => values.get(key) ?? null, setItem: (key: string, value: string) => values.set(key, value), removeItem: (key: string) => values.delete(key) }, localStorage: { getItem: (key: string) => values.get(key) ?? null, setItem: (key: string, value: string) => values.set(key, value) } };
 });
 afterAll(() => { mock.module('@tauri-apps/api/event', () => events); delete (globalThis as any).window; mock.module('@tauri-apps/api/core', () => core); });
 
@@ -87,3 +87,21 @@ test('automatic speaker assignment respects the post-call switch', async () => {
     meetingId: 'no-speaker-refinement', meetingFolderPath: '/audio', provider: 'nemotron', model: 'model', language: null, assignSpeakers: false,
   });
 });
+
+for (const running of [true, false]) {
+  test(`a reload checks the native meeting state (running: ${running})`, async () => {
+    values.set('autoEnhancement:restored-meeting', 'pending');
+    invoke.mockImplementation(async () => running);
+    let ready = false;
+    const waiting = waitForAutoEnhancement('restored-meeting').then(() => { ready = true; });
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(invoke).toHaveBeenCalledWith('is_retranscription_in_progress_command', { meetingId: 'restored-meeting' });
+    if (running) {
+      expect(ready).toBe(false);
+      handlers.get('retranscription-complete')!({ payload: { meeting_id: 'restored-meeting' } });
+    }
+    await waiting;
+    expect(ready).toBe(true);
+    expect(values.has('autoEnhancement:restored-meeting')).toBe(false);
+  });
+}

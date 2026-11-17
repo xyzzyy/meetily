@@ -48,7 +48,7 @@ test('save a Nemotron enhancement default while Whisper stays selected for calls
   expect(calls.filter((call: any) => call.command === 'api_save_transcript_config')).toEqual([]);
 });
 
-for (const outcome of ['complete', 'error', 'navigate']) {
+for (const outcome of ['complete', 'error', 'navigate', 'reload']) {
   test(`auto summary waits for enhancement ${outcome}`, async ({ page }) => {
     await installUsageDesktop(page);
     await page.addInitScript(({ outcome }) => {
@@ -56,8 +56,9 @@ for (const outcome of ['complete', 'error', 'navigate']) {
       localStorage.setItem('enhancementPreferences', JSON.stringify({ autoEnhance: true, provider: 'nemotron', model: 'nemotron-q2' }));
       const desktop = (window as any).__TAURI_INTERNALS__;
       const original = desktop.invoke;
-      let complete = false;
-      let started = false;
+      let complete = sessionStorage.getItem('testEnhancementComplete') === 'true';
+      let started = sessionStorage.getItem('testEnhancementStarted') === 'true';
+      let running = sessionStorage.getItem('testEnhancementRunning') === 'true';
       let summaryInput: unknown = null;
       const enhanced = 'The enhanced transcript contains the final decision.';
       Object.assign(window, { __enhancementTest: {
@@ -65,6 +66,9 @@ for (const outcome of ['complete', 'error', 'navigate']) {
         summaryInput: () => summaryInput,
         async finish() {
           complete = outcome !== 'error';
+          running = false;
+          sessionStorage.setItem('testEnhancementComplete', String(complete));
+          sessionStorage.setItem('testEnhancementRunning', 'false');
           await original('plugin:event|emit', { event: `retranscription-${outcome === 'error' ? 'error' : 'complete'}`, payload: { meeting_id: 'walkthrough-meeting', error: 'Test failure' } });
         },
       } });
@@ -76,7 +80,13 @@ for (const outcome of ['complete', 'error', 'navigate']) {
         }
         if (command === 'nemotron_init') return null;
         if (command === 'nemotron_get_available_models') return [{ name: 'nemotron-q2', status: 'Available' }];
-        if (command === 'start_retranscription_command') { started = true; return { meeting_id: args.meetingId }; }
+        if (command === 'is_retranscription_in_progress_command') return running && args.meetingId === 'walkthrough-meeting';
+        if (command === 'start_retranscription_command') {
+          started = true; running = true;
+          sessionStorage.setItem('testEnhancementStarted', 'true');
+          sessionStorage.setItem('testEnhancementRunning', 'true');
+          return { meeting_id: args.meetingId };
+        }
         if (command === 'api_get_meeting_metadata' && args.meetingId === 'other-meeting') return {
           id: 'other-meeting', title: 'Other meeting', created_at: '2026-10-28T10:00:00Z', updated_at: '2026-10-28T10:00:00Z', folder_path: null,
         };
@@ -98,6 +108,11 @@ for (const outcome of ['complete', 'error', 'navigate']) {
     await expect(page).toHaveURL(/meeting-details\?id=walkthrough-meeting/, { timeout: 20_000 });
     expect(await page.evaluate(() => (window as any).__enhancementTest.started())).toBe(true);
     expect(await page.evaluate(() => (window as any).__enhancementTest.summaryInput())).toBeNull();
+    if (outcome === 'reload') {
+      await page.reload();
+      await expect(page.getByRole('region', { name: 'Transcript', exact: true })).toBeVisible();
+      expect(await page.evaluate(() => (window as any).__enhancementTest.summaryInput())).toBeNull();
+    }
     if (outcome === 'navigate') {
       await page.getByText('Other meeting', { exact: true }).first().click();
       await expect(page).toHaveURL(/meeting-details\?id=other-meeting/);
@@ -112,6 +127,6 @@ for (const outcome of ['complete', 'error', 'navigate']) {
     await page.evaluate(() => (window as any).__enhancementTest.finish());
     await expect.poll(() => page.evaluate(() => (window as any).__enhancementTest.summaryInput())).not.toBeNull();
     const input = JSON.stringify(await page.evaluate(() => (window as any).__enhancementTest.summaryInput()));
-    expect(input).toContain(outcome === 'complete' ? 'enhanced transcript contains the final decision' : 'agreed to review the meeting notes');
+    expect(input).toContain(outcome === 'error' ? 'agreed to review the meeting notes' : 'enhanced transcript contains the final decision');
   });
 }
