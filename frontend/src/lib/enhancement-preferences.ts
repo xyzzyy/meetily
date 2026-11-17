@@ -28,6 +28,17 @@ const pendingEnhancements = new Map<string, Promise<void>>();
 
 const pendingKey = (meetingId: string) => `autoEnhancement:${meetingId}`;
 
+export async function refineSpeakersAfterRecording(meetingId: string): Promise<boolean> {
+  const settings = await invoke<{ enabled: boolean; postCallRefinementEnabled: boolean }>('get_diarization_settings');
+  if (!settings.enabled || !settings.postCallRefinementEnabled) return false;
+  const status = await invoke<{ refinementSupported: boolean }>('get_diarization_model_status');
+  if (status.refinementSupported) {
+    await invoke('start_final_diarization', { request: { meetingId, overwriteManualEdits: false } });
+    return true;
+  }
+  return false;
+}
+
 function trackEnhancement(meetingId: string) {
   window.sessionStorage.setItem(pendingKey(meetingId), 'pending');
   let finish!: () => void;
@@ -35,17 +46,24 @@ function trackEnhancement(meetingId: string) {
   const pending = new Promise<void>(resolve => { finish = resolve; });
   pendingEnhancements.set(meetingId, pending);
   const unlisteners: (() => void)[] = [];
-  const complete = () => {
+  const complete = (failed = false) => {
     if (settled) return;
     settled = true;
     window.sessionStorage.removeItem(pendingKey(meetingId));
     pendingEnhancements.delete(meetingId);
+    if (failed) {
+      void refineSpeakersAfterRecording(meetingId).catch(error => {
+        console.warn('Final speaker refinement kept the live transcript:', error);
+      });
+    }
     finish();
     unlisteners.forEach(unlisten => unlisten());
   };
   const ready = Promise.all(['retranscription-complete', 'retranscription-error'].map(name =>
-    listen<{ meeting_id: string }>(name, event => {
-      if (event.payload.meeting_id === meetingId) complete();
+    listen<{ meeting_id: string; error?: string }>(name, event => {
+      if (event.payload.meeting_id === meetingId) {
+        complete(name === 'retranscription-error' && event.payload.error !== 'Retranscription cancelled');
+      }
     }).then(unlisten => { if (settled) unlisten(); else unlisteners.push(unlisten); })
   ));
   return { pending, ready, complete };

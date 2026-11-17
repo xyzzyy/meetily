@@ -209,6 +209,9 @@ jobs:
           persist-credentials: false
       - uses: ./.github/actions/setup-native
       - run: cargo test --locked --release -p llama-helper --features metal
+        env:
+          # Keep this test build separate from the restored app build artifacts.
+          CARGO_TARGET_DIR: ${{ runner.temp }}/llama-helper-tests
 
   macos-app:
     name: macOS app bundle (arm64)

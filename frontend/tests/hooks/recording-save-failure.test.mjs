@@ -44,7 +44,7 @@ async function loadHook({
     setStatus: (status, message) => statuses.push({ status, message }),
   };
   const require = (name) => {
-    if (name === '@/lib/enhancement-preferences') return { startAutoEnhancement: autoEnhance };
+    if (name === '@/lib/enhancement-preferences') return { startAutoEnhancement: autoEnhance, refineSpeakersAfterRecording: async () => {} };
     if (name === 'react') return React;
     if (name === 'next/navigation') return { useRouter: () => ({ push: path => calls.navigation.push(path) }) };
     if (name === '@tauri-apps/api/event') return { listen: (event, callback) => {

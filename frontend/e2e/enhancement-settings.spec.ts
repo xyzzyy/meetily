@@ -60,10 +60,12 @@ for (const outcome of ['complete', 'error', 'navigate', 'reload']) {
       let started = sessionStorage.getItem('testEnhancementStarted') === 'true';
       let running = sessionStorage.getItem('testEnhancementRunning') === 'true';
       let summaryInput: unknown = null;
+      let refined = false;
       const enhanced = 'The enhanced transcript contains the final decision.';
       Object.assign(window, { __enhancementTest: {
         started: () => started,
         summaryInput: () => summaryInput,
+        refined: () => refined,
         async finish() {
           complete = outcome !== 'error';
           running = false;
@@ -78,6 +80,9 @@ for (const outcome of ['complete', 'error', 'navigate', 'reload']) {
           await original('plugin:event|emit', { event: 'recording-stopped', payload: { folder_path: '/recordings/call', meeting_name: 'Call' } });
           return result;
         }
+        if (outcome === 'error' && command === 'get_diarization_settings') return { enabled: true, postCallRefinementEnabled: true, mode: 'post_call_only', showProvisionalLabels: false };
+        if (outcome === 'error' && command === 'get_diarization_model_status') return { installed: true, refinementSupported: true };
+        if (command === 'start_final_diarization') { refined = true; return {}; }
         if (command === 'nemotron_init') return null;
         if (command === 'nemotron_get_available_models') return [{ name: 'nemotron-q2', status: 'Available' }];
         if (command === 'is_retranscription_in_progress_command') return running && args.meetingId === 'walkthrough-meeting';
@@ -127,6 +132,7 @@ for (const outcome of ['complete', 'error', 'navigate', 'reload']) {
     await page.evaluate(() => (window as any).__enhancementTest.finish());
     await expect.poll(() => page.evaluate(() => (window as any).__enhancementTest.summaryInput())).not.toBeNull();
     const input = JSON.stringify(await page.evaluate(() => (window as any).__enhancementTest.summaryInput()));
+    if (outcome === 'error') await expect.poll(() => page.evaluate(() => (window as any).__enhancementTest.refined())).toBe(true);
     expect(input).toContain(outcome === 'error' ? 'agreed to review the meeting notes' : 'enhanced transcript contains the final decision');
   });
 }

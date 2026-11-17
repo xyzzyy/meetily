@@ -105,3 +105,20 @@ for (const running of [true, false]) {
     expect(values.has('autoEnhancement:restored-meeting')).toBe(false);
   });
 }
+
+for (const restored of [false, true]) {
+  test(`a later enhancement error runs the speaker fallback (restored: ${restored})`, async () => {
+    const meetingId = `failed-enhancement-${restored}`;
+    if (restored) values.set(`autoEnhancement:${meetingId}`, 'pending');
+    else {
+      writeEnhancementPreferences({ autoEnhance: true, provider: 'nemotron', model: 'model' });
+      await startAutoEnhancement(meetingId, '/audio');
+    }
+    const waiting = waitForAutoEnhancement(meetingId);
+    await new Promise(resolve => setTimeout(resolve, 0));
+    handlers.get('retranscription-error')!({ payload: { meeting_id: meetingId, error: 'Model load failed' } });
+    await waiting;
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(invoke).toHaveBeenCalledWith('start_final_diarization', { request: { meetingId, overwriteManualEdits: false } });
+  });
+}
