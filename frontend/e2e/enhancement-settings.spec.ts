@@ -10,7 +10,7 @@ test('save a Nemotron enhancement default while Whisper stays selected for calls
     desktop.invoke = async (command: string, args: any) => {
       if (['nemotron_init', 'funasr_init'].includes(command)) return null;
       if (command === 'whisper_get_available_models') return [{ name: 'large-v3', status: 'Available', size_mb: 3000 }];
-      if (command === 'nemotron_get_available_models') return localStorage.getItem('testModelMissing') ? [] : [{ name: 'nemotron-q2', display_name: 'Nemotron Q2', status: 'Available', size_mb: 17000, supported: true }];
+      if (command === 'nemotron_get_available_models') return localStorage.getItem('testModelMissing') ? [] : [{ name: 'nemotron-3.5-transcribe-q2_0_m', display_name: 'Nemotron Q2_0_M', status: 'Available', size_mb: 15242, supported: true }];
       if (command === 'funasr_get_available_models') return [];
       return original(command, args);
     };
@@ -24,25 +24,25 @@ test('save a Nemotron enhancement default while Whisper stays selected for calls
   await expect(auto).not.toBeChecked();
   await expect(auto).toBeDisabled();
   await model.click();
-  await page.getByRole('option', { name: 'Nemotron: Nemotron Q2' }).click();
+  await page.getByRole('option', { name: 'Nemotron: Nemotron Q2_0_M' }).click();
   await auto.click();
   await expect(auto).toBeChecked();
   await expect(page.getByRole('combobox').first()).toContainText('Local Whisper');
   await page.reload();
   await page.getByRole('tab', { name: 'Transcription', exact: true }).click();
-  await expect(model).toContainText('Nemotron: Nemotron Q2');
+  await expect(model).toContainText('Nemotron: Nemotron Q2_0_M');
   await expect(auto).toBeChecked();
   await auto.scrollIntoViewIfNeeded();
   await page.screenshot({ path: testInfo.outputPath('enhancement-settings.png') });
   // A model removed or downloaded while Settings stays open appears on the next open.
   await page.evaluate(() => localStorage.setItem('testModelMissing', 'true'));
   await model.click();
-  await expect(page.getByRole('option', { name: 'nemotron-q2 (unavailable)' })).toBeVisible();
+  await expect(page.getByRole('option', { name: 'nemotron-3.5-transcribe-q2_0_m (unavailable)' })).toBeVisible();
   await page.keyboard.press('Escape');
   await expect(auto).toBeDisabled();
   await page.evaluate(() => localStorage.removeItem('testModelMissing'));
   await model.click();
-  await page.getByRole('option', { name: 'Nemotron: Nemotron Q2' }).click();
+  await page.getByRole('option', { name: 'Nemotron: Nemotron Q2_0_M' }).click();
   await expect(auto).toBeEnabled();
   const calls = await page.evaluate(() => JSON.parse(localStorage.getItem('meetily-usage-fixture')!).calls);
   expect(calls.filter((call: any) => call.command === 'api_save_transcript_config')).toEqual([]);
@@ -53,7 +53,7 @@ for (const outcome of ['complete', 'error', 'navigate', 'reload']) {
     await installUsageDesktop(page);
     await page.addInitScript(({ outcome }) => {
       localStorage.setItem('isAutoSummary', 'true');
-      localStorage.setItem('enhancementPreferences', JSON.stringify({ autoEnhance: true, provider: 'nemotron', model: 'nemotron-q2' }));
+      localStorage.setItem('enhancementPreferences', JSON.stringify({ autoEnhance: true, provider: 'nemotron', model: 'nemotron-3.5-transcribe-q2_0_m' }));
       const desktop = (window as any).__TAURI_INTERNALS__;
       const original = desktop.invoke;
       let complete = sessionStorage.getItem('testEnhancementComplete') === 'true';
@@ -84,7 +84,7 @@ for (const outcome of ['complete', 'error', 'navigate', 'reload']) {
         if (outcome === 'error' && command === 'get_diarization_model_status') return { installed: true, refinementSupported: true };
         if (command === 'start_final_diarization') { refined = true; return {}; }
         if (command === 'nemotron_init') return null;
-        if (command === 'nemotron_get_available_models') return [{ name: 'nemotron-q2', status: 'Available' }];
+        if (command === 'nemotron_get_available_models') return [{ name: 'nemotron-3.5-transcribe-q2_0_m', status: 'Available' }];
         if (command === 'is_retranscription_in_progress_command') return running && args.meetingId === 'walkthrough-meeting';
         if (command === 'start_retranscription_command') {
           started = true; running = true;
