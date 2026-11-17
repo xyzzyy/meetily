@@ -11,11 +11,14 @@ use log::{debug, error, info, warn};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
+use std::collections::HashMap;
 use tauri::{AppHandle, Emitter, Manager, Runtime};
 
 /// The active meeting remains available when the webview reloads.
 static RETRANSCRIPTION_MEETING: Mutex<Option<String>> = Mutex::new(None);
+static RETRANSCRIPTION_OUTCOMES: LazyLock<Mutex<HashMap<String, &'static str>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 
 /// Global flag to signal cancellation
 static RETRANSCRIPTION_CANCELLED: AtomicBool = AtomicBool::new(false);
@@ -69,6 +72,7 @@ pub struct RetranscriptionResult {
 pub struct RetranscriptionError {
     pub meeting_id: String,
     pub error: String,
+    pub cancelled: bool,
 }
 
 /// Check if retranscription is currently in progress
@@ -90,6 +94,7 @@ pub async fn start_retranscription<R: Runtime>(
     model: Option<String>,
     provider: Option<String>,
     assign_speakers: bool,
+    preserve_speakers: bool,
 ) -> Result<RetranscriptionResult> {
     let _speaker_operation = crate::diarization::operations::try_meeting_edit(&meeting_id)
         .map_err(|error| anyhow!(error))?;
@@ -120,6 +125,7 @@ pub async fn start_retranscription<R: Runtime>(
         model,
         provider,
         assign_speakers,
+        preserve_speakers,
     )
     .await;
 
@@ -177,6 +183,7 @@ async fn run_retranscription<R: Runtime>(
     model: Option<String>,
     provider: Option<String>,
     assign_speakers: bool,
+    preserve_speakers: bool,
 ) -> Result<RetranscriptionResult> {
     let folder_path = PathBuf::from(&meeting_folder_path);
     let audio_path = find_audio_file(&folder_path)?;
@@ -256,6 +263,7 @@ async fn run_retranscription<R: Runtime>(
             transcript_sources,
             provider,
             model,
+            preserve_speakers,
         )
         .await;
     }
@@ -589,6 +597,7 @@ async fn run_retranscription<R: Runtime>(
         transcript_sources,
         provider,
         effective_model,
+        preserve_speakers,
     )
     .await
 }
@@ -654,6 +663,7 @@ async fn save_retranscription<R: Runtime>(
     transcript_sources: Vec<Option<String>>,
     provider: Option<String>,
     model: Option<String>,
+    preserve_speakers: bool,
 ) -> Result<RetranscriptionResult> {
     let app = app.clone();
     // Check for cancellation
@@ -680,6 +690,7 @@ async fn save_retranscription<R: Runtime>(
             original,
             segments,
             labels,
+            preserve_speakers,
             duration_seconds,
             language: language.clone(),
             provider,
@@ -1030,6 +1041,7 @@ pub async fn start_retranscription_command<R: Runtime>(
     model: Option<String>,
     provider: Option<String>,
     assign_speakers: Option<bool>,
+    preserve_speakers: Option<bool>,
 ) -> Result<RetranscriptionStarted, String> {
     // Recording startup uses this same lock until its engine and state are ready.
     let admission = super::common::acquire_engine_lifecycle_lock().await;
@@ -1053,10 +1065,15 @@ pub async fn start_retranscription_command<R: Runtime>(
             model,
             provider,
             assign_speakers.unwrap_or(false),
+            preserve_speakers.unwrap_or(false),
         )
         .await;
 
-        // State is cleared before the terminal event, so reload checks cannot miss the end.
+        let cancelled = result.is_err() && RETRANSCRIPTION_CANCELLED.load(Ordering::SeqCst);
+        let outcome = if result.is_ok() { "completed" } else if cancelled { "cancelled" } else { "failed" };
+        RETRANSCRIPTION_OUTCOMES.lock().unwrap_or_else(|error| error.into_inner())
+            .insert(meeting_id_clone.clone(), outcome);
+        // Retain the outcome before clearing active state or emitting the event.
         drop(guard);
         match result {
             Ok(res) => {
@@ -1073,6 +1090,7 @@ pub async fn start_retranscription_command<R: Runtime>(
                 let _ = app.emit("retranscription-error", RetranscriptionError {
                     meeting_id: meeting_id_clone,
                     error: e.to_string(),
+                    cancelled,
                 });
                 error!("Retranscription failed: {}", e);
             }
@@ -1139,13 +1157,14 @@ async fn apply_review_content<R: Runtime>(
     if speaker_snapshot != proposal.speaker_backup {
         return Err("Speaker labels changed while Enhance was running. The saved transcript was kept. Run Enhance again.".into());
     }
-    super::enhancement::publish(
+    super::enhancement::publish_with_speaker_policy(
         state.db_manager.pool(),
         state.speaker_store.pool(),
         &meeting_id,
         &proposal.original,
         &proposal.segments,
         proposal.labels.as_ref(),
+        proposal.preserve_speakers,
         cancelled,
     )
     .await
@@ -1218,6 +1237,16 @@ pub async fn is_retranscription_in_progress_command(meeting_id: Option<String>) 
     }
 }
 
+#[tauri::command]
+pub async fn get_retranscription_outcome(meeting_id: String) -> &'static str {
+    let active = RETRANSCRIPTION_MEETING.lock().unwrap_or_else(|error| error.into_inner());
+    if active.as_ref() == Some(&meeting_id) {
+        return "running";
+    }
+    RETRANSCRIPTION_OUTCOMES.lock().unwrap_or_else(|error| error.into_inner())
+        .get(&meeting_id).copied().unwrap_or("unknown")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1240,6 +1269,7 @@ mod tests {
             None,
             None,
             Some(false),
+            None,
         )
         .await
         .unwrap();
@@ -1251,9 +1281,12 @@ mod tests {
         assert_eq!(error["meeting_id"], meeting_id);
         assert!(error["error"].as_str().unwrap().contains("in progress"));
         assert!(!is_retranscription_in_progress_command(Some(meeting_id.into())).await);
+        assert_eq!(get_retranscription_outcome(meeting_id.into()).await, "failed");
+        assert_eq!(get_retranscription_outcome("missing-meeting".into()).await, "unknown");
 
         let guard = RetranscriptionGuard::acquire("enhancement-blocks-recording-test").unwrap();
         assert!(is_retranscription_in_progress_command(Some("enhancement-blocks-recording-test".into())).await);
+        assert_eq!(get_retranscription_outcome("enhancement-blocks-recording-test".into()).await, "running");
         assert!(!is_retranscription_in_progress_command(Some("other-meeting".into())).await);
         let error = super::super::recording_commands::start_recording_with_meeting_name(
             app.handle().clone(), None,

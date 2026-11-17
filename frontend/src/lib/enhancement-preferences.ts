@@ -60,9 +60,9 @@ function trackEnhancement(meetingId: string) {
     unlisteners.forEach(unlisten => unlisten());
   };
   const ready = Promise.all(['retranscription-complete', 'retranscription-error'].map(name =>
-    listen<{ meeting_id: string; error?: string }>(name, event => {
+    listen<{ meeting_id: string; error?: string; cancelled?: boolean }>(name, event => {
       if (event.payload.meeting_id === meetingId) {
-        complete(name === 'retranscription-error' && event.payload.error !== 'Retranscription cancelled');
+        complete(name === 'retranscription-error' && event.payload.cancelled !== true);
       }
     }).then(unlisten => { if (settled) unlisten(); else unlisteners.push(unlisten); })
   ));
@@ -76,7 +76,8 @@ export async function waitForAutoEnhancement(meetingId: string): Promise<void> {
   const restored = trackEnhancement(meetingId);
   try {
     await restored.ready;
-    if (!await invoke<boolean>('is_retranscription_in_progress_command', { meetingId })) restored.complete();
+    const outcome = await invoke<string>('get_retranscription_outcome', { meetingId });
+    if (outcome !== 'running') restored.complete(outcome === 'failed');
     await restored.pending;
   } catch (error) {
     restored.complete();
@@ -111,6 +112,7 @@ export async function startAutoEnhancement(meetingId: string, meetingFolderPath:
       meetingId, meetingFolderPath, provider: settings.provider, model: settings.model,
       language: settings.provider === 'parakeet' || language === 'auto' || !supportedLanguage ? null : language,
       assignSpeakers,
+      preserveSpeakers: true,
     });
     return true;
   } catch (error) {

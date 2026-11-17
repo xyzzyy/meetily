@@ -9,7 +9,7 @@ const { readEnhancementPreferences, writeEnhancementPreferences, startAutoEnhanc
 const values = new Map<string, string>();
 beforeEach(() => {
   values.clear(); invoke.mockClear();
-  invoke.mockImplementation(async command => command.endsWith('_get_available_models')
+  invoke.mockImplementation(async command => command === 'get_retranscription_outcome' ? 'running' : command.endsWith('_get_available_models')
     ? [{ name: 'model', status: 'Available' }, { name: 'nemotron-q2', status: 'Available' }]
     : { enabled: true, postCallRefinementEnabled: true, refinementSupported: true });
   (globalThis as any).window = { sessionStorage: { getItem: (key: string) => values.get(key) ?? null, setItem: (key: string, value: string) => values.set(key, value), removeItem: (key: string) => values.delete(key) }, localStorage: { getItem: (key: string) => values.get(key) ?? null, setItem: (key: string, value: string) => values.set(key, value) } };
@@ -30,7 +30,7 @@ test('a separate Nemotron model persists and starts on saved audio', async () =>
   expect(readEnhancementPreferences()).toEqual(settings);
   expect(await startAutoEnhancement('meeting', '/audio')).toBe(true);
   expect(invoke).toHaveBeenCalledWith('start_retranscription_command', {
-    meetingId: 'meeting', meetingFolderPath: '/audio', provider: 'nemotron', model: 'nemotron-q2', language: null, assignSpeakers: true,
+    meetingId: 'meeting', meetingFolderPath: '/audio', provider: 'nemotron', model: 'nemotron-q2', language: null, assignSpeakers: true, preserveSpeakers: true,
   });
   expect(invoke.mock.calls.some(([command]) => command === 'api_save_transcript_config')).toBe(false);
 });
@@ -43,14 +43,14 @@ test('missing audio and missing model do not start enhancement', async () => {
   expect(invoke).not.toHaveBeenCalled();
 });
 
-test('Parakeet uses auto language and leaves speaker labels alone on unsupported devices', async () => {
+test('Parakeet uses auto language and skips new speaker analysis on unsupported devices', async () => {
   values.set('primaryLanguage', 'fr');
   writeEnhancementPreferences({ autoEnhance: true, provider: 'parakeet', model: 'model' });
   invoke.mockImplementation(async command => command.endsWith('_get_available_models') ? [{ name: 'model', status: 'Available' }]
     : command === 'get_diarization_settings' ? { enabled: true, postCallRefinementEnabled: true } : { refinementSupported: false });
   await startAutoEnhancement('meeting', '/audio');
   expect(invoke).toHaveBeenLastCalledWith('start_retranscription_command', {
-    meetingId: 'meeting', meetingFolderPath: '/audio', provider: 'parakeet', model: 'model', language: null, assignSpeakers: false,
+    meetingId: 'meeting', meetingFolderPath: '/audio', provider: 'parakeet', model: 'model', language: null, assignSpeakers: false, preserveSpeakers: true,
   });
 });
 
@@ -84,18 +84,18 @@ test('automatic speaker assignment respects the post-call switch', async () => {
     : { enabled: true, postCallRefinementEnabled: false });
   await startAutoEnhancement('no-speaker-refinement', '/audio');
   expect(invoke).toHaveBeenLastCalledWith('start_retranscription_command', {
-    meetingId: 'no-speaker-refinement', meetingFolderPath: '/audio', provider: 'nemotron', model: 'model', language: null, assignSpeakers: false,
+    meetingId: 'no-speaker-refinement', meetingFolderPath: '/audio', provider: 'nemotron', model: 'model', language: null, assignSpeakers: false, preserveSpeakers: true,
   });
 });
 
 for (const running of [true, false]) {
   test(`a reload checks the native meeting state (running: ${running})`, async () => {
     values.set('autoEnhancement:restored-meeting', 'pending');
-    invoke.mockImplementation(async () => running);
+    invoke.mockImplementation(async () => running ? 'running' : 'completed');
     let ready = false;
     const waiting = waitForAutoEnhancement('restored-meeting').then(() => { ready = true; });
     await new Promise(resolve => setTimeout(resolve, 0));
-    expect(invoke).toHaveBeenCalledWith('is_retranscription_in_progress_command', { meetingId: 'restored-meeting' });
+    expect(invoke).toHaveBeenCalledWith('get_retranscription_outcome', { meetingId: 'restored-meeting' });
     if (running) {
       expect(ready).toBe(false);
       handlers.get('retranscription-complete')!({ payload: { meeting_id: 'restored-meeting' } });
@@ -120,5 +120,26 @@ for (const restored of [false, true]) {
     await waiting;
     await new Promise(resolve => setTimeout(resolve, 0));
     expect(invoke).toHaveBeenCalledWith('start_final_diarization', { request: { meetingId, overwriteManualEdits: false } });
+  });
+}
+
+for (const message of ['Retranscription cancelled', 'Final speaker refinement was cancelled', 'Enhancement cancelled. The saved transcript was kept.']) {
+  test(`explicit cancellation skips the fallback: ${message}`, async () => {
+    writeEnhancementPreferences({ autoEnhance: true, provider: 'nemotron', model: 'model' });
+    await startAutoEnhancement('cancelled-meeting', '/audio');
+    const waiting = waitForAutoEnhancement('cancelled-meeting');
+    handlers.get('retranscription-error')!({ payload: { meeting_id: 'cancelled-meeting', error: message, cancelled: true } });
+    await waiting;
+    expect(invoke.mock.calls.some(([command]) => command === 'start_final_diarization')).toBe(false);
+  });
+}
+for (const outcome of ['failed', 'cancelled', 'completed']) {
+  test(`a missed terminal event restores outcome ${outcome}`, async () => {
+    values.set('autoEnhancement:missed-event', 'pending');
+    invoke.mockImplementation(async command => command === 'get_retranscription_outcome' ? outcome
+      : { enabled: true, postCallRefinementEnabled: true, refinementSupported: true });
+    await waitForAutoEnhancement('missed-event');
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(invoke.mock.calls.some(([command]) => command === 'start_final_diarization')).toBe(outcome === 'failed');
   });
 }

@@ -85,7 +85,7 @@ for (const outcome of ['complete', 'error', 'navigate', 'reload']) {
         if (command === 'start_final_diarization') { refined = true; return {}; }
         if (command === 'nemotron_init') return null;
         if (command === 'nemotron_get_available_models') return [{ name: 'nemotron-3.5-transcribe-q2_0_m', status: 'Available' }];
-        if (command === 'is_retranscription_in_progress_command') return running && args.meetingId === 'walkthrough-meeting';
+        if (command === 'get_retranscription_outcome') return running ? 'running' : complete ? 'completed' : 'failed';
         if (command === 'start_retranscription_command') {
           started = true; running = true;
           sessionStorage.setItem('testEnhancementStarted', 'true');

@@ -911,6 +911,7 @@ pub fn run() {
             audio::retranscription::undo_enhancement,
             audio::retranscription::discard_enhancement_review,
             audio::retranscription::is_retranscription_in_progress_command,
+            audio::retranscription::get_retranscription_outcome,
             // Import audio commands
             audio::import::select_and_validate_audio_command,
             audio::import::validate_audio_file_command,

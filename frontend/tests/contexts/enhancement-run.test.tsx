@@ -113,3 +113,11 @@ test('a run that ends right as the popup is minimized still gets its notice', as
   });
   expect(success).toHaveBeenCalledTimes(1);
 });
+
+
+test('native cancellation clears a discovered run without a failure notice', async () => {
+  await send('retranscription-progress', progress(50));
+  await send('retranscription-error', { meeting_id: 'meeting', error: 'Final speaker refinement was cancelled', cancelled: true });
+  expect(ctx.run).toBeNull();
+  expect(error).not.toHaveBeenCalled();
+});
