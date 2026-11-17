@@ -43,6 +43,10 @@ const STALL_TIMEOUT: Duration = Duration::from_secs(30);
 /// still reported success. Every 1 minute piece of that meeting and another
 /// matched the saved transcript.
 const MAX_TEXT_SAMPLES: usize = 60 * 16000;
+/// NeMo-Speech.cpp v0.3.0 budgets 12.5 audio tokens and 6 output tokens per
+/// second, plus 152 tokens. A one-minute text request fits in 2048 cells.
+/// Speaker-only requests finish in the encoder and do not use this context.
+const TEXT_CONTEXT_TOKENS: usize = 2048;
 const RETRY_TEXT_SAMPLES: usize = 20 * 16000;
 /// Speaker turns cover up to one hour per request, the server's limit, so
 /// speaker numbers stay the same across a meeting.
@@ -101,6 +105,7 @@ pub async fn nemotron_get_available_models<R: Runtime>(
     app: AppHandle<R>,
 ) -> Result<Vec<Value>, String> {
     let path = root(&app)?;
+    remove_retired_q2_l(&path).await;
     let downloading = DOWNLOADING.lock().unwrap().clone();
     Ok(DECODERS
         .iter()
@@ -368,9 +373,22 @@ pub async fn nemotron_download_model<R: Runtime>(
 pub async fn nemotron_cancel_download() {
     CANCEL.store(true, Ordering::SeqCst);
 }
+/// The retired decoder is not usable by this version. Remove its cached files
+/// without removing either current decoder, the encoder or the runtime.
+async fn remove_retired_q2_l(path: &Path) {
+    let file = path.join("gguf/NVIDIA-Nemotron-3.5-Transcribe-30B-A4B-AD-Q2_0_L.gguf");
+    for target in [partial(&file), file] {
+        match tokio::fs::remove_file(target).await {
+            Ok(()) => {},
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {},
+            Err(error) => log::warn!("Could not remove the retired Q2_0_L file: {error}"),
+        }
+    }
+}
 /// Removes a decoder. The last decoder also removes the shared encoder, the
 /// runtime and every other file in the Nemotron folder.
 async fn delete(path: &Path, decoder: &Decoder) -> Result<(), String> {
+    remove_retired_q2_l(path).await;
     let file = gguf(path, &decoder.file);
     for target in [partial(&file), file] {
         if target.exists() {
@@ -719,10 +737,15 @@ impl Server {
                 "--no-ui",
             ])
             .args(["--asr.model.name", "nemotron"])
-            // Meetily sends one request at a time. One slot with a pool for an
-            // hour of audio keeps the cache near 0.5 GB on unified memory.
+            // Text requests contain at most one minute. Speaker detection can
+            // still cover an hour because it does not run the decoder.
             .args(["--asr.salm.max_sequences", "1"])
-            .args(["--asr.salm.n_ctx_per_sequence", "73728"])
+            .args(["--asr.salm.n_ctx_per_sequence", &TEXT_CONTEXT_TOKENS.to_string()])
+            .args(["--asr.salm.max_context", &TEXT_CONTEXT_TOKENS.to_string()])
+            .args(["--asr.salm.n_batch", "256"])
+            // A batch of 1 caused a Metal error on a long speaker request
+            // in local v0.3.0 tests. A batch of 2 passed those tests.
+            .args(["--asr.salm.encoder_max_batch", "2"])
             .args([
                 "--threads",
                 "8",
@@ -1359,6 +1382,24 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn retired_q2_l_file_does_not_make_q2_m_ready() {
+        let dir = tempfile::tempdir().unwrap();
+        let q2 = decoder("nemotron-3.5-transcribe-q2_0_m").unwrap();
+        assert!(decoder("nemotron-3.5-transcribe-q2_0_l").is_none());
+        assert!(decoder("nemotron-3.5-transcribe-iq4_nl").is_some());
+        install_runtime_stub(dir.path());
+        sparse(dir.path(), &ENCODER);
+        let old_file = dir.path().join("gguf/NVIDIA-Nemotron-3.5-Transcribe-30B-A4B-AD-Q2_0_L.gguf");
+        std::fs::write(&old_file, "old model").unwrap();
+        assert!(!ready(dir.path(), q2), "the replacement needs its own download");
+        sparse(dir.path(), &q2.file);
+        remove_retired_q2_l(dir.path()).await;
+        remove_retired_q2_l(dir.path()).await;
+        assert!(!old_file.exists());
+        assert!(ready(dir.path(), q2));
+    }
+
+    #[tokio::test]
     async fn deleting_keeps_shared_files_until_the_last_model() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("nemotron");
@@ -1376,6 +1417,43 @@ mod tests {
         assert!(runtime_ready(&path));
         delete(&path, iq4).await.unwrap();
         assert!(!path.exists());
+    }
+
+    #[tokio::test]
+    async fn deleting_q2_m_also_removes_retired_q2_l_while_keeping_iq4() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nemotron");
+        install_runtime_stub(&path);
+        sparse(&path, &ENCODER);
+        for decoder in DECODERS {
+            sparse(&path, &decoder.file);
+        }
+        let retired = path.join("gguf/NVIDIA-Nemotron-3.5-Transcribe-30B-A4B-AD-Q2_0_L.gguf");
+        std::fs::write(&retired, "retired decoder").unwrap();
+        std::fs::write(partial(&retired), "retired partial download").unwrap();
+        delete(&path, &DECODERS[0]).await.unwrap();
+        assert!(!retired.exists());
+        assert!(!partial(&retired).exists());
+        assert!(ready(&path, &DECODERS[1]));
+    }
+
+    #[tokio::test]
+    async fn stale_cleanup_error_does_not_block_deleting_a_current_decoder() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nemotron");
+        install_runtime_stub(&path);
+        sparse(&path, &ENCODER);
+        for decoder in DECODERS {
+            sparse(&path, &decoder.file);
+        }
+        // A directory at the old filename makes remove_file return an I/O
+        // error without needing platform-specific permission changes.
+        let retired = path.join("gguf/NVIDIA-Nemotron-3.5-Transcribe-30B-A4B-AD-Q2_0_L.gguf");
+        std::fs::create_dir(&retired).unwrap();
+        delete(&path, &DECODERS[0]).await.unwrap();
+        assert!(!gguf(&path, &DECODERS[0].file).exists());
+        assert!(ready(&path, &DECODERS[1]));
+        assert!(retired.is_dir());
     }
 
     /// Serves `body` over HTTP, honouring `Range: bytes=N-` when `ranges` is
@@ -2109,12 +2187,19 @@ mod tests {
     #[test]
     fn text_requests_stay_short_enough_to_follow_the_audio() {
         let audio = vec![0.1f32; 17 * 60 * 16000];
-        for job in [Job::Text, Job::Words] {
+        for job in [Job::Text, Job::Words, Job::SpeakerWords] {
             let ranges = crate::audio::transcription::funasr_provider::request_ranges(
                 &audio,
                 max_request_samples(job),
             );
             assert!(ranges.iter().all(|range| range.len() <= 60 * 16000));
+            // NeMo-Speech.cpp's duration budget must fit without truncating
+            // the transcript if the request length changes later.
+            assert!(ranges.iter().all(|range| {
+                let seconds = range.len() as f64 / 16000.0;
+                let tokens = (seconds * 12.5).ceil() + (seconds * 6.0).ceil() + 152.0;
+                tokens <= TEXT_CONTEXT_TOKENS as f64
+            }));
             assert_eq!(ranges.last().unwrap().end, audio.len());
         }
         let speakers = crate::audio::transcription::funasr_provider::request_ranges(

@@ -8,10 +8,12 @@ Users choose one of two GGUF decoders from [AtomicChat's conversion](https://hug
 
 | Model | Decoder | With the encoder | Memory |
 |---|---|---|---|
-| Q2_0_L | 15,548 MB | 17,218 MB | 24 GB or more |
+| Q2_0_M | 13,572 MB | 15,243 MB | 24 GB or more |
 | IQ4_NL | 19,679 MB | 21,349 MB | 32 GB or more |
 
-AtomicChat measured both decoders within about 0.2 points of the BF16 decoder's word error on English, German, French and Spanish ([model card](https://huggingface.co/AtomicChat/NVIDIA-Nemotron-3.5-Transcribe-30B-A4B-GGUF)). The model weights use NVIDIA's OpenMDW 1.1 license.
+AtomicChat measured both decoders within about 0.2 points of the BF16 decoder's word error on English, German, French and Spanish. Q2_0_M increased Chinese character error by about 1.5 points in those tests ([model card](https://huggingface.co/AtomicChat/NVIDIA-Nemotron-3.5-Transcribe-30B-A4B-GGUF)). The model weights use NVIDIA's OpenMDW 1.1 license.
+
+Q2_0_M replaces Q2_0_L. Saved Q2_0_L selections resolve to Q2_0_M and require its separate download. Loading the model list or deleting a model removes the retired L decoder and its unfinished download from the branch cache. Cleanup errors are logged and do not block model listing or deletion. The shared encoder and runtime are reused. The 24 GB memory guidance is retained; the published 16 GB test used CUDA, not a Mac.
 
 ## Runtime
 
@@ -32,6 +34,8 @@ Meetily starts `nemo-speech serve` on a free loopback port with a random API key
 - Enhance with speaker labels on (the app's speaker setting) sends the whole recording for speakers, up to one hour per request, and the text in one minute pieces. It uses the model's own speakers. Their turns go through Meetily's speaker matching, so remembered voices are still named. Rows end where the speaker changes. Speaker numbers start again in each hour of a longer recording.
 
 Select the meeting language in Settings, Import or Enhance to send a language hint. The list uses the codes in NeMo-Speech.cpp v0.3.0 `salm_policy.cpp::language_names`. Auto sends no hint. Enhance keeps the model transcript’s spaces and punctuation when it uses character times. A hint also goes into the speaker instruction because the runtime uses custom instructions as written. Language selection does not prevent invented text; its effect on mixed-language meetings is untested.
+
+Meetily uses one decode slot, a 2,048-token context, decoder batches of 256 and encoder batches of two. Text requests contain at most one minute of audio. The runtime needs at most 1,262 tokens for that audio, its transcript budget and prompt allowance. Speaker-only requests finish in the encoder, so they can still cover one hour with this smaller decoder context. These settings follow the runtime's [configuration](https://github.com/NVIDIA/NeMo-Speech.cpp/blob/v0.3.0/docs/salm/configuration.md) and [token budget](https://github.com/NVIDIA/NeMo-Speech.cpp/blob/v0.3.0/src/speechlm/salm_policy.cpp). An encoder batch of one caused a Metal resource error on a long speaker request in local tests; two passed.
 
 The server log is `models/nemotron/server.log`.
 

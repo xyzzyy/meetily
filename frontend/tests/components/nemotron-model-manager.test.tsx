@@ -18,7 +18,7 @@ mock.module('../../src/components/TranscriptionModelCard', () => ({ ...cards, Tr
 const { NemotronModelManager } = await import('../../src/components/NemotronModelManager');
 let renderer: ReactTestRenderer | undefined;
 const selected = mock(() => {});
-const model = { name: 'nemotron-test', display_name: 'Nemotron', size_mb: 17218, memory: '24 GB memory or more', supported: true, status: 'Available' };
+const model = { name: 'nemotron-3.5-transcribe-q2_0_m', display_name: 'Nemotron 3.5 Transcribe · Q2_0_M', size_mb: 15242, memory: '24 GB memory or more', supported: true, status: 'Available' };
 beforeEach(() => { card = undefined; selected.mockClear(); invoke.mockClear(); toast.error.mockClear(); response = command => command === 'nemotron_get_available_models' ? [model] : undefined; });
 afterEach(async () => { if (renderer) await act(async () => renderer!.unmount()); renderer = undefined; });
 afterAll(() => {

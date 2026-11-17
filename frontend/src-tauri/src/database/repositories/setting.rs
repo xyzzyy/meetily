@@ -142,10 +142,17 @@ impl SettingsRepository {
     pub async fn get_transcript_config(
         pool: &SqlitePool,
     ) -> std::result::Result<Option<TranscriptSetting>, sqlx::Error> {
-        let setting =
+        let mut setting =
             sqlx::query_as::<_, TranscriptSetting>("SELECT * FROM transcript_settings LIMIT 1")
                 .fetch_optional(pool)
                 .await?;
+        if let Some(setting) = &mut setting {
+            // Q2_0_M replaces Q2_0_L. Return the current model ID so Settings,
+            // live recording and Enhance all require the new, verified file.
+            if setting.provider == "nemotron" && setting.model == "nemotron-3.5-transcribe-q2_0_l" {
+                setting.model = "nemotron-3.5-transcribe-q2_0_m".into();
+            }
+        }
         Ok(setting)
 
     }
@@ -358,6 +365,21 @@ mod transcript_settings_tests {
             .unwrap();
         sqlx::migrate!("./migrations").run(&pool).await.unwrap();
         pool
+    }
+
+    #[tokio::test]
+    async fn retired_nemotron_selection_reads_as_q2_m() {
+        let pool = test_pool().await;
+        for (provider, stored, expected) in [
+            ("nemotron", "nemotron-3.5-transcribe-q2_0_l", "nemotron-3.5-transcribe-q2_0_m"),
+            ("nemotron", "nemotron-3.5-transcribe-iq4_nl", "nemotron-3.5-transcribe-iq4_nl"),
+            ("localWhisper", "large-v3", "large-v3"),
+        ] {
+            SettingsRepository::save_transcript_config(&pool, provider, stored).await.unwrap();
+            let config = SettingsRepository::get_transcript_config(&pool).await.unwrap().unwrap();
+            assert_eq!(config.provider, provider);
+            assert_eq!(config.model, expected);
+        }
     }
 
     #[tokio::test]

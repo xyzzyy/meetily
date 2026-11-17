@@ -91,7 +91,24 @@ export async function installUsageDesktop(page: Page, provider = 'localWhisper')
             };
             case 'check_first_launch': return false;
             case 'plugin:app|version': return '0.4.1';
-            case 'api_get_transcript_config': return { provider, model: 'large-v3', apiKey: null };
+            case 'api_get_transcript_config': return {
+              provider, model: provider === 'nemotron' ? 'nemotron-3.5-transcribe-q2_0_m' : 'large-v3', apiKey: null,
+            };
+            case 'api_save_transcript_config': return { status: 'success' };
+            case 'nemotron_init': return null;
+            case 'nemotron_get_available_models': return [{
+              name: 'nemotron-3.5-transcribe-q2_0_m', display_name: 'Nemotron 3.5 Transcribe · Q2_0_M',
+              size_mb: 15242, memory: '24 GB memory or more', supported: true,
+              status: state.nemotronReady ? 'Available' : 'Missing',
+            }, {
+              name: 'nemotron-3.5-transcribe-iq4_nl', display_name: 'Nemotron 3.5 Transcribe · IQ4_NL',
+              size_mb: 21349, memory: '32 GB memory or more', supported: true, status: 'Available',
+            }];
+            case 'nemotron_download_model':
+              state.nemotronReady = true;
+              save();
+              emit('nemotron-download-finished');
+              return null;
             case 'api_get_model_config': return { provider: 'ollama', model: 'fixture-model', whisperModel: 'large-v3' };
             case 'get_ollama_models': return [{ name: 'fixture-model' }];
             case 'get_meeting_folder_path':
