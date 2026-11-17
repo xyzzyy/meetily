@@ -9,6 +9,7 @@ import { LoaderIcon } from "lucide-react";
 import { useConfig } from "@/contexts/ConfigContext";
 import { usePaginatedTranscripts } from "@/hooks/usePaginatedTranscripts";
 import { waitForAutoEnhancement } from "@/lib/enhancement-preferences";
+import { toast } from "sonner";
 import { parseSummaryContent } from "@/lib/summary-content";
 
 interface MeetingDetailsResponse {
@@ -130,6 +131,10 @@ function MeetingDetailsContent() {
       }
     } catch (error) {
       console.error('❌ Failed to setup auto-generation:', error);
+      if (isCurrent()) toast.error('Auto summary could not start', {
+        description: 'Retry after enhancement finishes, or generate the summary in the meeting.',
+        action: { label: 'Retry', onClick: () => { if (isCurrent()) setHasCheckedAutoGen(false); } },
+      });
     }
 
     if (isCurrent()) setHasCheckedAutoGen(true);

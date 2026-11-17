@@ -1048,6 +1048,7 @@ pub async fn start_retranscription_command<R: Runtime>(
     if super::recording_commands::is_recording().await {
         return Err("Wait for the recording to finish before enhancing a meeting.".into());
     }
+    let batch_guard = super::common::try_batch_processing()?;
     let guard = RetranscriptionGuard::acquire(&meeting_id)?;
     RETRANSCRIPTION_CANCELLED.store(false, Ordering::SeqCst);
     drop(admission);
@@ -1075,6 +1076,7 @@ pub async fn start_retranscription_command<R: Runtime>(
             .insert(meeting_id_clone.clone(), outcome);
         // Retain the outcome before clearing active state or emitting the event.
         drop(guard);
+        drop(batch_guard);
         match result {
             Ok(res) => {
                 let _ = app.emit("retranscription-complete", serde_json::json!({
@@ -1284,6 +1286,7 @@ mod tests {
         assert_eq!(get_retranscription_outcome(meeting_id.into()).await, "failed");
         assert_eq!(get_retranscription_outcome("missing-meeting".into()).await, "unknown");
 
+        let batch_guard = super::super::common::try_batch_processing().unwrap();
         let guard = RetranscriptionGuard::acquire("enhancement-blocks-recording-test").unwrap();
         assert!(is_retranscription_in_progress_command(Some("enhancement-blocks-recording-test".into())).await);
         assert_eq!(get_retranscription_outcome("enhancement-blocks-recording-test".into()).await, "running");
@@ -1291,12 +1294,21 @@ mod tests {
         let error = super::super::recording_commands::start_recording_with_meeting_name(
             app.handle().clone(), None,
         ).await.unwrap_err();
-        assert!(error.contains("Wait for enhancement"));
+        assert!(error.contains("Wait for audio processing"));
         let error = super::super::recording_commands::start_recording_with_devices_and_meeting(
             app.handle().clone(), None, None, None,
         ).await.unwrap_err();
-        assert!(error.contains("Wait for enhancement"));
+        assert!(error.contains("Wait for audio processing"));
+        let error = super::super::import::start_import_audio_command(
+            app.handle().clone(), "/unused".into(), "Import".into(), None, None, None,
+        ).await.unwrap_err();
+        assert!(error.contains("Another audio processing job"));
         drop(guard);
+        let error = start_retranscription_command(
+            app.handle().clone(), "blocked-by-import".into(), "/unused".into(), None, None, None, None, None,
+        ).await.unwrap_err();
+        assert!(error.contains("Another audio processing job"));
+        drop(batch_guard);
         assert!(!is_retranscription_in_progress_command(None).await);
     }
 

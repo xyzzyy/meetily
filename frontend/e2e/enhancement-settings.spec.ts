@@ -48,7 +48,7 @@ test('save a Nemotron enhancement default while Whisper stays selected for calls
   expect(calls.filter((call: any) => call.command === 'api_save_transcript_config')).toEqual([]);
 });
 
-for (const outcome of ['complete', 'error', 'navigate', 'reload']) {
+for (const outcome of ['complete', 'error', 'navigate', 'reload', 'reload-retry']) {
   test(`auto summary waits for enhancement ${outcome}`, async ({ page }) => {
     await installUsageDesktop(page);
     await page.addInitScript(({ outcome }) => {
@@ -61,11 +61,13 @@ for (const outcome of ['complete', 'error', 'navigate', 'reload']) {
       let running = sessionStorage.getItem('testEnhancementRunning') === 'true';
       let summaryInput: unknown = null;
       let refined = false;
+      let outcomeChecks = 0;
       const enhanced = 'The enhanced transcript contains the final decision.';
       Object.assign(window, { __enhancementTest: {
         started: () => started,
         summaryInput: () => summaryInput,
         refined: () => refined,
+        outcomeChecks: () => outcomeChecks,
         async finish() {
           complete = outcome !== 'error';
           running = false;
@@ -85,7 +87,11 @@ for (const outcome of ['complete', 'error', 'navigate', 'reload']) {
         if (command === 'start_final_diarization') { refined = true; return {}; }
         if (command === 'nemotron_init') return null;
         if (command === 'nemotron_get_available_models') return [{ name: 'nemotron-3.5-transcribe-q2_0_m', status: 'Available' }];
-        if (command === 'get_retranscription_outcome') return running ? 'running' : complete ? 'completed' : 'failed';
+        if (command === 'get_retranscription_outcome') {
+          outcomeChecks++;
+          if (outcome === 'reload-retry' && outcomeChecks === 1) throw new Error('IPC unavailable');
+          return running ? 'running' : complete ? 'completed' : 'failed';
+        }
         if (command === 'start_retranscription_command') {
           started = true; running = true;
           sessionStorage.setItem('testEnhancementStarted', 'true');
@@ -113,10 +119,16 @@ for (const outcome of ['complete', 'error', 'navigate', 'reload']) {
     await expect(page).toHaveURL(/meeting-details\?id=walkthrough-meeting/, { timeout: 20_000 });
     expect(await page.evaluate(() => (window as any).__enhancementTest.started())).toBe(true);
     expect(await page.evaluate(() => (window as any).__enhancementTest.summaryInput())).toBeNull();
-    if (outcome === 'reload') {
+    if (outcome === 'reload' || outcome === 'reload-retry') {
       await page.reload();
       await expect(page.getByRole('region', { name: 'Transcript', exact: true })).toBeVisible();
       expect(await page.evaluate(() => (window as any).__enhancementTest.summaryInput())).toBeNull();
+      if (outcome === 'reload-retry') {
+        const notice = page.locator('[data-sonner-toast]').filter({ hasText: 'Auto summary could not start' });
+        await notice.getByRole('button', { name: 'Retry', exact: true }).click();
+        await expect.poll(() => page.evaluate(() => (window as any).__enhancementTest.outcomeChecks())).toBe(2);
+        expect(await page.evaluate(() => (window as any).__enhancementTest.summaryInput())).toBeNull();
+      }
     }
     if (outcome === 'navigate') {
       await page.getByText('Other meeting', { exact: true }).first().click();

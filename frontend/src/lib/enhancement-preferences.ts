@@ -46,10 +46,10 @@ function trackEnhancement(meetingId: string) {
   const pending = new Promise<void>(resolve => { finish = resolve; });
   pendingEnhancements.set(meetingId, pending);
   const unlisteners: (() => void)[] = [];
-  const complete = (failed = false) => {
+  const complete = (failed = false, retainMarker = false) => {
     if (settled) return;
     settled = true;
-    window.sessionStorage.removeItem(pendingKey(meetingId));
+    if (!retainMarker) window.sessionStorage.removeItem(pendingKey(meetingId));
     pendingEnhancements.delete(meetingId);
     if (failed) {
       void refineSpeakersAfterRecording(meetingId).catch(error => {
@@ -80,7 +80,7 @@ export async function waitForAutoEnhancement(meetingId: string): Promise<void> {
     if (outcome !== 'running') restored.complete(outcome === 'failed');
     await restored.pending;
   } catch (error) {
-    restored.complete();
+    restored.complete(false, true);
     throw error;
   }
 }

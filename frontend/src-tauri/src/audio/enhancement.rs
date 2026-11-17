@@ -915,6 +915,9 @@ async fn preserve_speaker_labels(
             remapped.push(saved);
         }
     }
+    if remapped.is_empty() && !metadata.is_empty() {
+        return Err(anyhow!("Saved speaker labels could not be matched to the enhanced rows. The saved transcript was kept. Enable speaker assignment to try again."));
+    }
     snapshot["transcript_speakers"] = serde_json::json!(remapped);
     if snapshot["meeting_diarization_status"].as_array().unwrap().is_empty() {
         snapshot["meeting_diarization_status"] = serde_json::json!([{
@@ -2209,6 +2212,21 @@ mod tests {
             let status: String = sqlx::query_scalar("SELECT current_status FROM meeting_diarization_status WHERE meeting_id='m1'").fetch_one(&feature).await.unwrap();
             assert_eq!(status, "provisional");
         }
+    }
+
+    #[tokio::test]
+    async fn an_ambiguous_preserve_keeps_the_original_transcript_and_speaker_data() {
+        let (_dir, core, feature, _) = publication_fixture().await;
+        sqlx::query("UPDATE transcripts SET audio_end_time=1,duration=1 WHERE id='old'").execute(&core).await.unwrap();
+        sqlx::query("INSERT INTO transcripts(id,meeting_id,transcript,timestamp,audio_start_time,audio_end_time,duration) VALUES ('other','m1','Other speaker','time',1,2,1)").execute(&core).await.unwrap();
+        sqlx::query("INSERT INTO transcript_speakers(transcript_id,meeting_id,speaker_id,speaker_label,diarization_status) VALUES ('other','m1','other-speaker','Speaker 2','provisional')").execute(&feature).await.unwrap();
+        let original = crate::diarization::finalize::load_transcripts(&core, "m1").await.unwrap();
+        let before = super::super::enhancement_review::speaker_snapshot(&feature, "m1").await.unwrap();
+        let segments = super::super::common::create_transcript_segments(&[("Merged words".into(), 0.0, 2000.0)]);
+        let error = publish_with_speaker_policy(&core, &feature, "m1", &original, &segments, None, true, &AtomicBool::new(false)).await.unwrap_err();
+        assert!(error.to_string().contains("Saved speaker labels could not be matched"));
+        assert_eq!(serde_json::to_string(&original).unwrap(), serde_json::to_string(&crate::diarization::finalize::load_transcripts(&core, "m1").await.unwrap()).unwrap());
+        assert_eq!(before, super::super::enhancement_review::speaker_snapshot(&feature, "m1").await.unwrap());
     }
 
     fn fresh_segments() -> Vec<TranscriptSegment> {

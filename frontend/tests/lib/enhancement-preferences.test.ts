@@ -143,3 +143,25 @@ for (const outcome of ['failed', 'cancelled', 'completed']) {
     expect(invoke.mock.calls.some(([command]) => command === 'start_final_diarization')).toBe(outcome === 'failed');
   });
 }
+
+
+test('a failed outcome check keeps the marker for a safe retry', async () => {
+  values.set('autoEnhancement:retry-meeting', 'pending');
+  invoke.mockImplementationOnce(async () => { throw new Error('IPC unavailable'); });
+  await expect(waitForAutoEnhancement('retry-meeting')).rejects.toThrow('IPC unavailable');
+  expect(values.get('autoEnhancement:retry-meeting')).toBe('pending');
+  invoke.mockImplementation(async () => 'completed');
+  await waitForAutoEnhancement('retry-meeting');
+  expect(values.has('autoEnhancement:retry-meeting')).toBe(false);
+});
+
+
+test('a terminal event during an IPC failure does not restore a stale pending marker', async () => {
+  values.set('autoEnhancement:finished-during-query', 'pending');
+  invoke.mockImplementationOnce(async () => {
+    handlers.get('retranscription-complete')!({ payload: { meeting_id: 'finished-during-query' } });
+    throw new Error('IPC unavailable');
+  });
+  await expect(waitForAutoEnhancement('finished-during-query')).rejects.toThrow('IPC unavailable');
+  expect(values.has('autoEnhancement:finished-during-query')).toBe(false);
+});
