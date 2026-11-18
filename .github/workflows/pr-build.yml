@@ -155,10 +155,12 @@ jobs:
       - uses: ./.github/actions/setup-native
       - name: Build llama helper
         if: matrix.helper == 'llama'
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/llama-helper-build
         run: |
           cargo build --locked --release -p llama-helper --features metal
           mkdir -p frontend/src-tauri/binaries
-          cp target/release/llama-helper frontend/src-tauri/binaries/llama-helper-aarch64-apple-darwin
+          cp "$CARGO_TARGET_DIR/release/llama-helper" frontend/src-tauri/binaries/llama-helper-aarch64-apple-darwin
       - name: Build diarization helper
         if: matrix.helper == 'diarization'
         run: node frontend/scripts/build-diarization-sidecar.js
@@ -209,6 +211,9 @@ jobs:
           persist-credentials: false
       - uses: ./.github/actions/setup-native
       - run: cargo test --locked --release -p llama-helper --features metal
+        env:
+          # Keep this test build separate from the restored app build artifacts.
+          CARGO_TARGET_DIR: ${{ runner.temp }}/llama-helper-tests
 
   macos-app:
     name: macOS app bundle (arm64)

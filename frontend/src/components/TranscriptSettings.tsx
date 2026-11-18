@@ -9,6 +9,7 @@ import { ModelManager } from './WhisperModelManager';
 import { ParakeetModelManager } from './ParakeetModelManager';
 import { FunAsrModelManager } from './FunAsrModelManager';
 import { NemotronModelManager } from './NemotronModelManager';
+import { EnhancementSettings } from './EnhancementSettings';
 import { SpeakerDiarizationSettings } from './SpeakerDiarizationSettings';
 
 
@@ -125,7 +126,7 @@ export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelCo
                                     }
                                 }}
                             >
-                                <SelectTrigger className='focus:ring-1 focus:ring-blue-500 focus:border-blue-500'>
+                                <SelectTrigger aria-label="Transcript model" className='focus:ring-1 focus:ring-blue-500 focus:border-blue-500'>
                                     <SelectValue placeholder="Select provider" />
                                 </SelectTrigger>
                                 <SelectContent>
@@ -228,6 +229,7 @@ export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelCo
                         </div>
                     )}
 
+                    <EnhancementSettings />
                     <SpeakerDiarizationSettings />
                 </div>
             </div>

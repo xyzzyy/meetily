@@ -862,13 +862,77 @@ enum SpeakerChange {
         restore_core: String,
         undo_id: String,
     },
+    Preserve { preserve_speakers: bool },
     Labels(EnhancementSpeakerLabels),
+}
+
+/// Transfer saved labels by their audio coverage without running speaker analysis.
+/// Keep the original speaker intervals, status, names, profiles and colors.
+async fn preserve_speaker_labels(
+    connection: &mut SqliteConnection,
+    meeting_id: &str,
+    original_rows: &str,
+    proposed_rows: &str,
+) -> Result<bool> {
+    let mut snapshot: serde_json::Value = serde_json::from_str(
+        &super::enhancement_review::speaker_snapshot_on(connection, meeting_id).await?,
+    )?;
+    let metadata = snapshot["transcript_speakers"].as_array().unwrap();
+    if metadata.is_empty() && snapshot["speaker_segments"].as_array().unwrap().is_empty() {
+        return Ok(false);
+    }
+    let original: Vec<Transcript> = serde_json::from_str(original_rows)?;
+    let proposed: Vec<Transcript> = serde_json::from_str(proposed_rows)?;
+    let mut groups = std::collections::BTreeMap::<String, (serde_json::Value, Vec<(f64, f64)>)>::new();
+    for row in metadata {
+        let old = original.iter().find(|old| row["transcript_id"].as_str() == Some(old.id.as_str()));
+        let start = row["audio_start_time"].as_f64().or_else(|| old.and_then(|old| old.audio_start_time));
+        let end = row["audio_end_time"].as_f64().or_else(|| old.and_then(|old| old.audio_end_time));
+        if let (Some(start), Some(end)) = (start, end) {
+            let key = serde_json::to_string(&serde_json::json!([
+                row["speaker_id"], row["speaker_label"], row["is_overlap"], row["candidate_speaker_ids"],
+                row["speaker_profile_id"], row["speaker_source"], row["speaker_color"],
+                row["diarization_status"], row["diarization_method"],
+            ]))?;
+            groups.entry(key).or_insert_with(|| (row.clone(), Vec::new())).1.push((start * 1000.0, end * 1000.0));
+        }
+    }
+    let mut remapped = Vec::new();
+    for row in proposed {
+        let (Some(start), Some(end)) = (row.audio_start_time, row.audio_end_time) else { continue; };
+        let duration = (end - start) * 1000.0;
+        if duration <= 0.0 { continue; }
+        let mut matches = groups.values().filter(|(_, spans)| {
+            duration - uncovered_ms(start * 1000.0, end * 1000.0, spans.iter().copied()) > duration / 2.0
+        });
+        if let Some((saved, _)) = matches.next() {
+            // Conflicting majorities need review; do not guess a speaker.
+            if matches.next().is_some() { continue; }
+            let mut saved = saved.clone();
+            saved["transcript_id"] = serde_json::json!(row.id);
+            saved["audio_start_time"] = serde_json::json!(start);
+            saved["audio_end_time"] = serde_json::json!(end);
+            remapped.push(saved);
+        }
+    }
+    if remapped.is_empty() && !metadata.is_empty() {
+        return Err(anyhow!("Saved speaker labels could not be matched to the enhanced rows. The saved transcript was kept. Enable speaker assignment to try again."));
+    }
+    snapshot["transcript_speakers"] = serde_json::json!(remapped);
+    if snapshot["meeting_diarization_status"].as_array().unwrap().is_empty() {
+        snapshot["meeting_diarization_status"] = serde_json::json!([{
+            "meeting_id": meeting_id, "current_status": "none", "progress": 0,
+        }]);
+    }
+    super::enhancement_review::restore_speakers(connection, meeting_id, &serde_json::to_string(&snapshot)?).await?;
+    Ok(true)
 }
 
 async fn write_speakers(
     connection: &mut SqliteConnection,
     meeting_id: &str,
     change: Option<&SpeakerChange>,
+    original_rows: &str,
     proposed_rows: &str,
 ) -> Result<()> {
     if let Some(SpeakerChange::Undo {
@@ -886,7 +950,8 @@ async fn write_speakers(
             .await?;
     } else if let Some(SpeakerChange::Labels(labels)) = change {
         labels.write(connection, meeting_id).await?;
-    } else {
+    } else if !matches!(change, Some(SpeakerChange::Preserve { preserve_speakers: true }))
+        || !preserve_speaker_labels(connection, meeting_id, original_rows, proposed_rows).await? {
         for table in ["transcript_speakers", "speaker_segments"] {
             sqlx::query(&format!("DELETE FROM {table} WHERE meeting_id = ?"))
                 .bind(meeting_id)
@@ -962,6 +1027,7 @@ pub(crate) async fn reconcile_publications(core: &SqlitePool, feature: &SqlitePo
                 &mut tx,
                 &publication.meeting_id,
                 labels.as_ref(),
+                &publication.original_rows,
                 &publication.proposed_rows,
             )
             .await?;
@@ -1024,13 +1090,31 @@ pub(crate) async fn publish(
     labels: Option<&EnhancementSpeakerLabels>,
     cancelled: &AtomicBool,
 ) -> Result<()> {
+    publish_with_speaker_policy(core, feature, meeting_id, original, segments, labels, false, cancelled).await
+}
+
+pub(crate) async fn publish_with_speaker_policy(
+    core: &SqlitePool,
+    feature: &SqlitePool,
+    meeting_id: &str,
+    original: &[Transcript],
+    segments: &[TranscriptSegment],
+    labels: Option<&EnhancementSpeakerLabels>,
+    preserve_speakers: bool,
+    cancelled: &AtomicBool,
+) -> Result<()> {
+    let change = match labels {
+        Some(labels) => Some(serde_json::to_string(labels)?),
+        None if preserve_speakers => Some(serde_json::to_string(&SpeakerChange::Preserve { preserve_speakers: true })?),
+        None => None,
+    };
     publish_change(
         core,
         feature,
         meeting_id,
         original,
         segments,
-        labels.map(serde_json::to_string).transpose()?,
+        change,
         cancelled,
     )
     .await
@@ -1123,7 +1207,7 @@ async fn publish_change(
     let prepared: Result<()> = async {
         // Validate and prepare speaker writes before changing the transcript.
         // These writes and removal of the recovery record commit together.
-        write_speakers(&mut feature_tx, meeting_id, change.as_ref(), &publication.proposed_rows).await?;
+        write_speakers(&mut feature_tx, meeting_id, change.as_ref(), &publication.original_rows, &publication.proposed_rows).await?;
         sqlx::query("DELETE FROM transcripts WHERE meeting_id = ?")
             .bind(meeting_id).execute(&mut *core_tx).await?;
         if let Some(SpeakerChange::Undo{restore_core,..})=&change {
@@ -2092,6 +2176,59 @@ mod tests {
         (dir, core, feature, original)
     }
 
+    #[tokio::test]
+    async fn enhancement_without_speaker_analysis_preserves_live_labels_and_intervals() {
+        for merge in [false, true] {
+            let (_dir, core, feature, mut original) = publication_fixture().await;
+            sqlx::query("UPDATE transcript_speakers SET diarization_status='provisional', speaker_source='microphone', speaker_color='#123456' WHERE meeting_id='m1'")
+                .execute(&feature).await.unwrap();
+            sqlx::query("INSERT INTO speaker_segments(id,meeting_id,source,start_time,end_time,speaker_id,speaker_label,diarization_status) VALUES ('live-window','m1','microphone',0,4,'old-speaker','Speaker 1','provisional')")
+                .execute(&feature).await.unwrap();
+            sqlx::query("INSERT INTO meeting_diarization_status(meeting_id,current_status) VALUES ('m1','provisional')")
+                .execute(&feature).await.unwrap();
+            let rows = if merge {
+                sqlx::query("INSERT INTO transcripts(id,meeting_id,transcript,timestamp,audio_start_time,audio_end_time,duration) VALUES ('old-two','m1','More live words','time',2,4,2)").execute(&core).await.unwrap();
+                sqlx::query("INSERT INTO transcript_speakers(transcript_id,meeting_id,speaker_id,speaker_label,diarization_status,speaker_source,speaker_color,published) VALUES ('old-two','m1','old-speaker','Speaker 1','provisional','microphone','#123456',1)").execute(&feature).await.unwrap();
+                original = crate::diarization::finalize::load_transcripts(&core, "m1").await.unwrap();
+                vec![("Merged enhanced words".into(), 0.0, 4000.0)]
+            } else {
+                vec![("First enhanced row".into(), 0.0, 1000.0), ("Second enhanced row".into(), 1000.0, 2000.0)]
+            };
+            let segments = super::super::common::create_transcript_segments(&rows);
+            publish_with_speaker_policy(&core, &feature, "m1", &original, &segments, None, true, &AtomicBool::new(false)).await.unwrap();
+            let labels = crate::database::repositories::diarization::DiarizationRepository::get_transcript_metadata(
+                &feature, &segments.iter().map(|row| row.id.clone()).collect::<Vec<_>>()
+            ).await.unwrap();
+            assert_eq!(labels.len(), segments.len());
+            for label in labels {
+                assert_eq!(label.speaker_id.as_deref(), Some("old-speaker"));
+                assert_eq!(label.speaker_label.as_deref(), Some("Speaker 1"));
+                assert_eq!(label.diarization_status, "provisional");
+                assert_eq!(label.speaker_color.as_deref(), Some("#123456"));
+                assert_eq!(label.speaker_source.as_deref(), Some("microphone"));
+            }
+            let intervals: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM speaker_segments WHERE id='live-window'").fetch_one(&feature).await.unwrap();
+            assert_eq!(intervals, 1);
+            let status: String = sqlx::query_scalar("SELECT current_status FROM meeting_diarization_status WHERE meeting_id='m1'").fetch_one(&feature).await.unwrap();
+            assert_eq!(status, "provisional");
+        }
+    }
+
+    #[tokio::test]
+    async fn an_ambiguous_preserve_keeps_the_original_transcript_and_speaker_data() {
+        let (_dir, core, feature, _) = publication_fixture().await;
+        sqlx::query("UPDATE transcripts SET audio_end_time=1,duration=1 WHERE id='old'").execute(&core).await.unwrap();
+        sqlx::query("INSERT INTO transcripts(id,meeting_id,transcript,timestamp,audio_start_time,audio_end_time,duration) VALUES ('other','m1','Other speaker','time',1,2,1)").execute(&core).await.unwrap();
+        sqlx::query("INSERT INTO transcript_speakers(transcript_id,meeting_id,speaker_id,speaker_label,diarization_status) VALUES ('other','m1','other-speaker','Speaker 2','provisional')").execute(&feature).await.unwrap();
+        let original = crate::diarization::finalize::load_transcripts(&core, "m1").await.unwrap();
+        let before = super::super::enhancement_review::speaker_snapshot(&feature, "m1").await.unwrap();
+        let segments = super::super::common::create_transcript_segments(&[("Merged words".into(), 0.0, 2000.0)]);
+        let error = publish_with_speaker_policy(&core, &feature, "m1", &original, &segments, None, true, &AtomicBool::new(false)).await.unwrap_err();
+        assert!(error.to_string().contains("Saved speaker labels could not be matched"));
+        assert_eq!(serde_json::to_string(&original).unwrap(), serde_json::to_string(&crate::diarization::finalize::load_transcripts(&core, "m1").await.unwrap()).unwrap());
+        assert_eq!(before, super::super::enhancement_review::speaker_snapshot(&feature, "m1").await.unwrap());
+    }
+
     fn fresh_segments() -> Vec<TranscriptSegment> {
         let result = timed("Alice. Bob.", &[" Alice.", " Bob."], &[1.25, 15.5]);
         let rows = parakeet_rows(&result, 0.0, 25_000.0, None, None).unwrap();
@@ -2112,6 +2249,7 @@ mod tests {
                 original: original.to_vec(),
                 segments: fresh_segments(),
                 labels: None,
+                preserve_speakers: false,
                 duration_seconds: 88.0,
                 language: None,
                 provider: Some("whisper".into()),

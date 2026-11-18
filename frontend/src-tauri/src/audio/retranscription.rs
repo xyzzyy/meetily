@@ -11,35 +11,35 @@ use log::{debug, error, info, warn};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock, Mutex};
+use std::collections::HashMap;
 use tauri::{AppHandle, Emitter, Manager, Runtime};
 
-/// Global flag to track if retranscription is in progress
-static RETRANSCRIPTION_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
+/// The active meeting remains available when the webview reloads.
+static RETRANSCRIPTION_MEETING: Mutex<Option<String>> = Mutex::new(None);
+static RETRANSCRIPTION_OUTCOMES: LazyLock<Mutex<HashMap<String, &'static str>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 
 /// Global flag to signal cancellation
 static RETRANSCRIPTION_CANCELLED: AtomicBool = AtomicBool::new(false);
 
-/// RAII guard for RETRANSCRIPTION_IN_PROGRESS flag
-/// Ensures flag is cleared even if retranscription panics or returns early
+/// Keep the active meeting until the background job ends, including on failure.
 struct RetranscriptionGuard;
 
 impl RetranscriptionGuard {
-    /// Create guard and set flag atomically
-    fn acquire() -> Result<Self, String> {
-        if RETRANSCRIPTION_IN_PROGRESS
-            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-            .is_err()
-        {
+    fn acquire(meeting_id: &str) -> Result<Self, String> {
+        let mut active = RETRANSCRIPTION_MEETING.lock().unwrap_or_else(|error| error.into_inner());
+        if active.is_some() {
             return Err("Retranscription already in progress".to_string());
         }
+        *active = Some(meeting_id.to_string());
         Ok(RetranscriptionGuard)
     }
 }
 
 impl Drop for RetranscriptionGuard {
     fn drop(&mut self) {
-        RETRANSCRIPTION_IN_PROGRESS.store(false, Ordering::SeqCst);
+        *RETRANSCRIPTION_MEETING.lock().unwrap_or_else(|error| error.into_inner()) = None;
     }
 }
 
@@ -72,11 +72,12 @@ pub struct RetranscriptionResult {
 pub struct RetranscriptionError {
     pub meeting_id: String,
     pub error: String,
+    pub cancelled: bool,
 }
 
 /// Check if retranscription is currently in progress
 pub fn is_retranscription_in_progress() -> bool {
-    RETRANSCRIPTION_IN_PROGRESS.load(Ordering::SeqCst)
+    RETRANSCRIPTION_MEETING.lock().unwrap_or_else(|error| error.into_inner()).is_some()
 }
 
 /// Cancel ongoing retranscription
@@ -93,14 +94,10 @@ pub async fn start_retranscription<R: Runtime>(
     model: Option<String>,
     provider: Option<String>,
     assign_speakers: bool,
+    preserve_speakers: bool,
 ) -> Result<RetranscriptionResult> {
     let _speaker_operation = crate::diarization::operations::try_meeting_edit(&meeting_id)
         .map_err(|error| anyhow!(error))?;
-    // Acquire guard - ensures flag is cleared even on panic/early return
-    let _guard = RetranscriptionGuard::acquire().map_err(|e| anyhow!(e))?;
-
-    // Reset cancellation flag
-    RETRANSCRIPTION_CANCELLED.store(false, Ordering::SeqCst);
 
     let _processing = if assign_speakers {
         let state = app.state::<AppState>();
@@ -128,39 +125,12 @@ pub async fn start_retranscription<R: Runtime>(
         model,
         provider,
         assign_speakers,
+        preserve_speakers,
     )
     .await;
 
     // Unload the engine after the batch job (success, failure, or cancellation)
     super::common::unload_engine_after_batch(batch_engine).await;
-
-    // Guard will automatically clear flag on drop
-    // No need for manual: RETRANSCRIPTION_IN_PROGRESS.store(false, Ordering::SeqCst);
-
-    match &result {
-        Ok(res) => {
-            let _ = app.emit(
-                "retranscription-complete",
-                serde_json::json!({
-                    "meeting_id": res.meeting_id,
-                    "segments_count": res.segments_count,
-                    "duration_seconds": res.duration_seconds,
-                    "language": res.language,
-                    "review_id": res.review_id,
-                    "warning": res.warning
-                }),
-            );
-        }
-        Err(e) => {
-            let _ = app.emit(
-                "retranscription-error",
-                RetranscriptionError {
-                    meeting_id: meeting_id.clone(),
-                    error: e.to_string(),
-                },
-            );
-        }
-    }
 
     result
 }
@@ -213,6 +183,7 @@ async fn run_retranscription<R: Runtime>(
     model: Option<String>,
     provider: Option<String>,
     assign_speakers: bool,
+    preserve_speakers: bool,
 ) -> Result<RetranscriptionResult> {
     let folder_path = PathBuf::from(&meeting_folder_path);
     let audio_path = find_audio_file(&folder_path)?;
@@ -292,6 +263,7 @@ async fn run_retranscription<R: Runtime>(
             transcript_sources,
             provider,
             model,
+            preserve_speakers,
         )
         .await;
     }
@@ -625,6 +597,7 @@ async fn run_retranscription<R: Runtime>(
         transcript_sources,
         provider,
         effective_model,
+        preserve_speakers,
     )
     .await
 }
@@ -690,6 +663,7 @@ async fn save_retranscription<R: Runtime>(
     transcript_sources: Vec<Option<String>>,
     provider: Option<String>,
     model: Option<String>,
+    preserve_speakers: bool,
 ) -> Result<RetranscriptionResult> {
     let app = app.clone();
     // Check for cancellation
@@ -716,6 +690,7 @@ async fn save_retranscription<R: Runtime>(
             original,
             segments,
             labels,
+            preserve_speakers,
             duration_seconds,
             language: language.clone(),
             provider,
@@ -1066,11 +1041,17 @@ pub async fn start_retranscription_command<R: Runtime>(
     model: Option<String>,
     provider: Option<String>,
     assign_speakers: Option<bool>,
+    preserve_speakers: Option<bool>,
 ) -> Result<RetranscriptionStarted, String> {
-    // Check if retranscription is already in progress (guard will be acquired in start_retranscription)
-    if RETRANSCRIPTION_IN_PROGRESS.load(Ordering::SeqCst) {
-        return Err("Retranscription already in progress".to_string());
+    // Recording startup uses this same lock until its engine and state are ready.
+    let admission = super::common::acquire_engine_lifecycle_lock().await;
+    if super::recording_commands::is_recording().await {
+        return Err("Wait for the recording to finish before enhancing a meeting.".into());
     }
+    let batch_guard = super::common::try_batch_processing()?;
+    let guard = RetranscriptionGuard::acquire(&meeting_id)?;
+    RETRANSCRIPTION_CANCELLED.store(false, Ordering::SeqCst);
+    drop(admission);
 
     // Clone values for the spawned task
     let meeting_id_clone = meeting_id.clone();
@@ -1078,20 +1059,43 @@ pub async fn start_retranscription_command<R: Runtime>(
     // Spawn the retranscription in a background task
     tauri::async_runtime::spawn(async move {
         let result = start_retranscription(
-            app,
-            meeting_id_clone,
+            app.clone(),
+            meeting_id_clone.clone(),
             meeting_folder_path,
             language,
             model,
             provider,
             assign_speakers.unwrap_or(false),
+            preserve_speakers.unwrap_or(false),
         )
         .await;
 
-        // Errors are already emitted as events in start_retranscription
-        // so we just log here for debugging
-        if let Err(e) = result {
-            error!("Retranscription failed: {}", e);
+        let cancelled = result.is_err() && RETRANSCRIPTION_CANCELLED.load(Ordering::SeqCst);
+        let outcome = if result.is_ok() { "completed" } else if cancelled { "cancelled" } else { "failed" };
+        RETRANSCRIPTION_OUTCOMES.lock().unwrap_or_else(|error| error.into_inner())
+            .insert(meeting_id_clone.clone(), outcome);
+        // Retain the outcome before clearing active state or emitting the event.
+        drop(guard);
+        drop(batch_guard);
+        match result {
+            Ok(res) => {
+                let _ = app.emit("retranscription-complete", serde_json::json!({
+                    "meeting_id": res.meeting_id,
+                    "segments_count": res.segments_count,
+                    "duration_seconds": res.duration_seconds,
+                    "language": res.language,
+                    "review_id": res.review_id,
+                    "warning": res.warning,
+                }));
+            }
+            Err(e) => {
+                let _ = app.emit("retranscription-error", RetranscriptionError {
+                    meeting_id: meeting_id_clone,
+                    error: e.to_string(),
+                    cancelled,
+                });
+                error!("Retranscription failed: {}", e);
+            }
         }
     });
 
@@ -1155,13 +1159,14 @@ async fn apply_review_content<R: Runtime>(
     if speaker_snapshot != proposal.speaker_backup {
         return Err("Speaker labels changed while Enhance was running. The saved transcript was kept. Run Enhance again.".into());
     }
-    super::enhancement::publish(
+    super::enhancement::publish_with_speaker_policy(
         state.db_manager.pool(),
         state.speaker_store.pool(),
         &meeting_id,
         &proposal.original,
         &proposal.segments,
         proposal.labels.as_ref(),
+        proposal.preserve_speakers,
         cancelled,
     )
     .await
@@ -1226,13 +1231,86 @@ pub async fn cancel_retranscription_command() -> Result<(), String> {
 }
 
 #[tauri::command]
-pub async fn is_retranscription_in_progress_command() -> bool {
-    is_retranscription_in_progress()
+pub async fn is_retranscription_in_progress_command(meeting_id: Option<String>) -> bool {
+    let active = RETRANSCRIPTION_MEETING.lock().unwrap_or_else(|error| error.into_inner());
+    match meeting_id {
+        Some(id) => active.as_ref() == Some(&id),
+        None => active.is_some(),
+    }
+}
+
+#[tauri::command]
+pub async fn get_retranscription_outcome(meeting_id: String) -> &'static str {
+    let active = RETRANSCRIPTION_MEETING.lock().unwrap_or_else(|error| error.into_inner());
+    if active.as_ref() == Some(&meeting_id) {
+        return "running";
+    }
+    RETRANSCRIPTION_OUTCOMES.lock().unwrap_or_else(|error| error.into_inner())
+        .get(&meeting_id).copied().unwrap_or("unknown")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn command_reports_a_busy_meeting_before_worker_start() {
+        use tauri::Listener;
+        let app = tauri::test::mock_app();
+        let meeting_id = "enhancement-start-error-test";
+        let _lock = crate::diarization::operations::try_meeting_edit(meeting_id).unwrap();
+        let (send, mut receive) = tokio::sync::mpsc::unbounded_channel();
+        app.listen("retranscription-error", move |event| {
+            let _ = send.send(event.payload().to_string());
+        });
+        start_retranscription_command(
+            app.handle().clone(),
+            meeting_id.into(),
+            "/unused".into(),
+            None,
+            None,
+            None,
+            Some(false),
+            None,
+        )
+        .await
+        .unwrap();
+        let payload = tokio::time::timeout(std::time::Duration::from_secs(3), receive.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let error: serde_json::Value = serde_json::from_str(&payload).unwrap();
+        assert_eq!(error["meeting_id"], meeting_id);
+        assert!(error["error"].as_str().unwrap().contains("in progress"));
+        assert!(!is_retranscription_in_progress_command(Some(meeting_id.into())).await);
+        assert_eq!(get_retranscription_outcome(meeting_id.into()).await, "failed");
+        assert_eq!(get_retranscription_outcome("missing-meeting".into()).await, "unknown");
+
+        let batch_guard = super::super::common::try_batch_processing().unwrap();
+        let guard = RetranscriptionGuard::acquire("enhancement-blocks-recording-test").unwrap();
+        assert!(is_retranscription_in_progress_command(Some("enhancement-blocks-recording-test".into())).await);
+        assert_eq!(get_retranscription_outcome("enhancement-blocks-recording-test".into()).await, "running");
+        assert!(!is_retranscription_in_progress_command(Some("other-meeting".into())).await);
+        let error = super::super::recording_commands::start_recording_with_meeting_name(
+            app.handle().clone(), None,
+        ).await.unwrap_err();
+        assert!(error.contains("Wait for audio processing"));
+        let error = super::super::recording_commands::start_recording_with_devices_and_meeting(
+            app.handle().clone(), None, None, None,
+        ).await.unwrap_err();
+        assert!(error.contains("Wait for audio processing"));
+        let error = super::super::import::start_import_audio_command(
+            app.handle().clone(), "/unused".into(), "Import".into(), None, None, None,
+        ).await.unwrap_err();
+        assert!(error.contains("Another audio processing job"));
+        drop(guard);
+        let error = start_retranscription_command(
+            app.handle().clone(), "blocked-by-import".into(), "/unused".into(), None, None, None, None, None,
+        ).await.unwrap_err();
+        assert!(error.contains("Another audio processing job"));
+        drop(batch_guard);
+        assert!(!is_retranscription_in_progress_command(None).await);
+    }
 
     #[test]
     fn test_create_transcript_segments_empty() {
@@ -1312,9 +1390,6 @@ mod tests {
     fn test_cancellation_flag() {
         // Reset flag to known state
         RETRANSCRIPTION_CANCELLED.store(false, Ordering::SeqCst);
-        RETRANSCRIPTION_IN_PROGRESS.store(false, Ordering::SeqCst);
-
-        assert!(!is_retranscription_in_progress());
 
         // Test cancellation
         cancel_retranscription();

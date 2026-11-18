@@ -14,6 +14,18 @@ pub(crate) async fn acquire_engine_lifecycle_lock() -> OwnedMutexGuard<()> {
     ENGINE_LIFECYCLE_LOCK.clone().lock_owned().await
 }
 
+static BATCH_PROCESSING: Lazy<Arc<AsyncMutex<()>>> =
+    Lazy::new(|| Arc::new(AsyncMutex::new(())));
+
+pub(crate) fn try_batch_processing() -> Result<OwnedMutexGuard<()>, String> {
+    BATCH_PROCESSING.clone().try_lock_owned()
+        .map_err(|_| "Another audio processing job is in progress. Wait for it to finish.".into())
+}
+
+pub(crate) fn batch_processing_active() -> bool {
+    BATCH_PROCESSING.clone().try_lock_owned().is_err()
+}
+
 /// Local engine used for a batch job (import or retranscription).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum BatchEngine {

@@ -12,7 +12,7 @@ for (const provider of ['localWhisper', 'funasr', 'nemotron', 'parakeet']) {
     const button = page.getByRole('button', { name: 'Language', exact: true });
     if (provider === 'parakeet') {
       await page.getByRole('button', { name: 'Start Recording', exact: true }).click();
-      await expect(page.getByRole('combobox')).toContainText('Parakeet');
+      await expect(page.getByRole('combobox', { name: 'Transcript model', exact: true })).toContainText('Parakeet');
       await expect(button).toHaveCount(0);
       return;
     }

@@ -16,6 +16,8 @@ pub(crate) struct Proposal {
     pub original: Vec<Transcript>,
     pub segments: Vec<TranscriptSegment>,
     pub labels: Option<EnhancementSpeakerLabels>,
+    #[serde(default)]
+    pub preserve_speakers: bool,
     pub duration_seconds: f64,
     pub language: Option<String>,
     pub provider: Option<String>,

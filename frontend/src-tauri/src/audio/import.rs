@@ -1014,8 +1014,16 @@ pub async fn start_import_audio_command<R: Runtime>(
         return Err("Import already in progress".to_string());
     }
 
+    let admission = super::common::acquire_engine_lifecycle_lock().await;
+    if super::recording_commands::is_recording().await {
+        return Err("Wait for the recording to finish before importing audio.".into());
+    }
+    let batch_guard = super::common::try_batch_processing()?;
+    drop(admission);
+
     // Spawn import in background
     tauri::async_runtime::spawn(async move {
+        let _batch_guard = batch_guard;
         let result = start_import(app, source_path, title, language, model, provider).await;
 
         if let Err(e) = result {

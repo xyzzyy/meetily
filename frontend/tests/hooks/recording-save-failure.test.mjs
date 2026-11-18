@@ -18,6 +18,7 @@ async function loadHook({
   deferNavigation = false,
   deferDelayMs,
   loadStored = async () => [],
+  autoEnhance = async () => false,
 } = {}) {
   const listeners = new Map();
   const statuses = [];
@@ -43,6 +44,7 @@ async function loadHook({
     setStatus: (status, message) => statuses.push({ status, message }),
   };
   const require = (name) => {
+    if (name === '@/lib/enhancement-preferences') return { startAutoEnhancement: autoEnhance, refineSpeakersAfterRecording: async () => {} };
     if (name === 'react') return React;
     if (name === 'next/navigation') return { useRouter: () => ({ push: path => calls.navigation.push(path) }) };
     if (name === '@tauri-apps/api/event') return { listen: (event, callback) => {
@@ -710,4 +712,18 @@ test('a recovery read failure keeps the original transcript snapshot for saving'
   await stopping;
   assert.equal(state.calls.save, 1);
   assert.equal(state.calls.savedMeetings[0][1][0].text, 'Keep this transcript');
+});
+
+test('auto enhancement starts with the saved meeting ID and audio folder after SQLite commit', async t => {
+  const enhanced = [];
+  const state = await loadHook({ allowSuccess: true, autoEnhance: async (...args) => {
+    assert.equal(state.calls.save, 1);
+    assert.equal(state.calls.markSaved, 1);
+    enhanced.push(args);
+    return true;
+  } });
+  t.after(state.unmount);
+  await state.listeners.get('recording-stopped')({ payload: { folder_path: '/recordings/Meeting', meeting_name: 'Meeting' } });
+  await state.hook.handleRecordingStop(true);
+  assert.deepEqual(enhanced, [['saved-meeting', '/recordings/Meeting']]);
 });

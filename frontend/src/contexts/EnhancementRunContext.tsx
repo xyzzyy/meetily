@@ -141,9 +141,9 @@ export function EnhancementRunProvider({ children }: { children: ReactNode }) {
             action: { label: 'View', onClick: () => viewMeetingRef.current(meetingId) },
           });
         }),
-        listen<{ meeting_id: string; error: string }>('retranscription-error', event => {
-          const { meeting_id: meetingId, error } = event.payload;
-          if (finishCancelled(meetingId)) {
+        listen<{ meeting_id: string; error: string; cancelled?: boolean }>('retranscription-error', event => {
+          const { meeting_id: meetingId, error, cancelled } = event.payload;
+          if (finishCancelled(meetingId) || cancelled === true) {
             setRun(current => current?.meetingId === meetingId ? null : current);
             return;
           }
