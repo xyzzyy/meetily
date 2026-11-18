@@ -103,20 +103,34 @@ pub(crate) fn nemotron_rows(
 ) -> Vec<(String, f64, f64)> {
     group_words_with_separator(words, |start, end| {
         speakers.and_then(|analysis| analysis.speaker_key(start / 1000.0, end / 1000.0, source))
-    }, "").into_iter().map(|(text, start, end)| (text.trim().to_string(), start, end)).collect()
+    }, "", NEMOTRON_ROW_LIMITS)
+        .into_iter()
+        .map(|(text, start, end)| (text.trim().to_string(), start, end))
+        .collect()
 }
+
+struct WordRowLimits {
+    pause_ms: f64,
+    duration_ms: f64,
+}
+
+const DEFAULT_ROW_LIMITS: WordRowLimits = WordRowLimits { pause_ms: 600.0, duration_ms: 6_000.0 };
+// Nemotron already supplies sentence boundaries. Allow a midpoint hesitation
+// and longer sentences before splitting a row without punctuation.
+const NEMOTRON_ROW_LIMITS: WordRowLimits = WordRowLimits { pause_ms: 1_200.0, duration_ms: 15_000.0 };
 
 fn group_words(
     words: Vec<(String, f64, f64)>,
     speaker_key: impl Fn(f64, f64) -> Option<String>,
 ) -> Vec<(String, f64, f64)> {
-    group_words_with_separator(words, speaker_key, " ")
+    group_words_with_separator(words, speaker_key, " ", DEFAULT_ROW_LIMITS)
 }
 
 fn group_words_with_separator(
     words: Vec<(String, f64, f64)>,
     speaker_key: impl Fn(f64, f64) -> Option<String>,
     separator: &str,
+    limits: WordRowLimits,
 ) -> Vec<(String, f64, f64)> {
     let mut rows: Vec<(String, f64, f64)> = Vec::new();
     let mut current_key = None;
@@ -126,8 +140,8 @@ fn group_words_with_separator(
             .last()
             .map(|row| {
                 key != current_key
-                    || start - row.2 > 600.0
-                    || end - row.1 > 6000.0
+                    || start - row.2 > limits.pause_ms
+                    || end - row.1 > limits.duration_ms
                     || row.0.trim_end().ends_with(['.', '!', '?', '。', '！', '？'])
             })
             .unwrap_or(true);
@@ -1410,8 +1424,32 @@ mod tests {
         ];
         let rows = group_words_with_separator(words, |start, _| {
             Some(if start < 200.0 { "S1" } else { "S2" }.to_string())
-        }, "");
+        }, "", NEMOTRON_ROW_LIMITS);
         assert_eq!(rows, vec![("你好，".into(), 0.0, 200.0), ("世界！".into(), 200.0, 400.0)]);
+    }
+
+    #[test]
+    fn nemotron_keeps_a_sentence_through_short_pauses() {
+        let words = [
+            ("My only main ", 140_270.0, 143_490.0),
+            ("concern is I don't know in this team which ", 144_460.0, 149_930.0),
+            ("level of Jira they go up to. ", 150_320.0, 153_310.0),
+            ("Right. ", 154_034.0, 154_434.0),
+            ("Like in the Jira UI, there was ", 154_360.0, 160_033.0),
+            ("a different setup. ", 160_033.0, 161_730.0),
+        ]
+        .into_iter()
+        .map(|(text, start, end)| (text.to_owned(), start, end))
+        .collect();
+        let rows = nemotron_rows(words, None, None);
+        assert_eq!(
+            rows,
+            vec![
+                ("My only main concern is I don't know in this team which level of Jira they go up to.".into(), 140_270.0, 153_310.0),
+                ("Right.".into(), 154_034.0, 154_434.0),
+                ("Like in the Jira UI, there was a different setup.".into(), 154_360.0, 161_730.0),
+            ]
+        );
     }
 
     #[test]

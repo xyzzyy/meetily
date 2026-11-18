@@ -1999,7 +1999,7 @@ mod tests {
     #[test]
     fn unmatched_words_use_tagged_speech_instead_of_collapsed_plain_times() {
         let plain = timed(&[
-            ("before ", 800.0, 1000.0),
+            ("Before. ", 800.0, 1000.0),
             ("your ", 1080.0, 1160.0),
             ("turn.", 1160.0, 1240.0),
             ("After.", 4000.0, 4200.0),
