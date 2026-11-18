@@ -1060,7 +1060,7 @@ fn words_on_timeline(parts: Vec<(Reply, f64)>, duration_ms: f64) -> Vec<(String,
 }
 
 /// Gives `words` the times of the same words in `timed`, matched in order.
-/// Words without a match use the speech interval of skipped tagged words.
+/// Words without a match use the speech intervals of skipped tagged words.
 /// Without that evidence, they are spread between their matched neighbours.
 /// The text and its order are unchanged.
 fn times_from(
@@ -1177,25 +1177,47 @@ fn times_from(
         let from = (run.start > 0).then(|| words[run.start - 1].2);
         let to = words.get(run.end).map(|w| w.1);
         if let (Some(from), Some(to)) = (from, to) {
-            let (mut from, mut to) = (from.min(to), to);
+            let from = from.min(to);
             let left = matched[run.start - 1].unwrap() + 1;
             let right = matched[run.end].unwrap();
-            let (speech_start, speech_end) = timed[left..right]
-                .iter()
-                .filter(|word| word.2 > word.1)
-                .fold((f64::INFINITY, f64::NEG_INFINITY), |(start, end), word| {
-                    (start.min(word.1), end.max(word.2))
-                });
-            let speech_start = speech_start.max(from);
-            let speech_end = speech_end.min(to);
-            if speech_end > speech_start {
-                from = speech_start;
-                to = speech_end;
+            let mut speech: Vec<(f64, f64)> = Vec::new();
+            for word in &timed[left..right] {
+                let (start, end) = (word.1.max(from), word.2.min(to));
+                if end <= start {
+                    continue;
+                }
+                if let Some(last) = speech.last_mut() {
+                    if start <= last.1 {
+                        last.1 = last.1.max(end);
+                        continue;
+                    }
+                }
+                speech.push((start, end));
             }
-            let step = (to - from).max(0.0) / run.len() as f64;
-            for (n, k) in run.clone().enumerate() {
-                words[k].1 = from + step * n as f64;
-                words[k].2 = from + step * (n + 1) as f64;
+            if speech.is_empty() {
+                let step = (to - from).max(0.0) / run.len() as f64;
+                for (n, k) in run.clone().enumerate() {
+                    words[k].1 = from + step * n as f64;
+                    words[k].2 = from + step * (n + 1) as f64;
+                }
+            } else {
+                // Divide words between speech intervals by their duration.
+                // Assign each word within one interval before the minimum-width check.
+                let total: f64 = speech.iter().map(|(start, end)| end - start).sum();
+                let (mut elapsed, mut first) = (0.0, run.start);
+                for (start, end) in speech {
+                    elapsed += end - start;
+                    let last = (run.start + (elapsed / total * run.len() as f64).round() as usize)
+                        .min(run.end);
+                    if last > first {
+                        let step = (end - start) / (last - first) as f64;
+                        for (n, k) in (first..last).enumerate() {
+                            words[k].1 = start + step * n as f64;
+                            words[k].2 = start + step * (n + 1) as f64;
+                        }
+                    }
+                    first = last;
+                }
             }
         } else {
             for k in run.clone() {
@@ -1213,7 +1235,8 @@ fn times_from(
         i = run.end;
     }
     // Keep starts in order and give every word a positive duration, even
-    // when its matched neighbours leave no room.
+    // when its matched neighbours leave no room. This can extend a word
+    // past a very short speech interval.
     let mut previous = 0.0;
     for word in &mut words {
         word.1 = word.1.max(previous);
@@ -1995,6 +2018,36 @@ mod tests {
         assert_eq!(words[2], ("turn.".into(), 2550.0, 2900.0));
         let rows = crate::audio::enhancement::nemotron_rows(words, None, None);
         assert_eq!(rows[1].0, "your turn.");
+    }
+
+    // Captured word times from the Data Pipeline meeting replay. Two
+    // groups of skipped tagged words have a pause of almost six seconds.
+    #[test]
+    fn unmatched_words_do_not_cross_pauses_between_tagged_speech() {
+        let plain = timed(&[
+            ("one. ", 406_977.0, 407_340.0),
+            ("Still ", 408_710.0, 409_132.0),
+            ("breathe. ", 409_132.0, 409_610.0),
+            ("Doesn't ", 415_279.0, 415_360.0),
+            ("have ", 415_360.0, 415_917.0),
+        ]);
+        let tagged = timed(&[
+            ("one.", 406_977.0, 407_340.0),
+            ("Let's", 408_653.0, 408_710.0),
+            ("do", 408_710.0, 409_012.0),
+            ("a", 409_012.0, 409_132.0),
+            ("breed.", 409_132.0, 409_610.0),
+            ("I", 415_358.0, 415_360.0),
+            ("don't", 415_360.0, 415_598.0),
+            ("have", 415_598.0, 415_917.0),
+        ]);
+        let words = times_from(plain, &tagged);
+        assert_eq!((words[1].1, words[2].2), (408_653.0, 409_610.0));
+        assert_eq!((words[3].1, words[3].2), (415_358.0, 415_598.0));
+        let rows = crate::audio::enhancement::nemotron_rows(words, None, None);
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[1].0, "Still breathe.");
+        assert_eq!(rows[1].2, 409_610.0);
     }
 
     #[test]
