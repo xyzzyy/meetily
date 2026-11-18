@@ -1060,8 +1060,8 @@ fn words_on_timeline(parts: Vec<(Reply, f64)>, duration_ms: f64) -> Vec<(String,
 }
 
 /// Gives `words` the times of the same words in `timed`, matched in order.
-/// Words without a match keep their original times when they fit between
-/// their matched neighbours. Otherwise they are spread between those matches.
+/// Words without a match use the speech interval of skipped tagged words.
+/// Without that evidence, they are spread between their matched neighbours.
 /// The text and its order are unchanged.
 fn times_from(
     mut words: Vec<(String, f64, f64)>,
@@ -1165,8 +1165,8 @@ fn times_from(
             words[i].2 = timed[*j].2;
         }
     }
-    // Keep an unmatched run when its original times fit between the matches.
-    // Spreading it across the whole gap can move speech into a long pause.
+    // Bound unmatched words by the skipped tagged speech when available.
+    // The entire gap between matches can include a long pause.
     let mut i = 0;
     while i < words.len() {
         if matched[i].is_some() {
@@ -1177,20 +1177,21 @@ fn times_from(
         let from = (run.start > 0).then(|| words[run.start - 1].2);
         let to = words.get(run.end).map(|w| w.1);
         if let (Some(from), Some(to)) = (from, to) {
-            // Clip offsets and seconds-to-milliseconds conversion can round
-            // the same boundary differently. Allow one nanosecond of error.
-            const TIME_TOLERANCE_MS: f64 = 0.000001;
-            if original[run.clone()].iter().all(|word| {
-                word.1 >= from - TIME_TOLERANCE_MS && word.2 <= to + TIME_TOLERANCE_MS
-            }) {
-                for k in run.clone() {
-                    words[k].1 = original[k].1;
-                    words[k].2 = original[k].2;
-                }
-                i = run.end;
-                continue;
+            let (mut from, mut to) = (from.min(to), to);
+            let left = matched[run.start - 1].unwrap() + 1;
+            let right = matched[run.end].unwrap();
+            let (speech_start, speech_end) = timed[left..right]
+                .iter()
+                .filter(|word| word.2 > word.1)
+                .fold((f64::INFINITY, f64::NEG_INFINITY), |(start, end), word| {
+                    (start.min(word.1), end.max(word.2))
+                });
+            let speech_start = speech_start.max(from);
+            let speech_end = speech_end.min(to);
+            if speech_end > speech_start {
+                from = speech_start;
+                to = speech_end;
             }
-            let from = from.min(to);
             let step = (to - from).max(0.0) / run.len() as f64;
             for (n, k) in run.clone().enumerate() {
                 words[k].1 = from + step * n as f64;
@@ -1943,48 +1944,57 @@ mod tests {
         assert!(words.windows(2).all(|pair| pair[0].1 <= pair[1].1));
     }
 
+    // Times captured from the retained-audio IQ4 replay. The plain request
+    // retried this greeting in a shorter clip; the tagged text differed.
     #[test]
     fn unmatched_greeting_does_not_fill_the_pause_before_the_reply() {
         let plain = timed(&[
-            ("Hi ", 164_692.0, 164_720.0),
-            ("Matthew, ", 164_720.0, 165_100.0),
-            ("how ", 165_100.0, 165_300.0),
-            ("are ", 165_300.0, 165_450.0),
-            ("you?", 165_450.0, 165_700.0),
-            ("Okay.", 177_554.4, 178_000.0),
+            ("Hi ", 164_695.0, 164_710.0),
+            ("Matthew, ", 164_710.0, 165_350.0),
+            ("how ", 165_860.0, 166_091.0),
+            ("are ", 166_091.0, 166_131.0),
+            ("you? ", 166_131.0, 166_240.0),
+            ("Okay, ", 166_930.0, 167_888.0),
         ]);
-        // Example of a different greeting in the tagged decode.
         let tagged = timed(&[
-            ("Hi", 164_692.0, 164_720.0),
-            ("Madior", 164_720.0, 165_490.0),
-            ("Okay", 177_554.4, 178_000.0),
+            ("Hi,", 164_692.0, 164_720.0),
+            ("Manu.", 164_720.0, 165_370.0),
+            ("Hi.", 165_811.0, 166_530.0),
+            ("Right.", 167_050.0, 167_300.0),
+            ("Okay,", 180_754.0, 180_780.0),
         ]);
-        let words = times_from(plain.clone(), &tagged);
-        assert_eq!(words, plain);
+        let words = times_from(plain, &tagged);
+        assert_eq!((words[0].1, words[0].2), (164_692.0, 164_720.0));
+        assert_eq!((words[5].1, words[5].2), (180_754.0, 180_780.0));
+        assert!(words[1..5].iter().all(|word| word.1 >= 164_720.0 && word.2 <= 167_300.0));
         let rows = crate::audio::enhancement::nemotron_rows(words, None, None);
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].0, "Hi Matthew, how are you?");
-        assert_eq!(rows[0].2, 165_700.0);
+        assert_eq!(rows[0].2, 167_300.0);
     }
 
     #[test]
-    fn unmatched_words_allow_rounding_at_both_matched_boundaries() {
-        let split = (10.0_f64 + 2.88) * 1000.0;
-        let whole = 12.88_f64 * 1000.0;
-        assert!(split < whole);
-        for (from, start, end, to) in [
-            (whole, split, 13_000.0, 25_000.0),
-            (10_000.0, 11_000.0, whole, split),
-        ] {
-            let plain = timed(&[
-                ("before", from - 200.0, from),
-                ("word", start, end),
-                ("after", to, to + 200.0),
-            ]);
-            let tagged = vec![plain[0].clone(), plain[2].clone()];
-            let words = times_from(plain.clone(), &tagged);
-            assert_eq!(words, plain);
-        }
+    fn unmatched_words_use_tagged_speech_instead_of_collapsed_plain_times() {
+        let plain = timed(&[
+            ("before ", 800.0, 1000.0),
+            ("your ", 1080.0, 1160.0),
+            ("turn.", 1160.0, 1240.0),
+            ("After.", 4000.0, 4200.0),
+        ]);
+        let tagged = timed(&[
+            ("before", 800.0, 1000.0),
+            ("go", 2200.0, 2500.0),
+            ("ahead", 2500.0, 2900.0),
+            ("after", 4000.0, 4200.0),
+        ]);
+        let words = times_from(plain.clone(), &tagged);
+        assert_eq!(words[0], plain[0]);
+        assert_eq!(words[3], plain[3]);
+        // Both words belong within the later speaker's 2.2-2.9 s turn.
+        assert_eq!(words[1], ("your ".into(), 2200.0, 2550.0));
+        assert_eq!(words[2], ("turn.".into(), 2550.0, 2900.0));
+        let rows = crate::audio::enhancement::nemotron_rows(words, None, None);
+        assert_eq!(rows[1].0, "your turn.");
     }
 
     #[test]
@@ -2013,9 +2023,7 @@ mod tests {
                 ("after", next_start, 400.0),
             ]);
             let words = times_from(plain.clone(), &tagged);
-            // A valid plain time stays short instead of filling the gap.
-            let end = if next_start > 120.0 { 120.0 } else { 101.0 };
-            assert_eq!(words[1], ("word".into(), 100.0, end));
+            assert_eq!(words[1], ("word".into(), 100.0, next_start.max(101.0)));
             assert!(words.iter().all(|word| word.2 > word.1), "{words:?}");
             assert!(words.windows(2).all(|pair| pair[0].1 <= pair[1].1), "{words:?}");
         }
