@@ -27,7 +27,7 @@ import { languagesForProvider } from '@/lib/funasr';
 import { useTranscriptionModels, ModelOption } from '@/hooks/useTranscriptionModels';
 import { useEnhancementRun } from '@/contexts/EnhancementRunContext';
 import { readEnhancementPreferences } from '@/lib/enhancement-preferences';
-import { compareTranscriptText } from '@/lib/transcript-comparison';
+import { compareTranscriptText, transcriptReviewText } from '@/lib/transcript-comparison';
 
 interface RetranscribeDialogProps {
   open: boolean;
@@ -77,8 +77,8 @@ export function RetranscribeDialog({
   const [isApplying, setIsApplying] = useState(false);
   const [loadingReview, setLoadingReview] = useState(false);
   const comparison = useMemo(() => review ? compareTranscriptText(
-    review.original.map(row => row.transcript).join('\n\n'),
-    review.proposed.map(row => row.text).join('\n\n')) : null, [review]);
+    transcriptReviewText(review.original.map(row => row.transcript)),
+    transcriptReviewText(review.proposed.map(row => row.text))) : null, [review]);
   const [error, setError] = useState<string | null>(null);
   const [selectedLang, setSelectedLang] = useState(selectedLanguage || 'auto');
 

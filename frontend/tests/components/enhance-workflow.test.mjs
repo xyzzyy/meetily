@@ -121,6 +121,23 @@ for (const [loading, selected] of [[true, true], [false, false]]) {
 }
 console.log('Enhance workflow: all checks passed');
 
+// Speaker and timestamp boundaries can split a sentence into several rows.
+{
+  const instance = dialog('nemotron', false, true, true, false, {
+    id: 'fragmented-review', applied: true, warnings: [],
+    original: [{ transcript: 'I hope to ping him back if needed.' }],
+    proposed: [
+      { text: 'I have' }, { text: 'to ping him back if needed.' },
+      { text: 'And let’s call him' }, { text: 'back.' },
+      { text: 'Yes,' }, { text: 'sorry.' },
+    ],
+  });
+  const enhanced = nodes(instance.tree).find(node => node.props['aria-label'] === 'Enhanced transcript');
+  const text = nodes(enhanced).filter(node => node.type === 'span')
+    .map(node => node.props.children).join('');
+  assert.equal(text, 'I have to ping him back if needed. And let’s call him back. Yes, sorry.');
+}
+
 // A pending result can be applied or discarded.
 for (const action of ['Keep saved transcript', 'Apply proposed transcript']) {
   const instance = dialog('whisper', false, true, true, false, {
