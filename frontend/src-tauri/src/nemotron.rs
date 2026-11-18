@@ -1060,7 +1060,8 @@ fn words_on_timeline(parts: Vec<(Reply, f64)>, duration_ms: f64) -> Vec<(String,
 }
 
 /// Gives `words` the times of the same words in `timed`, matched in order.
-/// Words without a match are spread between their matched neighbours.
+/// Words without a match keep their original times when they fit between
+/// their matched neighbours. Otherwise they are spread between those matches.
 /// The text and its order are unchanged.
 fn times_from(
     mut words: Vec<(String, f64, f64)>,
@@ -1164,7 +1165,8 @@ fn times_from(
             words[i].2 = timed[*j].2;
         }
     }
-    // Spread each run of unmatched words between its matched neighbours.
+    // Keep an unmatched run when its original times fit between the matches.
+    // Spreading it across the whole gap can move speech into a long pause.
     let mut i = 0;
     while i < words.len() {
         if matched[i].is_some() {
@@ -1175,6 +1177,14 @@ fn times_from(
         let from = (run.start > 0).then(|| words[run.start - 1].2);
         let to = words.get(run.end).map(|w| w.1);
         if let (Some(from), Some(to)) = (from, to) {
+            if original[run.clone()].iter().all(|word| word.1 >= from && word.2 <= to) {
+                for k in run.clone() {
+                    words[k].1 = original[k].1;
+                    words[k].2 = original[k].2;
+                }
+                i = run.end;
+                continue;
+            }
             let from = from.min(to);
             let step = (to - from).max(0.0) / run.len() as f64;
             for (n, k) in run.clone().enumerate() {
@@ -1929,6 +1939,30 @@ mod tests {
     }
 
     #[test]
+    fn unmatched_greeting_does_not_fill_the_pause_before_the_reply() {
+        let plain = timed(&[
+            ("Hi ", 164_692.0, 164_720.0),
+            ("Matthew, ", 164_720.0, 165_100.0),
+            ("how ", 165_100.0, 165_300.0),
+            ("are ", 165_300.0, 165_450.0),
+            ("you?", 165_450.0, 165_700.0),
+            ("Okay.", 177_554.4, 178_000.0),
+        ]);
+        // Example of a different greeting in the tagged decode.
+        let tagged = timed(&[
+            ("Hi", 164_692.0, 164_720.0),
+            ("Madior", 164_720.0, 165_490.0),
+            ("Okay", 177_554.4, 178_000.0),
+        ]);
+        let words = times_from(plain.clone(), &tagged);
+        assert_eq!(words, plain);
+        let rows = crate::audio::enhancement::nemotron_rows(words, None, None);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].0, "Hi Matthew, how are you?");
+        assert_eq!(rows[0].2, 165_700.0);
+    }
+
+    #[test]
     fn overlapping_tagged_words_keep_the_right_matched_start() {
         let plain = timed(&[
             ("a", 0.0, 100.0),
@@ -1954,7 +1988,9 @@ mod tests {
                 ("after", next_start, 400.0),
             ]);
             let words = times_from(plain.clone(), &tagged);
-            assert_eq!(words[1], ("word".into(), 100.0, next_start.max(101.0)));
+            // A valid plain time stays short instead of filling the gap.
+            let end = if next_start > 120.0 { 120.0 } else { 101.0 };
+            assert_eq!(words[1], ("word".into(), 100.0, end));
             assert!(words.iter().all(|word| word.2 > word.1), "{words:?}");
             assert!(words.windows(2).all(|pair| pair[0].1 <= pair[1].1), "{words:?}");
         }
