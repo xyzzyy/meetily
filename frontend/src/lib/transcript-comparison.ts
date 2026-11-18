@@ -1,5 +1,23 @@
 export interface TranscriptChange { text: string; changed: boolean }
 
+/** Review text flows across audio rows, which can end in mid-sentence. */
+export function transcriptReviewText(rows: readonly string[]): string {
+  const paragraphs: string[] = [];
+  let paragraph = '';
+  for (const row of rows) {
+    const text = row.trim();
+    if (!text) continue;
+    paragraph = paragraph ? `${paragraph} ${text}` : text;
+    // Add a break after a sentence once the paragraph has several lines.
+    if (paragraph.length >= 280 && /[.!?。！？]["'”’»）)]*$/u.test(paragraph)) {
+      paragraphs.push(paragraph);
+      paragraph = '';
+    }
+  }
+  if (paragraph) paragraphs.push(paragraph);
+  return paragraphs.join('\n\n');
+}
+
 /** Preserve both texts exactly. Bound comparison work for long meetings. */
 export function compareTranscriptText(before: string, after: string): {
   before: TranscriptChange[]; after: TranscriptChange[];
