@@ -43,4 +43,6 @@ The runtime can report a successful alignment but return no word times for a non
 
 The runtime can also return the right words with the wrong times. A whole sentence can come back packed at one 80 ms step per word, several seconds before it was said. With speakers on, Meetily also requests each text piece with NVIDIA's speaker-tag instruction. These word times follow the audio. Meetily matches the words in order and copies these times onto the plain request's words. The text stays from the plain request because the tagged text was less accurate.
 
-This doubles transcription time. Enhance's check for lost speech still matches the saved transcript's words within 10 seconds and only warns. It never discards a run; Undo restores the previous transcript.
+Words that do not match the speaker-tagged text keep their original times if they fit between the matched words. This prevents a short phrase from being spread across a long pause.
+
+The second text request doubles transcription time. Enhance's check for lost speech still matches the saved transcript's words within 10 seconds and only warns. It never discards a run; Undo restores the previous transcript.
