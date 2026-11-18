@@ -1177,7 +1177,12 @@ fn times_from(
         let from = (run.start > 0).then(|| words[run.start - 1].2);
         let to = words.get(run.end).map(|w| w.1);
         if let (Some(from), Some(to)) = (from, to) {
-            if original[run.clone()].iter().all(|word| word.1 >= from && word.2 <= to) {
+            // Clip offsets and seconds-to-milliseconds conversion can round
+            // the same boundary differently. Allow one nanosecond of error.
+            const TIME_TOLERANCE_MS: f64 = 0.000001;
+            if original[run.clone()].iter().all(|word| {
+                word.1 >= from - TIME_TOLERANCE_MS && word.2 <= to + TIME_TOLERANCE_MS
+            }) {
                 for k in run.clone() {
                     words[k].1 = original[k].1;
                     words[k].2 = original[k].2;
@@ -1960,6 +1965,26 @@ mod tests {
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].0, "Hi Matthew, how are you?");
         assert_eq!(rows[0].2, 165_700.0);
+    }
+
+    #[test]
+    fn unmatched_words_allow_rounding_at_both_matched_boundaries() {
+        let split = (10.0_f64 + 2.88) * 1000.0;
+        let whole = 12.88_f64 * 1000.0;
+        assert!(split < whole);
+        for (from, start, end, to) in [
+            (whole, split, 13_000.0, 25_000.0),
+            (10_000.0, 11_000.0, whole, split),
+        ] {
+            let plain = timed(&[
+                ("before", from - 200.0, from),
+                ("word", start, end),
+                ("after", to, to + 200.0),
+            ]);
+            let tagged = vec![plain[0].clone(), plain[2].clone()];
+            let words = times_from(plain.clone(), &tagged);
+            assert_eq!(words, plain);
+        }
     }
 
     #[test]
