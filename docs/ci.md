@@ -3,16 +3,10 @@
 `.github/workflows/pr-build.yml` runs for pull requests to `main`, pushes to
 `main`, and manual requests from the Actions tab.
 
-The workflow has two checks:
+The workflow splits fast checks on Ubuntu and consolidates native macOS work onto one runner:
 
-- **Frontend build and tests** installs the locked dependencies, runs the
-  build guard tests, the existing frontend suite one file per process, and the
-  diarization benchmark tests, then builds the production frontend on Ubuntu.
-- **macOS release build and tests** builds the summary, speaker, and FUN-ASR
-  helpers, then the app, on an Apple Silicon Mac with GitHub's `macos-latest`
-  runner. It also runs the diarization interval tests and the Rust unit and
-  documentation tests. Xcode and the Apple SDKs are already installed on the
-  runner.
+- **Ubuntu checks (`ubuntu-24.04`)** run in parallel for quick feedback: build guard tests, issue workflow tests, diarization benchmark tests, FUN-ASR embedding tests, frontend unit tests (one file per process), and the production frontend build. After the frontend build succeeds, browser release tests and the browser normal-usage walkthrough run against `frontend/out`.
+- **macOS build, tests, and launch (`macos-latest`)** runs after the frontend production build on a single Apple Silicon runner to avoid GitHub Actions `macos-latest` runner-acquisition timeouts and concurrency-cap pressure. On that runner it runs the Swift interval tests and Llama helper unit tests, builds the Llama, diarization, and FUN-ASR helpers, bundles and verifies the arm64 `.app`, runs the Rust library and documentation tests, and launches the unpacked `.app` to test the setup walkthrough. Xcode and the Apple SDKs are already installed on the runner.
 
 The macOS job sets `SDKROOT` to the SDK from the active Xcode installation.
 This keeps the Swift compiler and the speaker helper's C++ headers on the
