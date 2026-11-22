@@ -28,7 +28,7 @@ jobs:
       matrix:
         include:
           - name: Build guard tests
-            test: .github/verify-portable-ggml.test.cjs
+            test: .github/verify-portable-ggml.test.cjs .github/verify-playwright-container.test.cjs
           - name: Issue workflow tests
             test: .github/scripts/issue-workflows.test.cjs
     steps:
@@ -38,7 +38,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
-      - run: node --test '${{ matrix.test }}'
+      - run: node --test ${{ matrix.test }}
 
   benchmark-tests:
     name: Diarization benchmark tests
@@ -114,6 +114,9 @@ jobs:
     name: Browser release tests
     needs: frontend-build
     runs-on: ubuntu-24.04
+    container:
+      image: mcr.microsoft.com/playwright:v1.64.1-noble
+      options: --ipc=host
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
@@ -124,8 +127,6 @@ jobs:
         with:
           name: frontend-build
           path: frontend/out
-      - working-directory: frontend
-        run: pnpm exec playwright install --with-deps chromium webkit
       - working-directory: frontend
         run: pnpm test:release --grep-invert "normal session:"
       - name: Save browser failure details
@@ -281,6 +282,9 @@ jobs:
     name: Normal usage walkthrough (browser)
     needs: frontend-build
     runs-on: ubuntu-24.04
+    container:
+      image: mcr.microsoft.com/playwright:v1.64.1-noble
+      options: --ipc=host
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
@@ -291,8 +295,6 @@ jobs:
         with:
           name: frontend-build
           path: frontend/out
-      - working-directory: frontend
-        run: pnpm exec playwright install --with-deps chromium webkit
       - working-directory: frontend
         run: pnpm test:release normal-usage.spec.ts
       - name: Save walkthrough failure details
