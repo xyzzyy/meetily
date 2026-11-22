@@ -21,9 +21,13 @@ includes the active Xcode version so build-script paths from an older runner
 image are not reused.
 
 The frontend is the React and Next.js interface shown in the Tauri window.
-The frontend job exports its production files to `frontend/out`. The macOS
-job uses those files when it compiles the native app with Cargo's release
-settings.
+The frontend job exports its production files to `frontend/out`. The browser
+checks (`browser-tests` and `browser-walkthrough`) run inside Microsoft's
+prebuilt Playwright Docker container (`mcr.microsoft.com/playwright:vX.Y.Z-noble`
+with `--ipc=host`), whose tag matches `@playwright/test` in
+`frontend/package.json` so OS packages and browser binaries are already
+installed. The macOS job uses `frontend/out` when it compiles the native app
+with Cargo's release settings.
 
 The existing frontend tests cover model deletion commands, setup model
 selection, transcription provider selection, summary state recovery,
@@ -69,7 +73,7 @@ each file gets its own process and uses either Bun or Node's test runner,
 depending on its imports. The build guard tests run from the repository root:
 
 ```sh
-node --test .github/verify-portable-ggml.test.cjs
+node --test .github/verify-portable-ggml.test.cjs .github/verify-playwright-container.test.cjs
 python3 -m unittest discover -s diarization-sidecar/Benchmarks -p 'test_*.py' -v
 ```
 
