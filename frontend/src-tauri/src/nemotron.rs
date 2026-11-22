@@ -1019,16 +1019,23 @@ impl NemotronProvider {
     ) -> Result<MeetingTranscript, TranscriptionError> {
         let duration_ms = audio.len() as f64 / 16.0;
         let speakers = self.requests(audio, Job::Speakers, None, Some(cancel)).await?;
+        let raw_turns = turns_on_timeline(speakers);
         let text = self.requests(audio, Job::Words, language, Some(cancel)).await?;
         let mut words = words_on_timeline(text, duration_ms);
         match self.requests(audio, Job::SpeakerWords, language, Some(cancel)).await {
-            Ok(timed) => words = times_from(words, &words_on_timeline(timed, duration_ms)),
+            Ok(timed) => {
+                words = times_from_with_turns(
+                    words,
+                    &words_on_timeline(timed, duration_ms),
+                    &raw_turns,
+                );
+            }
             Err(error) if cancel.load(Ordering::SeqCst) => return Err(error),
             Err(error) => log::warn!("Nemotron kept its plain word times: {error}"),
         }
         Ok(MeetingTranscript {
             words,
-            turns: bridge_turn_gaps(turns_on_timeline(speakers), duration_ms / 1000.0),
+            turns: bridge_turn_gaps(raw_turns, duration_ms / 1000.0),
         })
     }
 }
@@ -1059,13 +1066,65 @@ fn words_on_timeline(parts: Vec<(Reply, f64)>, duration_ms: f64) -> Vec<(String,
     words
 }
 
+/// Sorts finite positive `(start, end)` intervals and merges touching or overlapping ones.
+fn merge_intervals(spans: impl IntoIterator<Item = (f64, f64)>) -> Vec<(f64, f64)> {
+    let mut spans: Vec<(f64, f64)> = spans
+        .into_iter()
+        .filter(|&(start, end)| start.is_finite() && end.is_finite() && end > start)
+        .collect();
+    spans.sort_by(|a, b| a.0.total_cmp(&b.0).then_with(|| a.1.total_cmp(&b.1)));
+    let mut merged: Vec<(f64, f64)> = Vec::with_capacity(spans.len());
+    for (start, end) in spans {
+        if let Some(last) = merged.last_mut() {
+            if start <= last.1 {
+                last.1 = last.1.max(end);
+                continue;
+            }
+        }
+        merged.push((start, end));
+    }
+    merged
+}
+
+/// Clips a finite positive `(start, end)` span to `[from, to]`.
+fn clip_span(start: f64, end: f64, from: f64, to: f64) -> Option<(f64, f64)> {
+    if !start.is_finite()
+        || !end.is_finite()
+        || !from.is_finite()
+        || !to.is_finite()
+        || end <= start
+    {
+        return None;
+    }
+    let (start, end) = (start.max(from), end.min(to));
+    (end > start).then_some((start, end))
+}
+
+/// Clips sorted, disjoint intervals to `[from, to]`.
+fn clipped_intervals(merged: &[(f64, f64)], from: f64, to: f64) -> Vec<(f64, f64)> {
+    if !from.is_finite() || !to.is_finite() || to <= from {
+        return Vec::new();
+    }
+    let first = merged.partition_point(|&(_, end)| end <= from);
+    merged[first..]
+        .iter()
+        .take_while(|&&(start, _)| start < to)
+        .filter_map(|&(start, end)| {
+            let (start, end) = (start.max(from), end.min(to));
+            (end > start).then_some((start, end))
+        })
+        .collect()
+}
+
 /// Gives `words` the times of the same words in `timed`, matched in order.
-/// Words without a match use the speech intervals of skipped tagged words.
-/// Without that evidence, they are spread between their matched neighbours.
+/// Words without a match use the speech intervals of skipped tagged words,
+/// or raw speaker turns (in seconds) when no skipped tagged words fall in
+/// the gap. Without either, they are spread between their matched neighbours.
 /// The text and its order are unchanged.
-fn times_from(
+fn times_from_with_turns(
     mut words: Vec<(String, f64, f64)>,
     timed: &[(String, f64, f64)],
+    turns: &[(String, f64, f64)],
 ) -> Vec<(String, f64, f64)> {
     /// Words per matching block, which bounds memory on long recordings.
     const BLOCK: usize = 300;
@@ -1165,8 +1224,14 @@ fn times_from(
             words[i].2 = timed[*j].2;
         }
     }
-    // Bound unmatched words by the skipped tagged speech when available.
+    // Bound unmatched words by skipped tagged speech when available, falling
+    // back to raw (unbridged) speaker turns before spreading across the gap.
     // The entire gap between matches can include a long pause.
+    let turn_speech = merge_intervals(
+        turns
+            .iter()
+            .map(|&(_, start, end)| (start * 1000.0, end * 1000.0)),
+    );
     let mut i = 0;
     while i < words.len() {
         if matched[i].is_some() {
@@ -1180,19 +1245,13 @@ fn times_from(
             let from = from.min(to);
             let left = matched[run.start - 1].unwrap() + 1;
             let right = matched[run.end].unwrap();
-            let mut speech: Vec<(f64, f64)> = Vec::new();
-            for word in &timed[left..right] {
-                let (start, end) = (word.1.max(from), word.2.min(to));
-                if end <= start {
-                    continue;
-                }
-                if let Some(last) = speech.last_mut() {
-                    if start <= last.1 {
-                        last.1 = last.1.max(end);
-                        continue;
-                    }
-                }
-                speech.push((start, end));
+            let mut speech = merge_intervals(
+                timed[left..right]
+                    .iter()
+                    .filter_map(|word| clip_span(word.1, word.2, from, to)),
+            );
+            if speech.is_empty() {
+                speech = clipped_intervals(&turn_speech, from, to);
             }
             if speech.is_empty() {
                 let step = (to - from).max(0.0) / run.len() as f64;
@@ -1911,6 +1970,13 @@ mod tests {
         words.iter().map(|(text, start, end)| (text.to_string(), *start, *end)).collect()
     }
 
+    fn times_from(
+        words: Vec<(String, f64, f64)>,
+        timed: &[(String, f64, f64)],
+    ) -> Vec<(String, f64, f64)> {
+        times_from_with_turns(words, timed, &[])
+    }
+
     /// The checked meeting at 09:02. A plain request packed "As of right
     /// now ... Sounds good." into 539.7-541.2 s; it was said over 542-547 s.
     #[test]
@@ -2048,6 +2114,144 @@ mod tests {
         assert_eq!(rows.len(), 3);
         assert_eq!(rows[1].0, "Still breathe.");
         assert_eq!(rows[1].2, 409_610.0);
+    }
+
+    // Captured gap from scribe-v2-cce8dbba: the tagged pass omitted "Okay."
+    // across an 8.87 s gap while raw diarization had a turn at 168.80-169.40 s.
+    #[test]
+    fn unmatched_words_without_skipped_tagged_words_use_raw_speaker_turns() {
+        let plain = timed(&[
+            ("done. ", 160_500.0, 160_910.0),
+            ("Okay. ", 156_580.0, 156_700.0),
+            ("Right.", 169_780.0, 170_100.0),
+        ]);
+        let tagged = timed(&[
+            ("done.", 160_500.0, 160_910.0),
+            ("Right.", 169_780.0, 170_100.0),
+        ]);
+        let turns = vec![
+            ("nemotron-1".into(), 155.0, 160.91),
+            ("nemotron-3".into(), 168.80, 169.40),
+        ];
+        let words = times_from_with_turns(plain.clone(), &tagged, &turns);
+        assert_eq!(
+            words.iter().map(|w| w.0.as_str()).collect::<Vec<_>>(),
+            plain.iter().map(|w| w.0.as_str()).collect::<Vec<_>>()
+        );
+        assert_eq!(words[1], ("Okay. ".into(), 168_800.0, 169_400.0));
+        assert!(words.iter().all(|w| w.2 >= w.1 + 1.0), "{words:?}");
+        assert!(words.windows(2).all(|pair| pair[0].1 <= pair[1].1), "{words:?}");
+
+        // Multiple raw turns separated by a long silence keep unmatched words
+        // inside the turns instead of crossing the pause between them.
+        let plain = timed(&[
+            ("before. ", 10_000.0, 10_400.0),
+            ("Yes. ", 9_000.0, 9_100.0),
+            ("Got ", 9_100.0, 9_200.0),
+            ("it. ", 9_200.0, 9_300.0),
+            ("after.", 18_000.0, 18_400.0),
+        ]);
+        let tagged = timed(&[
+            ("before.", 10_000.0, 10_400.0),
+            ("after.", 18_000.0, 18_400.0),
+        ]);
+        let turns = vec![
+            ("nemotron-1".into(), 11.0, 11.6),
+            ("nemotron-2".into(), 16.0, 17.2),
+        ];
+        let words = times_from_with_turns(plain, &tagged, &turns);
+        assert_eq!(words[1], ("Yes. ".into(), 11_000.0, 11_600.0));
+        assert_eq!(words[2], ("Got ".into(), 16_000.0, 16_600.0));
+        assert_eq!(words[3], ("it. ".into(), 16_600.0, 17_200.0));
+        let rows = crate::audio::enhancement::nemotron_rows(words, None, None);
+        assert_eq!(
+            rows.iter().map(|r| (r.0.as_str(), r.1, r.2)).collect::<Vec<_>>(),
+            vec![
+                ("before.", 10_000.0, 10_400.0),
+                ("Yes.", 11_000.0, 11_600.0),
+                ("Got it.", 16_000.0, 17_200.0),
+                ("after.", 18_000.0, 18_400.0),
+            ]
+        );
+    }
+
+    #[test]
+    fn skipped_tagged_words_take_precedence_over_raw_speaker_turns() {
+        let plain = timed(&[
+            ("before. ", 800.0, 1000.0),
+            ("okay. ", 900.0, 950.0),
+            ("after.", 8000.0, 8200.0),
+        ]);
+        let tagged = timed(&[
+            ("before.", 800.0, 1000.0),
+            ("yeah.", 2000.0, 2600.0),
+            ("after.", 8000.0, 8200.0),
+        ]);
+        let turns = vec![("nemotron-2".into(), 6.0, 7.0)];
+        let words = times_from_with_turns(plain, &tagged, &turns);
+        assert_eq!(words[1], ("okay. ".into(), 2000.0, 2600.0));
+    }
+
+    #[test]
+    fn raw_speaker_turn_fallback_handles_unsorted_overlapping_invalid_and_empty_turns() {
+        let plain = timed(&[
+            ("before. ", 800.0, 1000.0),
+            ("one ", 850.0, 880.0),
+            ("two ", 880.0, 910.0),
+            ("three ", 910.0, 940.0),
+            ("four. ", 940.0, 970.0),
+            ("after.", 9000.0, 9200.0),
+        ]);
+        let tagged = timed(&[
+            ("before.", 800.0, 1000.0),
+            ("after.", 9000.0, 9200.0),
+        ]);
+        let turns = vec![
+            ("nemotron-x".into(), f64::NAN, 3.0),
+            ("nemotron-x".into(), 3.0, f64::NAN),
+            ("nemotron-x".into(), f64::NEG_INFINITY, 3.0),
+            ("nemotron-x".into(), 3.0, f64::INFINITY),
+            ("nemotron-x".into(), 1.0, f64::MAX),
+            ("nemotron-x".into(), 5.0, 4.0),
+            ("nemotron-x".into(), 5.0, 5.0),
+            ("nemotron-0".into(), 0.0, 1.0),
+            // Unsorted, overlapping, touching, and extending past the gap.
+            ("nemotron-3".into(), 7.0, 7.5),
+            ("nemotron-4".into(), 8.5, 10.0),
+            ("nemotron-2".into(), 6.5, 7.0),
+            ("nemotron-1".into(), 6.0, 6.6),
+        ];
+        let words = times_from_with_turns(plain.clone(), &tagged, &turns);
+        assert_eq!(
+            words.iter().map(|w| w.0.as_str()).collect::<Vec<_>>(),
+            plain.iter().map(|w| w.0.as_str()).collect::<Vec<_>>()
+        );
+        // Valid clipped & merged turns: 6000..7500 ms (1500 ms) and 8500..9000 ms (500 ms).
+        assert_eq!(words[1], ("one ".into(), 6000.0, 6500.0));
+        assert_eq!(words[2], ("two ".into(), 6500.0, 7000.0));
+        assert_eq!(words[3], ("three ".into(), 7000.0, 7500.0));
+        assert_eq!(words[4], ("four. ".into(), 8500.0, 9000.0));
+        assert!(words.iter().all(|w| w.2 >= w.1 + 1.0), "{words:?}");
+        assert!(words.windows(2).all(|pair| pair[0].1 <= pair[1].1), "{words:?}");
+
+        // Without any valid turn inside (from, to), even spread still applies.
+        let pair_plain = timed(&[
+            ("before. ", 800.0, 1000.0),
+            ("one ", 850.0, 900.0),
+            ("two. ", 900.0, 950.0),
+            ("after.", 9000.0, 9200.0),
+        ]);
+        for no_turns in [
+            vec![],
+            vec![
+                ("nemotron-1".into(), 0.0, 1.0),
+                ("nemotron-2".into(), 9.0, 10.0),
+            ],
+        ] {
+            let spread = times_from_with_turns(pair_plain.clone(), &tagged, &no_turns);
+            assert_eq!(spread[1], ("one ".into(), 1000.0, 5000.0));
+            assert_eq!(spread[2], ("two. ".into(), 5000.0, 9000.0));
+        }
     }
 
     #[test]
