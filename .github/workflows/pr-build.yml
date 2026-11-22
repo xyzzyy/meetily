@@ -131,18 +131,21 @@ jobs:
     name: macOS build, tests, and launch
     needs: frontend-build
     runs-on: macos-latest
-    timeout-minutes: 60
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
       - uses: ./.github/actions/setup-frontend
       - uses: ./.github/actions/setup-native
-      - uses: actions/download-artifact@v4
+      - id: download-frontend
+        uses: actions/download-artifact@v4
         with:
           name: frontend-build
           path: frontend/out
       - name: Swift interval tests
+        id: swift-tests
+        continue-on-error: true
         run: |
           swiftc \
             diarization-sidecar/Sources/meetily-diarization/IntervalProcessing.swift \
@@ -150,12 +153,16 @@ jobs:
             -o "$RUNNER_TEMP/meetily-interval-tests"
           "$RUNNER_TEMP/meetily-interval-tests"
       - name: Llama helper unit tests
+        id: llama-tests
+        continue-on-error: true
         env:
           # Keep the llama helper build separate from the restored app target,
           # while sharing compiled artifacts between its tests and release binary.
           CARGO_TARGET_DIR: ${{ runner.temp }}/llama-helper
         run: cargo test --locked --release -p llama-helper --features metal
       - name: Build llama helper
+        id: build-llama
+        continue-on-error: true
         env:
           CARGO_TARGET_DIR: ${{ runner.temp }}/llama-helper
         run: |
@@ -163,14 +170,24 @@ jobs:
           mkdir -p frontend/src-tauri/binaries
           cp "$CARGO_TARGET_DIR/release/llama-helper" frontend/src-tauri/binaries/llama-helper-aarch64-apple-darwin
       - name: Build diarization helper
+        id: build-diarization
+        continue-on-error: true
         run: node frontend/scripts/build-diarization-sidecar.js
       - name: Build FUN-ASR helper
+        id: build-funasr
+        continue-on-error: true
         run: node frontend/scripts/build-funasr-sidecar.js
       - name: Bundle the release app
+        id: bundle-app
+        if: success() && steps.build-llama.outcome == 'success' && steps.build-diarization.outcome == 'success' && steps.build-funasr.outcome == 'success'
+        continue-on-error: true
         working-directory: frontend
         # Use the frontend and helpers built above. Do not build a DMG.
         run: pnpm exec tauri build --ci --bundles app --config '{"build":{"beforeBuildCommand":""}}' -- --locked
       - name: Verify and archive the app
+        id: verify-app
+        if: success() && steps.bundle-app.outcome == 'success'
+        continue-on-error: true
         run: |
           app="target/release/bundle/macos/Meetily Branch.app"
           test -d "$app"
@@ -179,6 +196,9 @@ jobs:
           # A single archive keeps executable permissions and framework symlinks.
           ditto -c -k --keepParent "$app" "$RUNNER_TEMP/meetily-macos-arm64.app.zip"
       - name: Upload macOS app bundle
+        id: upload-app
+        if: success() && steps.verify-app.outcome == 'success'
+        continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
           name: meetily-macos-arm64-app
@@ -186,15 +206,29 @@ jobs:
           if-no-files-found: error
           retention-days: 3
       - name: Rust lib tests
+        id: rust-lib-tests
+        if: success() && steps.build-llama.outcome == 'success' && steps.build-diarization.outcome == 'success' && steps.build-funasr.outcome == 'success'
+        continue-on-error: true
         run: cargo test --locked --release -p meetily --lib
       - name: Rust doc tests
+        id: rust-doc-tests
+        if: success() && steps.build-llama.outcome == 'success' && steps.build-diarization.outcome == 'success' && steps.build-funasr.outcome == 'success'
+        continue-on-error: true
         run: cargo test --locked --release -p meetily --doc
       - name: Unpack the release app
+        id: unpack-app
+        if: success() && steps.verify-app.outcome == 'success'
+        continue-on-error: true
         run: ditto -x -k "$RUNNER_TEMP/meetily-macos-arm64.app.zip" "$RUNNER_TEMP/meetily-app"
       - name: Install the UI test project generator
+        id: install-xcodegen
+        if: success() && steps.unpack-app.outcome == 'success'
+        continue-on-error: true
         run: brew list --versions xcodegen >/dev/null || brew install xcodegen
       - name: Launch the app and use its setup page
         id: app-walkthrough
+        if: success() && steps.unpack-app.outcome == 'success' && steps.install-xcodegen.outcome == 'success'
+        continue-on-error: true
         run: bash .github/scripts/test-macos-app.sh
       - name: Save native test results
         if: always() && steps.app-walkthrough.outcome != 'skipped'
@@ -207,6 +241,50 @@ jobs:
             ${{ runner.temp }}/meetily-launch/*.sample.txt
           if-no-files-found: ignore
           retention-days: 3
+      - name: Check macOS step outcomes
+        if: "!cancelled() && steps.download-frontend.outcome == 'success'"
+        env:
+          OUTCOME_SWIFT_TESTS: ${{ steps.swift-tests.outcome }}
+          OUTCOME_LLAMA_TESTS: ${{ steps.llama-tests.outcome }}
+          OUTCOME_BUILD_LLAMA: ${{ steps.build-llama.outcome }}
+          OUTCOME_BUILD_DIARIZATION: ${{ steps.build-diarization.outcome }}
+          OUTCOME_BUILD_FUNASR: ${{ steps.build-funasr.outcome }}
+          OUTCOME_BUNDLE_APP: ${{ steps.bundle-app.outcome }}
+          OUTCOME_VERIFY_APP: ${{ steps.verify-app.outcome }}
+          OUTCOME_UPLOAD_APP: ${{ steps.upload-app.outcome }}
+          OUTCOME_RUST_LIB_TESTS: ${{ steps.rust-lib-tests.outcome }}
+          OUTCOME_RUST_DOC_TESTS: ${{ steps.rust-doc-tests.outcome }}
+          OUTCOME_UNPACK_APP: ${{ steps.unpack-app.outcome }}
+          OUTCOME_INSTALL_XCODEGEN: ${{ steps.install-xcodegen.outcome }}
+          OUTCOME_APP_WALKTHROUGH: ${{ steps.app-walkthrough.outcome }}
+        run: |
+          failed=()
+          check_outcome() {
+            local label="$1"
+            local outcome="$2"
+            if [[ "$outcome" != "success" && "$outcome" != "skipped" ]]; then
+              echo "::error::Step failed: $label (outcome: ${outcome:-unknown})"
+              failed+=("$label")
+            fi
+          }
+          check_outcome "Swift interval tests" "$OUTCOME_SWIFT_TESTS"
+          check_outcome "Llama helper unit tests" "$OUTCOME_LLAMA_TESTS"
+          check_outcome "Build llama helper" "$OUTCOME_BUILD_LLAMA"
+          check_outcome "Build diarization helper" "$OUTCOME_BUILD_DIARIZATION"
+          check_outcome "Build FUN-ASR helper" "$OUTCOME_BUILD_FUNASR"
+          check_outcome "Bundle the release app" "$OUTCOME_BUNDLE_APP"
+          check_outcome "Verify and archive the app" "$OUTCOME_VERIFY_APP"
+          check_outcome "Upload macOS app bundle" "$OUTCOME_UPLOAD_APP"
+          check_outcome "Rust lib tests" "$OUTCOME_RUST_LIB_TESTS"
+          check_outcome "Rust doc tests" "$OUTCOME_RUST_DOC_TESTS"
+          check_outcome "Unpack the release app" "$OUTCOME_UNPACK_APP"
+          check_outcome "Install the UI test project generator" "$OUTCOME_INSTALL_XCODEGEN"
+          check_outcome "Launch the app and use its setup page" "$OUTCOME_APP_WALKTHROUGH"
+          if (( ${#failed[@]} > 0 )); then
+            echo "Failed macOS steps:"
+            printf ' - %s\n' "${failed[@]}"
+            exit 1
+          fi
 
   browser-walkthrough:
     name: Normal usage walkthrough (browser)
