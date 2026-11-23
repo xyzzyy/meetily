@@ -1,24 +1,33 @@
 # Pull request build checks
 
 `.github/workflows/pr-build.yml` runs for pull requests to `main`, pushes to
-`main`, and manual requests from the Actions tab.
+`main`, and manual requests from the Actions tab. Pushes to `main` touching
+only ignored documentation or template paths (`docs/**`, `**.md`,
+`.github/ISSUE_TEMPLATE/**`) skip the workflow.
 
-The workflow has two checks:
+The workflow splits Ubuntu checks (`ubuntu-24.04`) from native builds and tests
+on pinned Apple Silicon runners (`macos-15`):
 
-- **Frontend build and tests** installs the locked dependencies, runs the
-  build guard tests, the existing frontend suite one file per process, and the
-  diarization benchmark tests, then builds the production frontend on Ubuntu.
-- **macOS release build and tests** builds the summary, speaker, and FUN-ASR
-  helpers, then the app, on an Apple Silicon Mac with GitHub's `macos-latest`
-  runner. It also runs the diarization interval tests and the Rust unit and
-  documentation tests. Xcode and the Apple SDKs are already installed on the
-  runner.
+- **Ubuntu checks (`ubuntu-24.04`):** build guard, issue workflow, diarization
+  benchmark, FUN-ASR embedding, Swift interval, and frontend unit tests, plus
+  the production frontend build (`frontend/out`) and Playwright browser release
+  and walkthrough suites.
+- **Native helpers and Llama tests (`macos-15`):** build the Llama, diarization,
+  and FUN-ASR helpers and run the Llama helper unit tests.
+- **Rust unit and doc tests (`macos-15`):** run `--lib` and `--doc` tests in
+  parallel with helper builds using lightweight `frontend/out` and sidecar stubs
+  for `tauri_build` and a dedicated Cargo cache.
+- **macOS app bundle and launch (`macos-15`):** bundles and verifies the ad hoc
+  signed release arm64 `.app` with the standalone `cargo-tauri` CLI, uploads
+  `meetily-macos-arm64-app`, and runs the unpacked `.app` launch and setup UI
+  test (`test-macos-app.sh`). Xcode and the Apple SDKs are already installed on
+  the runner.
 
-The macOS job sets `SDKROOT` to the SDK from the active Xcode installation.
-This keeps the Swift compiler and the speaker helper's C++ headers on the
-same SDK when Command Line Tools are also installed. The Rust cache key also
-includes the active Xcode version so build-script paths from an older runner
-image are not reused.
+The workspace `.cargo/config.toml` and `.github/actions/setup-native` align
+`MACOSX_DEPLOYMENT_TARGET=14.2` and `SDKROOT` so Cargo fingerprints match
+across repository-root and `frontend/` invocations and keep Swift and C++
+headers on the active Xcode SDK. Rust cache keys include the active Xcode
+release, Xcode build, and macOS SDK build identifier.
 
 The frontend is the React and Next.js interface shown in the Tauri window.
 The frontend job exports its production files to `frontend/out`. The macOS
@@ -42,13 +51,14 @@ with `swiftc` and run it as a small executable. They cover overlap splitting,
 speaker candidates, and interval normalization without FluidAudio, downloaded
 models, or audio devices.
 
-The Rust native tests run on macOS after the app build. They use temporary
-files and fixtures; none require audio hardware or system permissions. The
-suite has no ignored tests, so every Rust unit test runs in the macOS job. The
-summary template documentation example also runs as a Rust documentation test.
-The workflow does not test Windows or Linux native builds, app packaging,
-signing, or notarization. Use the existing manual build workflows for those
-steps.
+The Rust native tests run in their own macOS job (`rust-tests`) using temporary
+files, fixtures, and placeholder `frontend/out` and sidecar stubs for
+`tauri_build`; none require audio hardware or system permissions. The summary
+template documentation example also runs as a Rust documentation test in the
+same job. The macOS job packages and verifies an ad hoc signed `.app` bundle.
+The workflow does not test Windows or Linux native builds, DMG packaging,
+Developer ID signing, or notarization. Use the existing manual build workflows
+for those steps.
 
 The checks use a read-only GitHub token and no repository secrets. They do not
 publish releases or install the app. Frontend output is kept for three days

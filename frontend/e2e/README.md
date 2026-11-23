@@ -3,20 +3,21 @@
 The PR workflow is `.github/workflows/pr-build.yml`. Each matrix entry has its
 own result. A failed test does not cancel an independent test.
 
-The short Node, Python, C++, and Swift checks start at once. Frontend unit tests,
-the production frontend build, helper builds, and llama unit tests also start
-without a gate. The app build and Rust tests need the frontend and helper
-artifacts. Browser tests need only the production frontend artifact. The native
-launch check needs only the archived `.app`. These are artifact dependencies;
-unit test results do not block unrelated checks.
+The short Node, Python, C++, and Swift checks start at once on `ubuntu-24.04`.
+Frontend unit tests, the production frontend build, helper builds, Llama unit
+tests, and stub-decoupled Rust unit and doc tests also start without a gate.
+The macOS app job needs the frontend and helper artifacts and runs the native
+launch check after archiving and uploading the `.app`. Browser tests need only
+the production frontend artifact. These are artifact dependencies; unit test
+results do not block unrelated checks.
 
-Native Rust checks and the app build use the same release cache, with the active
-Xcode version in the key. Workspace crates are included. Only the app build and
-Rust app tests write this cache. Jobs remain independent,
-so a cold cache can still cause more than one compile. Helpers use tar archives.
-The app uses `ditto -c -k --keepParent` and `ditto -x -k` to keep permissions,
-symlinks, and the ad-hoc signature. The app build runs on `macos-latest` and checks
-for arm64. It uses `tauri build --bundles app` and skips the DMG.
+Native Rust tests (`pr-macos-rust-tests`) and the app build (`pr-macos-release`)
+use separate release caches keyed on the active Xcode release, Xcode build, and
+macOS SDK build, excluding workspace crates. Helpers use tar archives. The app
+uses `ditto -c -k --keepParent` and `ditto -x -k` to keep permissions, symlinks,
+and the ad-hoc signature. The macOS jobs run on `macos-15` and verify arm64; the
+app job runs `cargo tauri build --bundles app` and skips the DMG. See
+`docs/ci.md` for full workflow and cache details.
 
 `normal-usage.spec.ts` is one session, run in Chromium and WebKit. It starts on
 Home with setup complete. It starts a recording, receives a live transcript,
@@ -37,7 +38,7 @@ and uses XCTest to launch it. It checks for an app window and the real setup
 button, clicks **Get Started**, and checks that **Setup Overview** loads. This
 checks the bundled WKWebView page and its response to user input. No app test
 hook, beta flag, mock IPC, permission bypass, or alternate build feature is used.
-XCTest results and the accessibility tree are saved as a CI artifact.
+On failure, XCTest results, logs, and the accessibility tree are saved as a CI artifact.
 
 Hosted runners have no audio devices or microphone/screen-recording permission.
 The native check stops before model downloads and permission requests. It does
