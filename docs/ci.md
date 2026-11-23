@@ -8,10 +8,15 @@ only ignored documentation or template paths (`docs/**`, `**.md`,
 The workflow splits Ubuntu checks (`ubuntu-24.04`) from native builds and tests
 on pinned Apple Silicon runners (`macos-15`):
 
-- **Ubuntu checks (`ubuntu-24.04`):** build guard, issue workflow, diarization
-  benchmark, FUN-ASR embedding, Swift interval, and frontend unit tests, plus
-  the production frontend build (`frontend/out`) and Playwright browser release
-  and walkthrough suites.
+- **Ubuntu checks (`ubuntu-24.04`):** `scope` classifies changed PR paths
+  fail-open as `docs`, `frontend`, or `all` (`docs` skips frontend unit tests,
+  `frontend-build`, browser tests, and macOS jobs; `frontend` skips
+  `rust-tests`; errors or unrecognized paths run `all`). Fast unit suites
+  (`node-quick`, diarization benchmarks, FUN-ASR embedding tests, Swift interval
+  tests, and per-file frontend unit tests) run alongside `frontend-build` (with
+  `.next/cache`). After `frontend-build` succeeds, a `[chromium, webkit]` matrix
+  runs all Playwright release specs (`fullyParallel`, 4 CI workers), including
+  the normal-usage walkthrough.
 - **Rust unit and doc tests (`macos-15`):** run `--lib` then `--doc` in their
   own job alongside the app build, using lightweight `frontend/out` and sidecar
   stubs for `tauri_build` and a dedicated Cargo cache.

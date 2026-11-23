@@ -3,14 +3,17 @@
 The PR workflow is `.github/workflows/pr-build.yml`. Each matrix entry has its
 own result. A failed test does not cancel an independent test.
 
-The short Node, Python, C++, and Swift checks start at once on `ubuntu-24.04`.
-Frontend unit tests, the production frontend build, and stub-decoupled Rust unit
-and doc tests also start without a gate. The macOS app job needs only the
-frontend artifact: it restores cached helper binaries (building any missed helper
-and running `llama-helper` tests on a Llama cache miss), bundles and uploads the
-`.app`, and runs the native launch check. Browser tests need only the production
-frontend artifact. These are artifact dependencies; unit test results do not
-block unrelated checks.
+The short Node, Python, C++, and Swift checks start at once on `ubuntu-24.04`,
+alongside `scope` (which classifies PR diffs fail-open as `docs`, `frontend`, or
+`all`). On non-docs PRs, frontend unit tests, the production frontend build
+(with `.next/cache`), and—when native/Rust inputs change—stub-decoupled Rust
+unit and doc tests start right away. The macOS app job needs only the frontend
+artifact: it restores cached helper binaries (building any missed helper and
+running `llama-helper` tests on a Llama cache miss), bundles and uploads the
+`.app`, and runs the native launch check. A `[chromium, webkit]` browser matrix
+runs all Playwright release specs (including `normal-usage.spec.ts`) in parallel
+against the production frontend artifact. These are artifact dependencies; unit
+test results do not block unrelated checks.
 
 Native Rust tests (`pr-macos-rust-tests`) and the app build (`pr-macos-release`)
 use separate release caches keyed on the active Xcode release, Xcode build, and

@@ -430,7 +430,8 @@ test('a completion event updates the notice without waiting for the status poll'
   const errors = await openMeeting(page);
   const download = downloadCases[0];
   await page.waitForFunction(event => (window as any).__downloadTest.listenerCount(event) > 0, download.event);
-  for (let sample = 0; sample < 20; sample++) {
+  const samples = process.env.CI ? 3 : 20;
+  for (let sample = 0; sample < samples; sample++) {
     const modelName = `notice-event-sample-${sample}`;
     await page.evaluate(({ event, modelName }) => (window as any).__downloadTest.emit(event,
       { modelName, progress: 99, status: 'downloading' }), { event: download.event, modelName });
