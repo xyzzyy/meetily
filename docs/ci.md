@@ -28,10 +28,15 @@ on pinned Apple Silicon runners (`macos-15`):
   uploads `meetily-macos-arm64-app`, and runs the unpacked `.app` launch and
   setup UI test (`test-macos-app.sh`). Xcode and the Apple SDKs are already
   installed on the runner.
-- **OpenCode review (`ubuntu-24.04`):** runs after all non-skipped build and
+- **Claude review (`ubuntu-24.04`):** runs after all non-skipped build and
   test jobs pass on pull requests (skipped on `push: main`, `workflow_dispatch`,
-  when any build/test job fails or is cancelled, or when `OPENCODE_API_KEY` is
-  unset).
+  when any build/test job fails or is cancelled, or when
+  `CLAUDE_CODE_OAUTH_TOKEN` is unset). It runs the official `code-review`
+  plugin through `anthropics/claude-code-action@v1` on Sonnet 5.5 at medium
+  effort, including its subagents. Usage counts against the Claude
+  subscription whose `claude setup-token` token is stored in that secret.
+  Findings are posted as inline comments by the Claude GitHub App. The plugin
+  skips draft PRs, trivial PRs, and PRs Claude has already commented on.
 
 The workspace `.cargo/config.toml` and `.github/actions/setup-native` align
 `MACOSX_DEPLOYMENT_TARGET=14.2` and `SDKROOT` so Cargo fingerprints match
@@ -71,11 +76,11 @@ Developer ID signing, or notarization. Use the existing manual build workflows
 for those steps.
 
 The build and test checks use a read-only GitHub token and no repository
-secrets; `OpenCode review` requests `pull-requests: write` and `issues: write`
-(and reads `OPENCODE_API_KEY` when configured) to post review comments. They do
-not publish releases or install the app. Frontend output is kept for three days
-so the native job can use it. A new commit cancels an older run for the same
-pull request.
+secrets; `Claude review` reads `CLAUDE_CODE_OAUTH_TOKEN` when configured and
+requests `id-token: write` to get a Claude GitHub App token, which it uses to
+post review comments. They do not publish releases or install the app. Frontend
+output is kept for three days so the native job can use it. A new commit
+cancels an older run for the same pull request.
 
 To run the frontend build locally, install Node.js 22, pnpm 9.15.9, and
 Bun 1.3.14. Then run:

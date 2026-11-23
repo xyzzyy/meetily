@@ -321,7 +321,7 @@ jobs:
           retention-days: 3
 
   review:
-    name: OpenCode review
+    name: Claude review
     needs:
       - scope
       - node-quick
@@ -339,12 +339,15 @@ jobs:
     # Large pull requests can take just over 20 minutes; leave headroom so the
     # review can post its findings instead of being cancelled mid-review.
     timeout-minutes: 30
+    # The action posts as the Claude GitHub App; id-token lets it get that
+    # app's token.
     permissions:
       contents: read
-      pull-requests: write
-      issues: write
+      pull-requests: read
+      issues: read
+      id-token: write
     env:
-      OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
+      CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -352,30 +355,25 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      # Skipped until the OPENCODE_API_KEY secret is configured, so the check
+      # Uses a Claude subscription token from `claude setup-token`. Skipped
+      # until the CLAUDE_CODE_OAUTH_TOKEN secret is configured, so the check
       # stays green instead of failing on every pull request.
-      - name: Run OpenCode review
-        if: ${{ env.OPENCODE_API_KEY != '' }}
-        uses: anomalyco/opencode/github@latest
+      - name: Run Claude review
+        if: ${{ env.CLAUDE_CODE_OAUTH_TOKEN != '' }}
+        uses: anthropics/claude-code-action@v1
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # No terminal exists on a runner. Deny the two permissions that
-          # otherwise default to "ask", so the review cannot wait forever on a
-          # prompt. Denying an external path is reported to the model, which
-          # then continues with the repository checkout.
-          OPENCODE_CONFIG_CONTENT: '{"permission":{"external_directory":"deny","doom_loop":"deny"}}'
+          # The review plugin asks for Haiku and Opus subagents; force them all
+          # onto Sonnet 5.5 too.
+          CLAUDE_CODE_SUBAGENT_MODEL: claude-sonnet-5-5
+          CLAUDE_CODE_SUBAGENT_MODEL_FORCE: '1'
         with:
-          model: opencode/deepseek-v4.1-flash-free
-          use_github_token: true
-          prompt: |
-            Review this pull request.
-
-            Report only real defects:
-            - bugs and logic errors
-            - security vulnerabilities
-            - broken edge cases (null/empty input, error paths, concurrency)
-            - resource leaks
-
-            Cite the file and line for every finding, and explain concretely why it
-            is wrong. Do not report style preferences, naming, or formatting.
-            If you find nothing worth fixing, say so briefly.
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          plugin_marketplaces: https://github.com/anthropics/claude-plugins-official.git
+          plugins: code-review@claude-plugins-official
+          prompt: /code-review:code-review --comment ${{ github.repository }}/pull/${{ github.event.pull_request.number }}
+          # The inline comment tool must be named here or the action does not
+          # start its MCP server.
+          claude_args: >-
+            --model claude-sonnet-5-5
+            --effort medium
+            --allowedTools "mcp__github_inline_comment__create_inline_comment"

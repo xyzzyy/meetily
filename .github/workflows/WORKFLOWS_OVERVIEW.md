@@ -2,7 +2,7 @@
 
 This document provides a quick overview of all available CI/CD workflows in this repository.
 
-**Note:** Most build/release workflows run manually (`workflow_dispatch`). Three run automatically: `pr-build.yml` (pull requests, including post-CI OpenCode review, and pushes to `main`), `issue-enforce.yml` (issue events), and `issue-grace.yml` (`/reopen` comments and a nightly check of all open issues).
+**Note:** Most build/release workflows run manually (`workflow_dispatch`). Three run automatically: `pr-build.yml` (pull requests, including post-CI Claude review, and pushes to `main`), `issue-enforce.yml` (issue events), and `issue-grace.yml` (`/reopen` comments and a nightly check of all open issues).
 
 ## Workflow Files
 
