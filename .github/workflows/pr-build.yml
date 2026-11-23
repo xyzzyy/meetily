@@ -141,55 +141,6 @@ jobs:
           if-no-files-found: ignore
           retention-days: 3
 
-  native-helpers:
-    name: Build ${{ matrix.helper }} helper
-    runs-on: macos-15
-    timeout-minutes: 30
-    strategy:
-      fail-fast: false
-      matrix:
-        helper: [llama, diarization, funasr]
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          persist-credentials: false
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '22'
-      - uses: ./.github/actions/setup-native
-        with:
-          openssl: ${{ matrix.helper == 'llama' }}
-      - name: Build llama helper
-        if: matrix.helper == 'llama'
-        env:
-          CARGO_TARGET_DIR: ${{ runner.temp }}/llama-helper-build
-        run: |
-          cargo build --locked --release -p llama-helper --features metal
-          mkdir -p frontend/src-tauri/binaries
-          cp "$CARGO_TARGET_DIR/release/llama-helper" frontend/src-tauri/binaries/llama-helper-aarch64-apple-darwin
-      - name: Build diarization helper
-        if: matrix.helper == 'diarization'
-        run: node frontend/scripts/build-diarization-sidecar.js
-      - name: Build FUN-ASR helper
-        if: matrix.helper == 'funasr'
-        run: node frontend/scripts/build-funasr-sidecar.js
-      - name: Archive executable helper
-        env:
-          HELPER: ${{ matrix.helper }}
-        run: |
-          if [[ "$HELPER" == diarization ]]; then
-            binary=meetily-diarization-aarch64-apple-darwin
-          else
-            binary="$HELPER-helper-aarch64-apple-darwin"
-          fi
-          tar -czf "$RUNNER_TEMP/$HELPER.tar.gz" -C frontend/src-tauri/binaries "$binary"
-      - uses: actions/upload-artifact@v4
-        with:
-          name: native-helper-${{ matrix.helper }}
-          path: ${{ runner.temp }}/${{ matrix.helper }}.tar.gz
-          if-no-files-found: error
-          retention-days: 3
-
   rust-tests:
     name: Rust unit and doc tests
     runs-on: macos-15
@@ -214,35 +165,69 @@ jobs:
       - if: ${{ !cancelled() }}
         run: cargo test --locked --release -p meetily --doc
 
-  llama-tests:
-    name: Llama helper unit tests
-    runs-on: macos-15
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          persist-credentials: false
-      - uses: ./.github/actions/setup-native
-        with:
-          openssl: 'true'
-      - run: cargo test --locked --release -p llama-helper --features metal
-        env:
-          # Keep this test build separate from the restored app build artifacts.
-          CARGO_TARGET_DIR: ${{ runner.temp }}/llama-helper-tests
-
   macos-app:
-    name: macOS app bundle and launch
-    needs: [frontend-build, native-helpers]
+    name: macOS app build, helpers, and launch
+    needs: frontend-build
     runs-on: macos-15
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-      - uses: ./.github/actions/setup-native
+      - id: native
+        uses: ./.github/actions/setup-native
         with:
           cache-key: pr-macos-release
-      - uses: ./.github/actions/native-inputs
+          openssl: 'true'
+      - name: Compute helper cache keys
+        id: helper-keys
+        # Hash tracked paths and contents so renames also invalidate binary caches.
+        run: |
+          tree_hash() { git ls-tree -r HEAD -- "$@" | shasum -a 256 | awk '{print $1}'; }
+          {
+            echo "diarization=$(tree_hash diarization-sidecar/Package.swift diarization-sidecar/Package.resolved diarization-sidecar/Sources frontend/scripts/build-diarization-sidecar.js)"
+            echo "funasr=$(tree_hash funasr-helper/CMakeLists.txt funasr-helper/src frontend/scripts/build-funasr-sidecar.js)"
+            echo "llama=$(tree_hash .cargo/config.toml .github/actions/setup-native/action.yml Cargo.toml Cargo.lock llama-helper)"
+          } >> "$GITHUB_OUTPUT"
+      - name: Download frontend build
+        uses: actions/download-artifact@v4
+        with:
+          name: frontend-build
+          path: frontend/out
+      - id: cache-diarization-bin
+        uses: actions/cache@v4
+        with:
+          path: frontend/src-tauri/binaries/meetily-diarization-aarch64-apple-darwin
+          key: macos-arm64-diarization-bin-${{ steps.native.outputs.xcode-version }}-${{ steps.helper-keys.outputs.diarization }}
+      - name: Build diarization helper
+        if: steps.cache-diarization-bin.outputs.cache-hit != 'true'
+        run: node frontend/scripts/build-diarization-sidecar.js
+      - id: cache-funasr-bin
+        uses: actions/cache@v4
+        with:
+          path: frontend/src-tauri/binaries/funasr-helper-aarch64-apple-darwin
+          key: macos-arm64-funasr-bin-${{ steps.native.outputs.xcode-version }}-dt${{ steps.native.outputs.deployment-target }}-${{ steps.helper-keys.outputs.funasr }}
+      - name: Build FUN-ASR helper
+        if: steps.cache-funasr-bin.outputs.cache-hit != 'true'
+        env:
+          TAURI_ENV_TARGET_TRIPLE: aarch64-apple-darwin
+        run: node frontend/scripts/build-funasr-sidecar.js
+      - id: cache-llama-bin
+        uses: actions/cache@v4
+        with:
+          path: frontend/src-tauri/binaries/llama-helper-aarch64-apple-darwin
+          key: macos-arm64-llama-bin-${{ steps.native.outputs.xcode-version }}-${{ steps.native.outputs.rustc-version }}-ossl${{ steps.native.outputs.openssl-version }}-${{ steps.helper-keys.outputs.llama }}
+      - name: Test and build llama helper
+        if: steps.cache-llama-bin.outputs.cache-hit != 'true'
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/llama-helper
+        run: |
+          cargo test --locked --release -p llama-helper --features metal
+          cargo build --locked --release -p llama-helper --features metal
+          mkdir -p frontend/src-tauri/binaries
+          cp "$CARGO_TARGET_DIR/release/llama-helper" frontend/src-tauri/binaries/llama-helper-aarch64-apple-darwin
+      - name: Ensure helper binaries are executable
+        run: chmod +x frontend/src-tauri/binaries/{meetily-diarization,funasr-helper,llama-helper}-aarch64-apple-darwin
       - name: Install Tauri CLI
         # Keep aligned with @tauri-apps/cli in frontend/pnpm-lock.yaml.
         run: |
@@ -253,7 +238,7 @@ jobs:
           chmod +x "$HOME/.cargo/bin/cargo-tauri"
       - name: Bundle the release app
         working-directory: frontend
-        # Use the frontend and helpers from their own checks. Do not build a DMG.
+        # Use the frontend and helpers prepared above. Do not build a DMG.
         run: cargo tauri build --ci --bundles app --config '{"build":{"beforeBuildCommand":""}}' -- --locked
       - name: Verify and archive the app
         run: |
@@ -277,7 +262,7 @@ jobs:
           HOMEBREW_NO_INSTALL_CLEANUP: '1'
         run: brew list --versions xcodegen >/dev/null || brew install xcodegen
       - name: Launch the app and use its setup page
-        run: env -u SDKROOT bash .github/scripts/test-macos-app.sh
+        run: env -u SDKROOT -u OPENSSL_DIR -u OPENSSL_ROOT_DIR -u CMAKE_PREFIX_PATH bash .github/scripts/test-macos-app.sh
       - name: Save native test results
         if: failure()
         uses: actions/upload-artifact@v4

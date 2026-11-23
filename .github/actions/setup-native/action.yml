@@ -9,10 +9,27 @@ inputs:
     description: Configure OpenSSL 3 for CMake builds that link OpenSSL (e.g. llama-helper).
     required: false
     default: 'false'
+outputs:
+  xcode-version:
+    description: Active Xcode release, build, and macOS SDK build identifier.
+    value: ${{ steps.xcode.outputs.version }}
+  rustc-version:
+    description: Active Rust compiler version.
+    value: ${{ steps.rustc.outputs.version }}
+  deployment-target:
+    description: macOS deployment target exported as MACOSX_DEPLOYMENT_TARGET.
+    value: ${{ steps.xcode.outputs.deployment-target }}
+  openssl-version:
+    description: Active Homebrew openssl@3 version, when OpenSSL is configured.
+    value: ${{ steps.openssl.outputs.version }}
 runs:
   using: composite
   steps:
     - uses: dtolnay/rust-toolchain@stable
+    - name: Record Rust compiler version
+      id: rustc
+      shell: bash
+      run: echo "version=$(rustc --version | awk '{print $2}')" >> "$GITHUB_OUTPUT"
     - name: Configure the active Xcode SDK
       id: xcode
       shell: bash
@@ -21,12 +38,15 @@ runs:
         xcodebuild -version
         xcode_ver=$(xcodebuild -version | awk 'NR==1 {v=$2} NR==2 {b=$3} END {printf "Xcode-%s-%s", v, b}')
         sdk_build=$(xcrun --sdk macosx --show-sdk-build-version)
+        deployment_target="14.2"
         echo "version=${xcode_ver}-${sdk_build}" >> "$GITHUB_OUTPUT"
+        echo "deployment-target=${deployment_target}" >> "$GITHUB_OUTPUT"
         sdk_path=$(xcrun --sdk macosx --show-sdk-path)
         test -d "$sdk_path"
         echo "SDKROOT=$sdk_path" >> "$GITHUB_ENV"
-        echo "MACOSX_DEPLOYMENT_TARGET=14.2" >> "$GITHUB_ENV"
+        echo "MACOSX_DEPLOYMENT_TARGET=${deployment_target}" >> "$GITHUB_ENV"
     - name: Configure OpenSSL
+      id: openssl
       if: inputs.openssl == 'true'
       shell: bash
       env:
@@ -38,6 +58,8 @@ runs:
         echo "OPENSSL_DIR=$openssl_prefix" >> "$GITHUB_ENV"
         echo "OPENSSL_ROOT_DIR=$openssl_prefix" >> "$GITHUB_ENV"
         echo "CMAKE_PREFIX_PATH=$openssl_prefix" >> "$GITHUB_ENV"
+        openssl_real=$(cd "$openssl_prefix" && pwd -P)
+        echo "version=$(basename "$openssl_real")" >> "$GITHUB_OUTPUT"
     - uses: swatinem/rust-cache@v2
       if: inputs.cache-key != ''
       with:

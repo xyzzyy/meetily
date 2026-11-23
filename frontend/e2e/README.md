@@ -4,18 +4,19 @@ The PR workflow is `.github/workflows/pr-build.yml`. Each matrix entry has its
 own result. A failed test does not cancel an independent test.
 
 The short Node, Python, C++, and Swift checks start at once on `ubuntu-24.04`.
-Frontend unit tests, the production frontend build, helper builds, Llama unit
-tests, and stub-decoupled Rust unit and doc tests also start without a gate.
-The macOS app job needs the frontend and helper artifacts and runs the native
-launch check after archiving and uploading the `.app`. Browser tests need only
-the production frontend artifact. These are artifact dependencies; unit test
-results do not block unrelated checks.
+Frontend unit tests, the production frontend build, and stub-decoupled Rust unit
+and doc tests also start without a gate. The macOS app job needs only the
+frontend artifact: it restores cached helper binaries (building any missed helper
+and running `llama-helper` tests on a Llama cache miss), bundles and uploads the
+`.app`, and runs the native launch check. Browser tests need only the production
+frontend artifact. These are artifact dependencies; unit test results do not
+block unrelated checks.
 
 Native Rust tests (`pr-macos-rust-tests`) and the app build (`pr-macos-release`)
 use separate release caches keyed on the active Xcode release, Xcode build, and
-macOS SDK build, excluding workspace crates. Helpers use tar archives. The app
-uses `ditto -c -k --keepParent` and `ditto -x -k` to keep permissions, symlinks,
-and the ad-hoc signature. The macOS jobs run on `macos-15` and verify arm64; the
+macOS SDK build, excluding workspace crates. The app uses
+`ditto -c -k --keepParent` and `ditto -x -k` to keep permissions, symlinks, and
+the ad-hoc signature. The two macOS jobs run on `macos-15` and verify arm64; the
 app job runs `cargo tauri build --bundles app` and skips the DMG. See
 `docs/ci.md` for full workflow and cache details.
 

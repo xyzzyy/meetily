@@ -12,16 +12,17 @@ on pinned Apple Silicon runners (`macos-15`):
   benchmark, FUN-ASR embedding, Swift interval, and frontend unit tests, plus
   the production frontend build (`frontend/out`) and Playwright browser release
   and walkthrough suites.
-- **Native helpers and Llama tests (`macos-15`):** build the Llama, diarization,
-  and FUN-ASR helpers and run the Llama helper unit tests.
-- **Rust unit and doc tests (`macos-15`):** run `--lib` and `--doc` tests in
-  parallel with helper builds using lightweight `frontend/out` and sidecar stubs
-  for `tauri_build` and a dedicated Cargo cache.
-- **macOS app bundle and launch (`macos-15`):** bundles and verifies the ad hoc
-  signed release arm64 `.app` with the standalone `cargo-tauri` CLI, uploads
-  `meetily-macos-arm64-app`, and runs the unpacked `.app` launch and setup UI
-  test (`test-macos-app.sh`). Xcode and the Apple SDKs are already installed on
-  the runner.
+- **Rust unit and doc tests (`macos-15`):** run `--lib` then `--doc` in their
+  own job alongside the app build, using lightweight `frontend/out` and sidecar
+  stubs for `tauri_build` and a dedicated Cargo cache.
+- **macOS app build, helpers, and launch (`macos-15`):** restores
+  content-addressed binary caches for the diarization, FUN-ASR, and Llama
+  helpers (building any missed helper cleanly and running `llama-helper` unit
+  tests on a Llama binary cache miss before bundling), bundles and verifies the
+  ad hoc signed release arm64 `.app` with the standalone `cargo-tauri` CLI,
+  uploads `meetily-macos-arm64-app`, and runs the unpacked `.app` launch and
+  setup UI test (`test-macos-app.sh`). Xcode and the Apple SDKs are already
+  installed on the runner.
 
 The workspace `.cargo/config.toml` and `.github/actions/setup-native` align
 `MACOSX_DEPLOYMENT_TARGET=14.2` and `SDKROOT` so Cargo fingerprints match

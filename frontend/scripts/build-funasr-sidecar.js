@@ -2,6 +2,7 @@
 
 const { copyFileSync, existsSync, mkdirSync } = require('fs');
 const { execFileSync } = require('child_process');
+const os = require('os');
 const path = require('path');
 
 const frontendDir = path.resolve(__dirname, '..');
@@ -37,14 +38,23 @@ if (existsSync(destination) && process.env.MEETILY_FORCE_FUNASR_BUILD !== '1') {
 const buildDir = path.join(sourceDir, `build-${target}`);
 mkdirSync(destinationDir, { recursive: true });
 
+const configureArgs = ['-S', sourceDir, '-B', buildDir, '-DCMAKE_BUILD_TYPE=Release'];
+if (process.platform === 'darwin' && process.env.MACOSX_DEPLOYMENT_TARGET) {
+  configureArgs.push(`-DCMAKE_OSX_DEPLOYMENT_TARGET=${process.env.MACOSX_DEPLOYMENT_TARGET}`);
+}
+
+execFileSync('cmake', configureArgs, { stdio: 'inherit' });
 execFileSync(
   'cmake',
-  ['-S', sourceDir, '-B', buildDir, '-DCMAKE_BUILD_TYPE=Release'],
-  { stdio: 'inherit' }
-);
-execFileSync(
-  'cmake',
-  ['--build', buildDir, '--config', 'Release', '--target', 'funasr-helper'],
+  [
+    '--build',
+    buildDir,
+    '--config',
+    'Release',
+    '--target',
+    'funasr-helper',
+    ...(process.env.CMAKE_BUILD_PARALLEL_LEVEL ? [] : ['--parallel', String(os.cpus().length || 4)]),
+  ],
   { stdio: 'inherit' }
 );
 
