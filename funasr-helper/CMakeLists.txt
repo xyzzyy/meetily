@@ -17,6 +17,9 @@ include(FetchContent)
 if(POLICY CMP0169)
     cmake_policy(SET CMP0169 OLD)
 endif()
+if(POLICY CMP0135)
+    cmake_policy(SET CMP0135 NEW)
+endif()
 
 set(LLAMA_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 set(LLAMA_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
@@ -35,8 +38,8 @@ set(GGML_OPENMP OFF CACHE BOOL "" FORCE)
 
 FetchContent_Declare(
     llama
-    GIT_REPOSITORY https://github.com/ggml-org/llama.cpp.git
-    GIT_TAG 8086439a4cea94c71a5dfb8fe4ad1546aebd640f
+    URL https://github.com/ggml-org/llama.cpp/archive/8086439a4cea94c71a5dfb8fe4ad1546aebd640f.tar.gz
+    URL_HASH SHA256=1984103666eb25bd45110a40cba22b9d4286116f26e51bbc76f6f41dc86bc7b5
 )
 FetchContent_MakeAvailable(llama)
 

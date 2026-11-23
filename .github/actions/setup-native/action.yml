@@ -1,35 +1,74 @@
 name: Set up native builds
-description: Set up the arm64 macOS SDK, OpenSSL, and shared release cache.
+description: Set up the arm64 macOS SDK and optional OpenSSL, Rust, and FFmpeg caches.
+inputs:
+  cache-key:
+    description: Shared Cargo target cache prefix; leave empty to skip Rust and FFmpeg caches.
+    required: false
+    default: ''
+  openssl:
+    description: Configure OpenSSL 3 for CMake builds that link OpenSSL (e.g. llama-helper).
+    required: false
+    default: 'false'
+outputs:
+  xcode-version:
+    description: Active Xcode release, build, and macOS SDK build identifier.
+    value: ${{ steps.xcode.outputs.version }}
+  rustc-version:
+    description: Active Rust compiler version.
+    value: ${{ steps.rustc.outputs.version }}
+  deployment-target:
+    description: macOS deployment target exported as MACOSX_DEPLOYMENT_TARGET.
+    value: ${{ steps.xcode.outputs.deployment-target }}
+  openssl-version:
+    description: Active Homebrew openssl@3 version, when OpenSSL is configured.
+    value: ${{ steps.openssl.outputs.version }}
 runs:
   using: composite
   steps:
     - uses: dtolnay/rust-toolchain@stable
+    - name: Record Rust compiler version
+      id: rustc
+      shell: bash
+      run: echo "version=$(rustc --version | awk '{print $2}')" >> "$GITHUB_OUTPUT"
     - name: Configure the active Xcode SDK
       id: xcode
       shell: bash
       run: |
         test "$(uname -m)" = arm64
         xcodebuild -version
-        echo "version=$(xcodebuild -version | head -n 1 | tr ' ' '-')" >> "$GITHUB_OUTPUT"
+        xcode_ver=$(xcodebuild -version | awk 'NR==1 {v=$2} NR==2 {b=$3} END {printf "Xcode-%s-%s", v, b}')
+        sdk_build=$(xcrun --sdk macosx --show-sdk-build-version)
+        deployment_target="14.2"
+        echo "version=${xcode_ver}-${sdk_build}" >> "$GITHUB_OUTPUT"
+        echo "deployment-target=${deployment_target}" >> "$GITHUB_OUTPUT"
         sdk_path=$(xcrun --sdk macosx --show-sdk-path)
         test -d "$sdk_path"
         echo "SDKROOT=$sdk_path" >> "$GITHUB_ENV"
-        echo "MACOSX_DEPLOYMENT_TARGET=14.4" >> "$GITHUB_ENV"
+        echo "MACOSX_DEPLOYMENT_TARGET=${deployment_target}" >> "$GITHUB_ENV"
     - name: Configure OpenSSL
+      id: openssl
+      if: inputs.openssl == 'true'
       shell: bash
+      env:
+        HOMEBREW_NO_AUTO_UPDATE: '1'
+        HOMEBREW_NO_INSTALL_CLEANUP: '1'
       run: |
         brew list --versions openssl@3 >/dev/null || brew install openssl@3
         openssl_prefix=$(brew --prefix openssl@3)
         echo "OPENSSL_DIR=$openssl_prefix" >> "$GITHUB_ENV"
+        echo "OPENSSL_ROOT_DIR=$openssl_prefix" >> "$GITHUB_ENV"
         echo "CMAKE_PREFIX_PATH=$openssl_prefix" >> "$GITHUB_ENV"
+        openssl_real=$(cd "$openssl_prefix" && pwd -P)
+        echo "version=$(basename "$openssl_real")" >> "$GITHUB_OUTPUT"
     - uses: swatinem/rust-cache@v2
+      if: inputs.cache-key != ''
       with:
         workspaces: '. -> target'
-        shared-key: pr-macos-release-${{ steps.xcode.outputs.version }}
-        cache-workspace-crates: true
-        # Do not let an early helper check save a partial app cache.
-        save-if: ${{ github.job == 'macos-app' || github.job == 'rust-tests' }}
+        shared-key: ${{ inputs.cache-key }}-${{ steps.xcode.outputs.version }}
+        cache-workspace-crates: false
+        save-if: true
     - uses: actions/cache@v4
+      if: inputs.cache-key != ''
       with:
         path: frontend/src-tauri/binaries/ffmpeg-*
         key: macos-arm64-ffmpeg-${{ hashFiles('frontend/src-tauri/build.rs', 'frontend/src-tauri/build/ffmpeg.rs') }}

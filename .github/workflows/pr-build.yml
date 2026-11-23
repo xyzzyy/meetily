@@ -2,9 +2,12 @@ name: PR build checks
 
 on:
   pull_request:
-    branches: [main]
   push:
     branches: [main]
+    paths-ignore:
+      - 'docs/**'
+      - '**.md'
+      - '.github/ISSUE_TEMPLATE/**'
   workflow_dispatch:
 
 permissions:
@@ -12,13 +15,39 @@ permissions:
 
 concurrency:
   group: pr-build-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   CARGO_TERM_COLOR: always
   NEXT_TELEMETRY_DISABLED: '1'
 
 jobs:
+  scope:
+    name: Determine PR scope
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      scope: ${{ steps.classify.outputs.scope }}
+    steps:
+      - uses: actions/checkout@v4
+        if: github.event_name == 'pull_request'
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+      - name: Classify PR scope
+        id: classify
+        run: |
+          if [[ "${{ github.event_name }}" != "pull_request" ]]; then
+            echo "scope=all" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          set -o pipefail
+          scope=$(git diff --no-renames --name-only -z HEAD^1 HEAD | node .github/scripts/pr-scope.cjs) || scope=all
+          case "$scope" in
+            docs|frontend|all) echo "scope=$scope" >> "$GITHUB_OUTPUT" ;;
+            *) echo "scope=all" >> "$GITHUB_OUTPUT" ;;
+          esac
+
   node-quick:
     name: ${{ matrix.name }}
     runs-on: ubuntu-24.04
@@ -31,6 +60,8 @@ jobs:
             test: .github/verify-portable-ggml.test.cjs
           - name: Issue workflow tests
             test: .github/scripts/issue-workflows.test.cjs
+          - name: PR scope selector tests
+            test: .github/scripts/pr-scope.test.cjs
     steps:
       - uses: actions/checkout@v4
         with:
@@ -64,7 +95,7 @@ jobs:
 
   swift-tests:
     name: Swift interval tests
-    runs-on: macos-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
@@ -79,6 +110,8 @@ jobs:
 
   frontend-tests:
     name: Frontend unit tests
+    needs: scope
+    if: ${{ !cancelled() && (needs.scope.result != 'success' || needs.scope.outputs.scope != 'docs') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -94,6 +127,8 @@ jobs:
 
   frontend-build:
     name: Frontend production build
+    needs: scope
+    if: ${{ !cancelled() && (needs.scope.result != 'success' || needs.scope.outputs.scope != 'docs') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
@@ -101,6 +136,12 @@ jobs:
         with:
           persist-credentials: false
       - uses: ./.github/actions/setup-frontend
+      - uses: actions/cache@v4
+        with:
+          path: frontend/.next/cache
+          key: nextjs-${{ runner.os }}-${{ hashFiles('frontend/pnpm-lock.yaml', 'frontend/next.config.js', 'frontend/tailwind.config.js', 'frontend/postcss.config.js', 'frontend/tsconfig.json') }}-${{ hashFiles('frontend/src/**', 'frontend/public/**') }}
+          restore-keys: |
+            nextjs-${{ runner.os }}-${{ hashFiles('frontend/pnpm-lock.yaml', 'frontend/next.config.js', 'frontend/tailwind.config.js', 'frontend/postcss.config.js', 'frontend/tsconfig.json') }}-
       - working-directory: frontend
         run: pnpm build
       - uses: actions/upload-artifact@v4
@@ -111,10 +152,15 @@ jobs:
           retention-days: 3
 
   browser-tests:
-    name: Browser release tests
-    needs: frontend-build
+    name: Browser release tests (${{ matrix.browser }})
+    needs: [scope, frontend-build]
+    if: ${{ !cancelled() && needs.frontend-build.result == 'success' && (needs.scope.result != 'success' || needs.scope.outputs.scope != 'docs') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        browser: [chromium, webkit]
     steps:
       - uses: actions/checkout@v4
         with:
@@ -125,112 +171,120 @@ jobs:
           name: frontend-build
           path: frontend/out
       - working-directory: frontend
-        run: pnpm exec playwright install --with-deps chromium webkit
+        run: pnpm exec playwright install --with-deps ${{ matrix.browser }}
       - working-directory: frontend
-        run: pnpm test:release --grep-invert "normal session:"
+        run: pnpm test:release --project=${{ matrix.browser }}
       - name: Save browser failure details
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: frontend-release-test-failures
+          name: frontend-release-test-failures-${{ matrix.browser }}
           path: frontend/test-results
           if-no-files-found: ignore
           retention-days: 3
 
-  native-helpers:
-    name: Build ${{ matrix.helper }} helper
-    runs-on: macos-latest
-    timeout-minutes: 30
-    strategy:
-      fail-fast: false
-      matrix:
-        helper: [llama, diarization, funasr]
+  rust-tests:
+    name: Rust unit and doc tests
+    needs: scope
+    if: ${{ !cancelled() && (needs.scope.result != 'success' || (needs.scope.outputs.scope != 'docs' && needs.scope.outputs.scope != 'frontend')) }}
+    runs-on: macos-15
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '22'
       - uses: ./.github/actions/setup-native
-      - name: Build llama helper
-        if: matrix.helper == 'llama'
-        env:
-          CARGO_TARGET_DIR: ${{ runner.temp }}/llama-helper-build
+        with:
+          cache-key: pr-macos-rust-tests
+      - name: Prepare build stubs
         run: |
+          mkdir -p frontend/out frontend/src-tauri/binaries
+          printf '<!doctype html><title>test</title>\n' > frontend/out/index.html
+          for bin in llama-helper meetily-diarization funasr-helper; do
+            target_bin="frontend/src-tauri/binaries/${bin}-aarch64-apple-darwin"
+            printf '#!/bin/sh\nexit 0\n' > "$target_bin"
+            chmod +x "$target_bin"
+          done
+      - run: cargo test --locked --release -p meetily --lib
+      - if: ${{ !cancelled() }}
+        run: cargo test --locked --release -p meetily --doc
+
+  macos-app:
+    name: macOS app build, helpers, and launch
+    needs: [scope, frontend-build]
+    if: ${{ !cancelled() && needs.frontend-build.result == 'success' && (needs.scope.result != 'success' || needs.scope.outputs.scope != 'docs') }}
+    runs-on: macos-15
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - id: native
+        uses: ./.github/actions/setup-native
+        with:
+          cache-key: pr-macos-release
+          openssl: 'true'
+      - name: Compute helper cache keys
+        id: helper-keys
+        # Hash tracked paths and contents so renames also invalidate binary caches.
+        run: |
+          tree_hash() { git ls-tree -r HEAD -- "$@" | shasum -a 256 | awk '{print $1}'; }
+          {
+            echo "diarization=$(tree_hash diarization-sidecar/Package.swift diarization-sidecar/Package.resolved diarization-sidecar/Sources frontend/scripts/build-diarization-sidecar.js)"
+            echo "funasr=$(tree_hash funasr-helper/CMakeLists.txt funasr-helper/src frontend/scripts/build-funasr-sidecar.js)"
+            echo "llama=$(tree_hash .cargo/config.toml .github/actions/setup-native/action.yml Cargo.toml Cargo.lock llama-helper)"
+          } >> "$GITHUB_OUTPUT"
+      - name: Download frontend build
+        uses: actions/download-artifact@v4
+        with:
+          name: frontend-build
+          path: frontend/out
+      - id: cache-diarization-bin
+        uses: actions/cache@v4
+        with:
+          path: frontend/src-tauri/binaries/meetily-diarization-aarch64-apple-darwin
+          key: macos-arm64-diarization-bin-${{ steps.native.outputs.xcode-version }}-${{ steps.helper-keys.outputs.diarization }}
+      - name: Build diarization helper
+        if: steps.cache-diarization-bin.outputs.cache-hit != 'true'
+        run: node frontend/scripts/build-diarization-sidecar.js
+      - id: cache-funasr-bin
+        uses: actions/cache@v4
+        with:
+          path: frontend/src-tauri/binaries/funasr-helper-aarch64-apple-darwin
+          key: macos-arm64-funasr-bin-${{ steps.native.outputs.xcode-version }}-dt${{ steps.native.outputs.deployment-target }}-${{ steps.helper-keys.outputs.funasr }}
+      - name: Build FUN-ASR helper
+        if: steps.cache-funasr-bin.outputs.cache-hit != 'true'
+        env:
+          TAURI_ENV_TARGET_TRIPLE: aarch64-apple-darwin
+        run: node frontend/scripts/build-funasr-sidecar.js
+      - id: cache-llama-bin
+        uses: actions/cache@v4
+        with:
+          path: frontend/src-tauri/binaries/llama-helper-aarch64-apple-darwin
+          key: macos-arm64-llama-bin-${{ steps.native.outputs.xcode-version }}-${{ steps.native.outputs.rustc-version }}-ossl${{ steps.native.outputs.openssl-version }}-${{ steps.helper-keys.outputs.llama }}
+      - name: Test and build llama helper
+        if: steps.cache-llama-bin.outputs.cache-hit != 'true'
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/llama-helper
+        run: |
+          cargo test --locked --release -p llama-helper --features metal
           cargo build --locked --release -p llama-helper --features metal
           mkdir -p frontend/src-tauri/binaries
           cp "$CARGO_TARGET_DIR/release/llama-helper" frontend/src-tauri/binaries/llama-helper-aarch64-apple-darwin
-      - name: Build diarization helper
-        if: matrix.helper == 'diarization'
-        run: node frontend/scripts/build-diarization-sidecar.js
-      - name: Build FUN-ASR helper
-        if: matrix.helper == 'funasr'
-        run: node frontend/scripts/build-funasr-sidecar.js
-      - name: Archive executable helper
-        env:
-          HELPER: ${{ matrix.helper }}
+      - name: Ensure helper binaries are executable
+        run: chmod +x frontend/src-tauri/binaries/{meetily-diarization,funasr-helper,llama-helper}-aarch64-apple-darwin
+      - name: Install Tauri CLI
+        # Keep aligned with @tauri-apps/cli in frontend/pnpm-lock.yaml.
         run: |
-          if [[ "$HELPER" == diarization ]]; then
-            binary=meetily-diarization-aarch64-apple-darwin
-          else
-            binary="$HELPER-helper-aarch64-apple-darwin"
-          fi
-          tar -czf "$RUNNER_TEMP/$HELPER.tar.gz" -C frontend/src-tauri/binaries "$binary"
-      - uses: actions/upload-artifact@v4
-        with:
-          name: native-helper-${{ matrix.helper }}
-          path: ${{ runner.temp }}/${{ matrix.helper }}.tar.gz
-          if-no-files-found: error
-          retention-days: 3
-
-  rust-tests:
-    name: Rust ${{ matrix.kind }} tests
-    needs: [frontend-build, native-helpers]
-    runs-on: macos-latest
-    timeout-minutes: 60
-    strategy:
-      fail-fast: false
-      matrix:
-        kind: [lib, doc]
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          persist-credentials: false
-      - uses: ./.github/actions/setup-native
-      - uses: ./.github/actions/native-inputs
-      - run: cargo test --locked --release -p meetily --${{ matrix.kind }}
-
-  llama-tests:
-    name: Llama helper unit tests
-    runs-on: macos-latest
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          persist-credentials: false
-      - uses: ./.github/actions/setup-native
-      - run: cargo test --locked --release -p llama-helper --features metal
-        env:
-          # Keep this test build separate from the restored app build artifacts.
-          CARGO_TARGET_DIR: ${{ runner.temp }}/llama-helper-tests
-
-  macos-app:
-    name: macOS app bundle (arm64)
-    needs: [frontend-build, native-helpers]
-    runs-on: macos-latest
-    timeout-minutes: 60
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          persist-credentials: false
-      - uses: ./.github/actions/setup-frontend
-      - uses: ./.github/actions/setup-native
-      - uses: ./.github/actions/native-inputs
+          curl -fsSL https://github.com/tauri-apps/tauri/releases/download/tauri-cli-v2.11.1/cargo-tauri-aarch64-apple-darwin.zip -o "$RUNNER_TEMP/cargo-tauri.zip"
+          echo "05bcd0ed31f293895963864068d8d2c0f964d98aa959de344d24b644bdce9e12  $RUNNER_TEMP/cargo-tauri.zip" | shasum -a 256 -c -
+          mkdir -p "$HOME/.cargo/bin"
+          unzip -o -j "$RUNNER_TEMP/cargo-tauri.zip" cargo-tauri -d "$HOME/.cargo/bin"
+          chmod +x "$HOME/.cargo/bin/cargo-tauri"
       - name: Bundle the release app
         working-directory: frontend
-        # Use the frontend and helpers from their own checks. Do not build a DMG.
-        run: pnpm exec tauri build --ci --bundles app --config '{"build":{"beforeBuildCommand":""}}' -- --locked
+        # Use the frontend and helpers prepared above. Do not build a DMG.
+        run: cargo tauri build --ci --bundles app --config '{"build":{"beforeBuildCommand":""}}' -- --locked
       - name: Verify and archive the app
         run: |
           app="target/release/bundle/macos/Meetily Branch.app"
@@ -245,28 +299,17 @@ jobs:
           path: ${{ runner.temp }}/meetily-macos-arm64.app.zip
           if-no-files-found: error
           retention-days: 3
-
-  app-walkthrough:
-    name: macOS app launch and setup
-    needs: macos-app
-    runs-on: macos-latest
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          persist-credentials: false
-      - uses: actions/download-artifact@v4
-        with:
-          name: meetily-macos-arm64-app
-          path: ${{ runner.temp }}/app-artifact
       - name: Unpack the release app
-        run: ditto -x -k "$RUNNER_TEMP/app-artifact/meetily-macos-arm64.app.zip" "$RUNNER_TEMP/meetily-app"
+        run: ditto -x -k "$RUNNER_TEMP/meetily-macos-arm64.app.zip" "$RUNNER_TEMP/meetily-app"
       - name: Install the UI test project generator
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: '1'
+          HOMEBREW_NO_INSTALL_CLEANUP: '1'
         run: brew list --versions xcodegen >/dev/null || brew install xcodegen
       - name: Launch the app and use its setup page
-        run: bash .github/scripts/test-macos-app.sh
+        run: env -u SDKROOT -u OPENSSL_DIR -u OPENSSL_ROOT_DIR -u CMAKE_PREFIX_PATH bash .github/scripts/test-macos-app.sh
       - name: Save native test results
-        if: always()
+        if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: macos-app-launch-results
@@ -277,29 +320,62 @@ jobs:
           if-no-files-found: ignore
           retention-days: 3
 
-  browser-walkthrough:
-    name: Normal usage walkthrough (browser)
-    needs: frontend-build
+  review:
+    name: OpenCode review
+    needs:
+      - scope
+      - node-quick
+      - benchmark-tests
+      - funasr-tests
+      - swift-tests
+      - frontend-tests
+      - frontend-build
+      - browser-tests
+      - rust-tests
+      - macos-app
+    if: ${{ github.event_name == 'pull_request' && !cancelled() && !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled') }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    # A runner has no one to answer permission prompts, so bound the job.
+    # Large pull requests can take just over 20 minutes; leave headroom so the
+    # review can post its findings instead of being cancelled mid-review.
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
+    env:
+      OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v4
         with:
+          fetch-depth: 0
           persist-credentials: false
-      - uses: ./.github/actions/setup-frontend
-      - uses: actions/download-artifact@v4
+
+      # Skipped until the OPENCODE_API_KEY secret is configured, so the check
+      # stays green instead of failing on every pull request.
+      - name: Run OpenCode review
+        if: ${{ env.OPENCODE_API_KEY != '' }}
+        uses: anomalyco/opencode/github@latest
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # No terminal exists on a runner. Deny the two permissions that
+          # otherwise default to "ask", so the review cannot wait forever on a
+          # prompt. Denying an external path is reported to the model, which
+          # then continues with the repository checkout.
+          OPENCODE_CONFIG_CONTENT: '{"permission":{"external_directory":"deny","doom_loop":"deny"}}'
         with:
-          name: frontend-build
-          path: frontend/out
-      - working-directory: frontend
-        run: pnpm exec playwright install --with-deps chromium webkit
-      - working-directory: frontend
-        run: pnpm test:release normal-usage.spec.ts
-      - name: Save walkthrough failure details
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: normal-usage-test-failures
-          path: frontend/test-results
-          if-no-files-found: ignore
-          retention-days: 3
+          model: opencode/deepseek-v4.1-flash-free
+          use_github_token: true
+          prompt: |
+            Review this pull request.
+
+            Report only real defects:
+            - bugs and logic errors
+            - security vulnerabilities
+            - broken edge cases (null/empty input, error paths, concurrency)
+            - resource leaks
+
+            Cite the file and line for every finding, and explain concretely why it
+            is wrong. Do not report style preferences, naming, or formatting.
+            If you find nothing worth fixing, say so briefly.
