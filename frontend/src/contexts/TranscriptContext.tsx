@@ -85,14 +85,19 @@ export function TranscriptProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     let unlistenRecordingStarted: (() => void) | undefined;
     let unlistenRecordingStopped: (() => void) | undefined;
+    let cancelled = false;
+
+    // Storage warmup must not prevent recording lifecycle registration.
+    // Each storage operation can retry initialization when it is needed.
+    void indexedDBService.init().catch(error => {
+      console.warn('Recovery storage initialization failed; a later operation can retry:', error);
+    });
 
     const setupRecordingListeners = async () => {
       try {
-        // Initialize IndexedDB
-        await indexedDBService.init();
-
         // Listen for recording-started event
         unlistenRecordingStarted = await recordingService.onRecordingStarted(async () => {
+          if (cancelled) return;
           try {
             // Generate unique meeting ID
             const meetingId = `meeting-${Date.now()}`;
@@ -141,9 +146,14 @@ export function TranscriptProvider({ children }: { children: ReactNode }) {
             console.error('Failed to initialize meeting in IndexedDB:', error);
           }
         });
+        if (cancelled) {
+          unlistenRecordingStarted();
+          return;
+        }
 
         // Listen for recording-stopped event
         unlistenRecordingStopped = await recordingService.onRecordingStopped(async (payload) => {
+          if (cancelled) return;
           try {
             if (currentMeetingId) {
               // Update folder path in IndexedDB
@@ -158,6 +168,7 @@ export function TranscriptProvider({ children }: { children: ReactNode }) {
             console.error('Failed to update meeting metadata on stop:', error);
           }
         });
+        if (cancelled) unlistenRecordingStopped();
       } catch (error) {
         console.error('Failed to setup recording listeners:', error);
       }
@@ -166,6 +177,7 @@ export function TranscriptProvider({ children }: { children: ReactNode }) {
     setupRecordingListeners();
 
     return () => {
+      cancelled = true;
       if (unlistenRecordingStarted) {
         unlistenRecordingStarted();
         console.log('🧹 Recording started listener cleaned up');

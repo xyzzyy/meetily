@@ -49,7 +49,7 @@ class IndexedDBService {
       return Promise.resolve();
     }
 
-    this.initPromise = new Promise((resolve, reject) => {
+    this.initPromise = new Promise<void>((resolve, reject) => {
       try {
         const request = indexedDB.open(this.DB_NAME, this.DB_VERSION);
 
@@ -87,6 +87,10 @@ class IndexedDBService {
         console.error('Exception during IndexedDB initialization:', error);
         reject(error);
       }
+    }).catch((error) => {
+      // Share an open attempt, but let a later call retry after failure.
+      this.initPromise = null;
+      throw error;
     });
 
     return this.initPromise;
