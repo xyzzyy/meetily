@@ -12,12 +12,12 @@ const row = { id: 1, text: 'Hello', timestamp: '00:01', confidence: 0.9, sequenc
 // A different meeting is recording while the old one is recovered.
 const liveFolder = '/recordings/Live meeting';
 const calls = [];
-const makeRequire = metadata => name => {
+const makeRequire = (metadata, recoverAudio) => name => {
   if (name === 'react') return { useState: value => [value, () => {}], useCallback: fn => fn };
   if (name === '@tauri-apps/api/core') return { invoke: async (command, args) => {
     calls.push({ command, folder: args?.meetingFolder });
     if (command === 'get_meeting_folder_path') return liveFolder;
-    if (command === 'recover_audio_from_checkpoints') return { status: 'success', chunk_count: 1 };
+    if (command === 'recover_audio_from_checkpoints') return recoverAudio();
     return undefined;
   } };
   if (name === '@/services/indexedDBService') return { indexedDBService: {
@@ -30,9 +30,14 @@ const makeRequire = metadata => name => {
   return {};
 };
 const compiled = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS } });
-const recover = metadata => {
+const recover = (metadata, recoverAudio = async () => ({ status: 'success', chunk_count: 1 }), testConsole = console) => {
   const module = { exports: {} };
-  vm.runInNewContext(compiled.outputText, { module, exports: module.exports, require: makeRequire(metadata), console });
+  vm.runInNewContext(compiled.outputText, {
+    module,
+    exports: module.exports,
+    require: makeRequire(metadata, recoverAudio),
+    console: testConsole,
+  });
   return module.exports.useTranscriptRecovery().recoverMeeting('meeting');
 };
 const result = await recover({ title: 'Recovered meeting' });
@@ -64,3 +69,25 @@ assert.deepEqual(calls.filter(call => call.folder).map(call => [call.command, ca
 ]);
 assert.equal(saved[0][2], '/recordings/Old meeting');
 console.log('Transcript recovery only uses the folder saved with the meeting: passed');
+
+// Failed audio recovery (failure status or rejected invoke) must keep checkpoints.
+for (const [label, recoverAudio] of [
+  ['failed status', async () => ({ status: 'failed', chunk_count: 2, estimated_duration_seconds: 60, message: 'FFmpeg failed' })],
+  ['rejected invoke', async () => { throw new Error('FFmpeg not found'); }],
+  ['none status', async () => ({ status: 'none', chunk_count: 0, estimated_duration_seconds: 0, message: 'No audio checkpoints found' })],
+]) {
+  calls.length = 0;
+  saved.length = 0;
+  const outcome = await recover(
+    { title: 'Recovered meeting', folderPath: '/recordings/Old meeting' },
+    recoverAudio,
+    { ...console, error: () => {} },
+  );
+  assert.equal(outcome.success, true);
+  assert.deepEqual(
+    calls.filter(call => call.folder).map(call => [call.command, call.folder]),
+    [['recover_audio_from_checkpoints', '/recordings/Old meeting']],
+    `Cleanup ran despite ${label}`,
+  );
+}
+console.log('Transcript recovery keeps checkpoints when audio recovery does not succeed: passed');
