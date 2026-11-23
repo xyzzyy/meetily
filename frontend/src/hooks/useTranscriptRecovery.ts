@@ -122,18 +122,9 @@ export function useTranscriptRecovery(): UseTranscriptRecoveryReturn {
         throw new Error('No transcripts found for this meeting');
       }
 
-      // 3. Check for folder path
-      let folderPath = metadata.folderPath;
-
-
-      if (!folderPath) {
-        // Try to get from backend (might exist if only app crashed, not system)
-        try {
-          folderPath = await invoke<string>('get_meeting_folder_path');
-        } catch (error) {
-          folderPath = undefined;
-        }
-      }
+      // 3. Use the folder saved with the meeting. Never guess from the active
+      // recording: it may belong to a different meeting.
+      const folderPath = metadata.folderPath;
 
       // 4. Attempt audio recovery if folder path exists
       let audioRecoveryStatus: AudioRecoveryStatus | null = null;
@@ -207,8 +198,8 @@ export function useTranscriptRecovery(): UseTranscriptRecoveryReturn {
       await indexedDBService.markMeetingSaved(meetingId);
 
 
-      // 8. Clean up checkpoint files
-      if (folderPath) {
+      // 8. Clean up checkpoint files only after audio recovery succeeded
+      if (folderPath && audioRecoveryStatus?.status === 'success') {
         try {
           await invoke('cleanup_checkpoints', { meetingFolder: folderPath });
         } catch (error) {
