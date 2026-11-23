@@ -2,7 +2,6 @@ name: PR build checks
 
 on:
   pull_request:
-    branches: [main]
   push:
     branches: [main]
     paths-ignore:
@@ -320,3 +319,63 @@ jobs:
             ${{ runner.temp }}/meetily-launch/*.sample.txt
           if-no-files-found: ignore
           retention-days: 3
+
+  review:
+    name: OpenCode review
+    needs:
+      - scope
+      - node-quick
+      - benchmark-tests
+      - funasr-tests
+      - swift-tests
+      - frontend-tests
+      - frontend-build
+      - browser-tests
+      - rust-tests
+      - macos-app
+    if: ${{ github.event_name == 'pull_request' && !cancelled() && !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled') }}
+    runs-on: ubuntu-24.04
+    # A runner has no one to answer permission prompts, so bound the job.
+    # Large pull requests can take just over 20 minutes; leave headroom so the
+    # review can post its findings instead of being cancelled mid-review.
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
+    env:
+      OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      # Skipped until the OPENCODE_API_KEY secret is configured, so the check
+      # stays green instead of failing on every pull request.
+      - name: Run OpenCode review
+        if: ${{ env.OPENCODE_API_KEY != '' }}
+        uses: anomalyco/opencode/github@latest
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # No terminal exists on a runner. Deny the two permissions that
+          # otherwise default to "ask", so the review cannot wait forever on a
+          # prompt. Denying an external path is reported to the model, which
+          # then continues with the repository checkout.
+          OPENCODE_CONFIG_CONTENT: '{"permission":{"external_directory":"deny","doom_loop":"deny"}}'
+        with:
+          model: opencode/deepseek-v4.1-flash-free
+          use_github_token: true
+          prompt: |
+            Review this pull request.
+
+            Report only real defects:
+            - bugs and logic errors
+            - security vulnerabilities
+            - broken edge cases (null/empty input, error paths, concurrency)
+            - resource leaks
+
+            Cite the file and line for every finding, and explain concretely why it
+            is wrong. Do not report style preferences, naming, or formatting.
+            If you find nothing worth fixing, say so briefly.

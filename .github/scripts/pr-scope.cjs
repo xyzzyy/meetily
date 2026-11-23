@@ -11,7 +11,6 @@ const DOC_AND_META_FILES = new Set([
   '.github/scripts/issue-workflows.test.cjs',
   '.github/workflows/issue-enforce.yml',
   '.github/workflows/issue-grace.yml',
-  '.github/workflows/opencode-review.yml',
 ]);
 
 // Files under frontend/ that affect native/Rust builds or tests (e.g. include_str! in Rust).

@@ -1,6 +1,6 @@
 # Pull request build checks
 
-`.github/workflows/pr-build.yml` runs for pull requests to `main`, pushes to
+`.github/workflows/pr-build.yml` runs for pull requests, pushes to
 `main`, and manual requests from the Actions tab. Pushes to `main` touching
 only ignored documentation or template paths (`docs/**`, `**.md`,
 `.github/ISSUE_TEMPLATE/**`) skip the workflow.
@@ -28,6 +28,10 @@ on pinned Apple Silicon runners (`macos-15`):
   uploads `meetily-macos-arm64-app`, and runs the unpacked `.app` launch and
   setup UI test (`test-macos-app.sh`). Xcode and the Apple SDKs are already
   installed on the runner.
+- **OpenCode review (`ubuntu-24.04`):** runs after all non-skipped build and
+  test jobs pass on pull requests (skipped on `push: main`, `workflow_dispatch`,
+  when any build/test job fails or is cancelled, or when `OPENCODE_API_KEY` is
+  unset).
 
 The workspace `.cargo/config.toml` and `.github/actions/setup-native` align
 `MACOSX_DEPLOYMENT_TARGET=14.2` and `SDKROOT` so Cargo fingerprints match
@@ -66,8 +70,10 @@ The workflow does not test Windows or Linux native builds, DMG packaging,
 Developer ID signing, or notarization. Use the existing manual build workflows
 for those steps.
 
-The checks use a read-only GitHub token and no repository secrets. They do not
-publish releases or install the app. Frontend output is kept for three days
+The build and test checks use a read-only GitHub token and no repository
+secrets; `OpenCode review` requests `pull-requests: write` and `issues: write`
+(and reads `OPENCODE_API_KEY` when configured) to post review comments. They do
+not publish releases or install the app. Frontend output is kept for three days
 so the native job can use it. A new commit cancels an older run for the same
 pull request.
 
