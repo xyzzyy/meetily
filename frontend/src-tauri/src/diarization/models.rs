@@ -19,9 +19,9 @@ pub const EMBEDDING_MODEL_URL: &str =
 pub const EMBEDDING_MODEL_SHA256: &str =
     "c46fad10b5f81e1aa4a60c162714208577093655076c5450f8c469e522ec54ef";
 pub const EMBEDDING_MODEL_SIZE: u64 = 29_292_684;
-// Include the feature recipe: voiceprints made before PCM16 scaling cannot be
-// compared safely with corrected embeddings, even though the model is unchanged.
-pub const EMBEDDING_MODEL_VERSION: &str = "wespeaker-campp-voxceleb-2023-pcm16-v2";
+// Include the feature and pooling recipe. Voiceprints made with an earlier
+// recipe cannot be compared safely, even though the model file is unchanged.
+pub const EMBEDDING_MODEL_VERSION: &str = "wespeaker-campp-voxceleb-2023-pcm16-pool-v3";
 
 /// Branch-owned diarization model directory. Downloads and deletions use this.
 pub fn models_dir<R: Runtime>(app: &AppHandle<R>) -> Result<PathBuf, String> {
