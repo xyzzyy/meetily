@@ -455,6 +455,7 @@ pub struct SpeakerProfileDto {
     pub speech_seconds: f64,
     /// How many meeting speakers make up this voice.
     pub recording_count: i64,
+    pub recognition_ready: bool,
 }
 
 #[tauri::command]
@@ -476,6 +477,7 @@ pub async fn list_speaker_profiles(
     Ok(profiles
         .into_iter()
         .map(|profile| SpeakerProfileDto {
+            recognition_ready: profile.model_version == super::models::EMBEDDING_MODEL_VERSION,
             recording_count: counts.get(&profile.id).copied().unwrap_or(0),
             id: profile.id,
             name: profile.name,
@@ -845,6 +847,10 @@ async fn apply_attribution(
     };
     let model_version = crate::diarization::models::EMBEDDING_MODEL_VERSION;
     let (mut profile_id, mut outcome) = match (existing, voice) {
+        (Some(profile), Some(_)) if profile.model_version != model_version => {
+            voice_note = Some("This saved voice needs a new sample for automatic recognition. Forget the old voice in Settings, then remember this speaker again from a clear recording. The speaker name was still applied.".into());
+            (Some(profile.id), AttributionOutcome::NamedOnly)
+        }
         (Some(profile), Some((embedding, seconds, samples))) => {
             let outcome = match SpeakerProfilesRepository::add_sample(
                 pool,
@@ -1303,7 +1309,7 @@ mod tests {
                 .as_deref()
                 .unwrap()
                 .contains(if existing_profile {
-                    "speaker model"
+                    "needs a new sample"
                 } else {
                     "voice storage unavailable"
                 }));

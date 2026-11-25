@@ -83,7 +83,7 @@ impl FbankComputer {
         }
     }
 
-    /// Compute CMN-normalized log-mel features.
+    /// Compute CMN-normalized log-mel features from normalized audio samples.
     /// Returns (num_frames, NUM_MEL_BINS) row-major; empty if audio is shorter
     /// than one frame.
     pub fn compute(&self, samples: &[f32]) -> Vec<[f32; NUM_MEL_BINS]> {
@@ -98,7 +98,16 @@ impl FbankComputer {
 
         for f in 0..num_frames {
             let start = f * FRAME_SHIFT;
-            frame[..FRAME_LENGTH].copy_from_slice(&samples[start..start + FRAME_LENGTH]);
+            // The exported WeSpeaker model expects features computed at
+            // PCM16 scale. At normalized scale, quiet mel energies hit the
+            // log-energy floor and lose information before CMN can remove
+            // the constant scale offset.
+            for (output, sample) in frame[..FRAME_LENGTH]
+                .iter_mut()
+                .zip(&samples[start..start + FRAME_LENGTH])
+            {
+                *output = sample * 32768.0;
+            }
             frame[FRAME_LENGTH..].fill(0.0);
 
             // Remove DC offset
@@ -187,6 +196,51 @@ mod tests {
         for bin in 0..NUM_MEL_BINS {
             let mean: f32 = feats.iter().map(|f| f[bin]).sum::<f32>() / feats.len() as f32;
             assert!(mean.abs() < 1e-3, "bin {} mean {}", bin, mean);
+        }
+    }
+}
+
+#[cfg(test)]
+mod reference_tests {
+    use super::*;
+
+    #[test]
+    fn features_match_kaldi_pcm16_reference_across_signal_levels() {
+        let mut state = 1u32;
+        let audio: Vec<f32> = (0..16000)
+            .map(|index| {
+                state = state.wrapping_mul(1664525).wrapping_add(1013904223);
+                let pcm = (state >> 16) as u16 as i16;
+                let amplitude = if index < 5333 {
+                    1.0
+                } else if index < 10666 {
+                    0.001
+                } else {
+                    0.000001
+                };
+                pcm as f32 / 32768.0 * amplitude
+            })
+            .collect();
+        // kaldi-native-fbank 1.22.4: 80 bins, dither=0, snip_edges=true,
+        // Povey window, PCM16-scale input, followed by per-bin global CMN.
+        let expected: [[f32; 6]; 5] = [
+            [12.62087, 12.43986, 13.12594, 13.83922, 13.67427, 14.03211],
+            [13.50927, 12.74745, 10.87887, 14.22611, 13.93155, 12.98238],
+            [0.67554, -0.74461, -0.40820, -0.24904, -0.09458, -0.88456],
+            [-12.92466, -15.09246, -12.98428, -14.41079, -13.00979, -14.10608],
+            [-14.78739, -14.43381, -13.21029, -13.21656, -13.48486, -14.63280],
+        ];
+        let features = FbankComputer::new().compute(&audio);
+        assert_eq!(features.len(), 98);
+        for (row, frame) in [0, 20, 50, 80, 97].into_iter().enumerate() {
+            for (column, bin) in [0, 7, 20, 40, 60, 79].into_iter().enumerate() {
+                assert!(
+                    (features[frame][bin] - expected[row][column]).abs() < 0.002,
+                    "frame {frame}, bin {bin}: {} vs {}",
+                    features[frame][bin],
+                    expected[row][column]
+                );
+            }
         }
     }
 }
