@@ -2,6 +2,7 @@
 export interface ModelInfo {
   name: string;
   path: string;
+  is_shared?: boolean;
   size_mb: number;
   accuracy: ModelAccuracy;
   speed: ProcessingSpeed;
