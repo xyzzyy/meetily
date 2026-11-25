@@ -66,3 +66,59 @@ Run the scorer checks without API access or audio files:
 ```sh
 python3 -m unittest discover -s diarization-sidecar/Benchmarks -p 'test_*.py' -v
 ```
+
+## Remembered-voice benchmark
+
+Use the local Rust evaluator to compare a profile blend with that blend plus its
+saved meeting samples. It uses the app's decoder, feature extractor, embedding
+model, profile blending, threshold, and margin. It does not send audio to a
+service or change the app database.
+
+The checked-in recipe selects 64 recordings from 16 speakers in
+[LibriSpeech test-clean](https://www.openslr.org/12/), by Vassil Panayotov,
+Guoguo Chen, Daniel Povey, and Sanjeev Khudanpur (CC BY 4.0). Eight speakers each
+have two enrolment recordings and two separate probes. The other eight speakers
+have no enrolled profile and supply 32 unknown-speaker probes. This is read
+English speech, not meeting audio. The recipe records every selected file's hash.
+
+Prepare the files in an external cache. This streams the public archive until
+all selected files are found; it can download more data than it keeps. A complete
+cache is reused. Changed files are not overwritten.
+
+```sh
+python3 diarization-sidecar/Benchmarks/prepare_voice_profiles.py \
+  --output-directory /tmp/meetily-voice-evaluation
+
+cargo run --locked --release -p meetily --example evaluate_voice_profiles -- \
+  /path/to/wespeaker_en_voxceleb_CAM++.onnx \
+  /tmp/meetily-voice-evaluation/manifest.json \
+  /tmp/meetily-voice-evaluation/results.json
+```
+
+The evaluator checks model and audio hashes. It rejects repeated recordings,
+including copies with another filename, and refuses to overwrite a report.
+Each recording contributes at most its first 30 seconds. Profiles use the same
+speech-duration weighting as the app. Results include individual decisions,
+input and model hashes, the embedding version, and the runtime build.
+
+The corrected macOS ARM run uses the PCM16 feature recipe and pooling fix from
+PRs #101 and #103. It produced these counts with 16 known-speaker probes and
+32 unknown-speaker probes, at threshold 0.65 and margin 0.08:
+
+| References | Correct known names | Wrong known names | Missed known names | False names on unknown speakers |
+|---|---:|---:|---:|---:|
+| Blend only | 15 | 0 | 1 | 0 |
+| Blend and saved samples | 15 | 0 | 1 | 0 |
+
+This small clean-speech set does not show a benefit from saved samples after
+the extractor corrections. It does not establish meeting accuracy or justify
+a threshold change. Sample matching remains a draft until representative
+meeting samples show a useful benefit. Generated reports stay outside the
+repository; the fixed recipe and hashes permit another run.
+
+Run the evaluator's score and data-leak checks without a model or audio download:
+
+```sh
+cargo test --locked --release -p meetily --example evaluate_voice_profiles
+python3 -m unittest discover -s diarization-sidecar/Benchmarks -p 'test_*.py' -v
+```
