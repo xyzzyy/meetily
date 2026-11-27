@@ -205,6 +205,14 @@ jobs:
             printf '#!/bin/sh\nexit 0\n' > "$target_bin"
             chmod +x "$target_bin"
           done
+      - run: cargo test --locked --release -p meetily --lib --no-run
+      # Tests that run ffmpeg fall back to ffmpeg-sidecar's download, whose
+      # macOS arm64 URL now returns 404. Use the binary build.rs staged instead.
+      - name: Put the staged ffmpeg on PATH
+        run: |
+          mkdir -p "$RUNNER_TEMP/ffmpeg"
+          ln -sf "$PWD/frontend/src-tauri/binaries/ffmpeg-aarch64-apple-darwin" "$RUNNER_TEMP/ffmpeg/ffmpeg"
+          echo "$RUNNER_TEMP/ffmpeg" >> "$GITHUB_PATH"
       - run: cargo test --locked --release -p meetily --lib
       - if: ${{ !cancelled() }}
         run: cargo test --locked --release -p meetily --doc
