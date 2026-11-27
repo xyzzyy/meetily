@@ -386,7 +386,8 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
           console.log('Loaded device preferences:', prefs);
         }
       } catch (error) {
-        console.log('No device preferences found or failed to load:', error);
+        console.error('Failed to load device preferences:', error);
+        toast.error('Could not load saved recording devices', { description: String(error) });
       }
     };
     loadDevicePreferences();

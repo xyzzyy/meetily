@@ -36,7 +36,7 @@ function loadStopAction(result) {
 }
 
 test('a duplicate stop does not start post-processing', async () => {
-  const { action, calls } = loadStopAction(false);
+  const { action, calls } = loadStopAction('already_stopping');
   await action();
   assert.deepEqual(calls.stopped, []);
   assert.deepEqual(calls.paths, []);
@@ -46,7 +46,7 @@ test('a duplicate stop does not start post-processing', async () => {
 });
 
 test('the owning stop starts post-processing', async () => {
-  const { action, calls } = loadStopAction(true);
+  const { action, calls } = loadStopAction('stopped');
   await action();
   assert.deepEqual(calls.stopped, [true]);
   assert.equal(calls.requestsFinished, 1);
