@@ -126,3 +126,39 @@ test('onboarding recovers from a denied mic and an unverified system audio check
   await app.click(app.button('Finish Setup'));
   assert.equal(app.finished(), true);
 });
+
+test('denied and unverified rows read differently and only the checked row shows progress', async t => {
+  const app = await mount();
+  t.after(app.unmount);
+
+  const text = (title, value) =>
+    app.row(title).findAll(node => typeof node.type === 'string' && node.children.includes(value)).length > 0;
+
+  for (const title of ['Microphone', 'System Audio']) {
+    await app.click(app.button('Enable', app.row(title)));
+  }
+  assert.ok(text('Microphone', 'Access denied'));
+  assert.ok(!text('Microphone', 'Not verified'));
+  assert.ok(text('System Audio', 'Not verified'));
+  assert.ok(!text('System Audio', 'Access denied'));
+  assert.match(app.row('System Audio').props.description, /Play audio on this Mac and check again/);
+
+  let finishCheck;
+  app.grants.set('trigger_system_audio_permission_command', new Promise(resolve => { finishCheck = resolve; }));
+  let pendingClick;
+  act(() => { pendingClick = app.button('Check Again', app.row('System Audio')).props.onClick(); });
+
+  assert.ok(app.button('Checking...', app.row('System Audio')));
+  assert.equal(app.button('Checking...', app.row('Microphone')), undefined);
+  assert.ok(app.button('Check Again', app.row('Microphone')));
+  for (const title of ['Microphone', 'System Audio']) {
+    for (const node of app.row(title).findAllByType('button')) {
+      assert.equal(node.props.disabled, true, `${title} actions wait for the running check`);
+    }
+  }
+
+  await act(async () => { finishCheck(true); await pendingClick; });
+  assert.ok(text('System Audio', 'Access granted'));
+  assert.equal(app.row('System Audio').findAllByType('button').length, 0);
+  assert.equal(app.button('Check Again', app.row('Microphone')).props.disabled, false);
+});

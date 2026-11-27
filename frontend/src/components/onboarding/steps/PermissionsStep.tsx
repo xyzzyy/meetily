@@ -5,6 +5,7 @@ import { Button } from '@/components/ui/button';
 import { OnboardingContainer } from '../OnboardingContainer';
 import { PermissionRow } from '../shared';
 import { useOnboarding } from '@/contexts/OnboardingContext';
+import type { PermissionStatus } from '@/types/onboarding';
 
 const permissionChecks = {
   microphone: {
@@ -21,12 +22,29 @@ const permissionChecks = {
 
 type AudioPermission = keyof typeof permissionChecks;
 
+const permissionCopy: Record<AudioPermission, Partial<Record<PermissionStatus, string>> & { default: string }> = {
+  microphone: {
+    default: 'Needed to capture your voice during meetings.',
+    authorized: 'Meetily can capture your voice during meetings.',
+    denied: 'Allow Meetily under Privacy & Security > Microphone in System Settings, then check again.',
+    unverified: 'Meetily could not confirm microphone access. Make sure it is allowed in System Settings, then check again.',
+  },
+  systemAudio: {
+    default: 'Start playing audio on this Mac, then select Enable so Meetily can confirm it hears it.',
+    authorized: 'Meetily can capture audio from your meeting apps.',
+    unverified: 'Meetily could not hear system audio yet. Play audio on this Mac and check again, or allow Meetily under Screen & System Audio Recording.',
+  },
+};
+
+const permissionDescription = (permission: AudioPermission, status: PermissionStatus) =>
+  permissionCopy[permission][status] ?? permissionCopy[permission].default;
+
 export function PermissionsStep() {
   const { setPermissionStatus, setPermissionsSkipped, permissions, completeOnboarding } = useOnboarding();
-  const [isPending, setIsPending] = useState(false);
+  const [pendingPermission, setPendingPermission] = useState<AudioPermission | null>(null);
 
   const checkPermission = async (permission: AudioPermission) => {
-    setIsPending(true);
+    setPendingPermission(permission);
     try {
       const granted = await invoke<boolean>(permissionChecks[permission].command);
       const ungranted = permission === 'microphone' ? 'denied' : 'unverified';
@@ -35,7 +53,7 @@ export function PermissionsStep() {
       console.error(`[PermissionsStep] Could not check ${permission} access:`, error);
       setPermissionStatus(permission, 'unverified');
     } finally {
-      setIsPending(false);
+      setPendingPermission(null);
     }
   };
 
@@ -83,16 +101,15 @@ export function PermissionsStep() {
     >
       <div className="max-w-lg mx-auto space-y-6">
         {/* Permission Rows */}
-        <div className="space-y-4">
+        <div className="space-y-3">
           {/* Microphone */}
           <PermissionRow
             icon={<Mic className="w-5 h-5" />}
             title="Microphone"
-            description={permissions.microphone === 'unverified'
-              ? 'Meetily could not verify microphone access.'
-              : 'Required to capture your voice during meetings'}
+            description={permissionDescription('microphone', permissions.microphone)}
             status={permissions.microphone}
-            isPending={isPending}
+            isPending={pendingPermission === 'microphone'}
+            disabled={pendingPermission !== null}
             onAction={() => handlePermissionAction('microphone')}
             onRetry={() => checkPermission('microphone')}
           />
@@ -101,11 +118,10 @@ export function PermissionsStep() {
           <PermissionRow
             icon={<Volume2 className="w-5 h-5" />}
             title="System Audio"
-            description={permissions.systemAudio === 'unverified'
-              ? 'Meetily did not verify system audio access. Check access in System Settings or play audio and check again.'
-              : 'Play audio on this Mac while Meetily checks access.'}
+            description={permissionDescription('systemAudio', permissions.systemAudio)}
             status={permissions.systemAudio}
-            isPending={isPending}
+            isPending={pendingPermission === 'systemAudio'}
+            disabled={pendingPermission !== null}
             onAction={() => handlePermissionAction('systemAudio')}
             onRetry={() => checkPermission('systemAudio')}
           />

@@ -30,6 +30,7 @@ export interface PermissionRowProps {
   description: string;
   status: PermissionStatus;
   isPending?: boolean;
+  disabled?: boolean;
   onAction: () => void;
   onRetry?: () => void;
 }

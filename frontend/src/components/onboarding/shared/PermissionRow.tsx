@@ -1,84 +1,103 @@
 import React from 'react';
-import { CheckCircle2, Loader2, XCircle } from 'lucide-react';
+import { AlertCircle, CheckCircle2, ExternalLink, Loader2, RotateCw, XCircle } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
-import type { PermissionRowProps } from '@/types/onboarding';
+import type { PermissionRowProps, PermissionStatus } from '@/types/onboarding';
 
-export function PermissionRow({ icon, title, description, status, isPending = false, onAction, onRetry }: PermissionRowProps) {
+const statusBadges: Partial<Record<PermissionStatus, { label: string; icon: typeof CheckCircle2; className: string }>> = {
+  authorized: {
+    label: 'Access granted',
+    icon: CheckCircle2,
+    className: 'bg-green-50 text-green-700 ring-green-200 dark:bg-green-500/10 dark:text-green-400 dark:ring-green-500/20',
+  },
+  denied: {
+    label: 'Access denied',
+    icon: XCircle,
+    className: 'bg-red-50 text-red-700 ring-red-200 dark:bg-red-500/10 dark:text-red-400 dark:ring-red-500/20',
+  },
+  unverified: {
+    label: 'Not verified',
+    icon: AlertCircle,
+    className: 'bg-amber-50 text-amber-800 ring-amber-200 dark:bg-amber-500/10 dark:text-amber-300 dark:ring-amber-500/20',
+  },
+};
+
+export function PermissionRow({
+  icon,
+  title,
+  description,
+  status,
+  isPending = false,
+  disabled = false,
+  onAction,
+  onRetry,
+}: PermissionRowProps) {
   const isAuthorized = status === 'authorized';
   const isDenied = status === 'denied';
   const needsSettings = isDenied || status === 'unverified';
-  const isChecking = isPending;
-
-  const getButtonText = () => {
-    if (isChecking) return 'Checking...';
-    if (needsSettings) return 'Open Settings';
-    return 'Enable';
-  };
+  const isBusy = isPending || disabled;
+  const badge = statusBadges[status];
+  const BadgeIcon = badge?.icon;
 
   return (
     <div
       className={cn(
-        'flex items-center justify-between rounded-2xl border px-6 py-5',
-        'transition-all duration-200',
-        isAuthorized ? 'border-gray-900 dark:border-ink-200 bg-gray-100 dark:bg-ink-800' : isDenied ? 'border-red-300 dark:border-red-500/30 bg-red-50 dark:bg-red-500/10' : 'bg-white dark:bg-ink-900 border-neutral-200 dark:border-ink-800'
+        'flex items-start gap-4 rounded-xl border bg-white p-4 transition-colors duration-200 dark:bg-ink-900 sm:p-5',
+        isDenied ? 'border-red-200 dark:border-red-500/25' : 'border-neutral-200 dark:border-ink-800'
       )}
     >
-      {/* Left side: Icon + Info */}
-      <div className="flex items-center gap-3 flex-1 min-w-0">
-        {/* Icon */}
-        <div
-          className={cn(
-            'flex size-10 items-center justify-center rounded-full flex-shrink-0',
-            isAuthorized ? 'bg-gray-200 dark:bg-ink-800' : isDenied ? 'bg-red-100 dark:bg-red-500/15' : 'bg-neutral-50 dark:bg-ink-950'
-          )}
-        >
-          <div className={cn(isAuthorized ? 'text-gray-900 dark:text-ink-100' : isDenied ? 'text-red-500 dark:text-red-400' : 'text-neutral-500 dark:text-ink-400')}>{icon}</div>
-        </div>
-
-        {/* Title + Description */}
-        <div className="min-w-0 flex-1">
-          <div className="font-medium truncate text-neutral-900 dark:text-ink-100">{title}</div>
-          <div className="text-sm text-muted-foreground">
-            {isAuthorized ? (
-              <span className="text-green-600 dark:text-green-400 flex items-center gap-1">
-                <CheckCircle2 className="w-3.5 h-3.5" />
-                Access Granted
-              </span>
-            ) : isDenied ? (
-              <span className="text-red-500 dark:text-red-400 flex items-center gap-1">
-                <XCircle className="w-3.5 h-3.5" />
-                Access Denied - Please grant in System Settings
-              </span>
-            ) : (
-              <span>{description}</span>
-            )}
-          </div>
-        </div>
+      <div
+        className={cn(
+          'flex size-10 flex-shrink-0 items-center justify-center rounded-full',
+          isAuthorized
+            ? 'bg-green-50 text-green-600 dark:bg-green-500/10 dark:text-green-400'
+            : isDenied
+              ? 'bg-red-50 text-red-600 dark:bg-red-500/10 dark:text-red-400'
+              : 'bg-neutral-100 text-neutral-600 dark:bg-ink-800 dark:text-ink-300'
+        )}
+      >
+        {icon}
       </div>
 
-      {/* Right side: Action button or checkmark */}
-      <div className="flex flex-wrap justify-end items-center gap-2 flex-shrink-0 ml-3">
-        {needsSettings && onRetry && (
-          <Button variant="outline" size="sm" onClick={onRetry} disabled={isChecking}>
-            Check Again
-          </Button>
-        )}
+      <div className="min-w-0 flex-1">
+        <div className="flex min-h-10 flex-wrap items-center justify-between gap-x-3 gap-y-1">
+          <h3 className="font-medium text-neutral-900 dark:text-ink-100">{title}</h3>
+          {badge && BadgeIcon && (
+            <span
+              className={cn(
+                'inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-medium ring-1 ring-inset',
+                badge.className
+              )}
+            >
+              <BadgeIcon className="h-3.5 w-3.5" aria-hidden="true" />
+              {badge.label}
+            </span>
+          )}
+        </div>
+
+        <p className="text-sm leading-relaxed text-neutral-600 dark:text-ink-300">{description}</p>
+
         {!isAuthorized && (
-          <Button
-            variant={isDenied ? "destructive" : "outline"}
-            size="sm"
-            onClick={onAction}
-            disabled={isChecking}
-            className="min-w-[100px]"
-          >
-            {isChecking && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
-            {getButtonText()}
-          </Button>
-        )}
-        {isAuthorized && (
-          <div className="flex size-8 items-center justify-center rounded-full bg-green-100 dark:bg-green-500/15">
-            <CheckCircle2 className="w-4 h-4 text-green-600 dark:text-green-400" />
+          <div className="mt-3 flex flex-wrap gap-2">
+            {needsSettings ? (
+              <>
+                <Button variant="outline" size="sm" onClick={onAction} disabled={isBusy}>
+                  <ExternalLink aria-hidden="true" />
+                  Open Settings
+                </Button>
+                {onRetry && (
+                  <Button variant="outline" size="sm" onClick={onRetry} disabled={isBusy}>
+                    {isPending ? <Loader2 className="animate-spin" aria-hidden="true" /> : <RotateCw aria-hidden="true" />}
+                    {isPending ? 'Checking...' : 'Check Again'}
+                  </Button>
+                )}
+              </>
+            ) : (
+              <Button size="sm" onClick={onAction} disabled={isBusy} className="min-w-[96px]">
+                {isPending && <Loader2 className="animate-spin" aria-hidden="true" />}
+                {isPending ? 'Checking...' : 'Enable'}
+              </Button>
+            )}
           </div>
         )}
       </div>
