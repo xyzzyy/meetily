@@ -36,6 +36,8 @@ pub(crate) struct RecordingStopOutcome {
     pub audio_error: Option<anyhow::Error>,
     /// Only the final transcript segments may be missing.
     pub transcript_error: Option<anyhow::Error>,
+    /// Linux capture failed, but the audio it delivered is still saved.
+    pub capture_warning: Option<anyhow::Error>,
 }
 
 // ============================================================================
@@ -418,6 +420,12 @@ impl RecordingManager {
         if let Some(error) = &capture_error {
             error!("Error stopping audio streams: {error:#}");
         }
+        // A Linux worker that lost its device still delivered its audio up to
+        // the loss, so the recording is saved with a warning instead of failing.
+        #[cfg(target_os = "linux")]
+        let (capture_error, capture_warning) = (None, capture_error);
+        #[cfg(not(target_os = "linux"))]
+        let capture_warning = None;
         let (pipeline_error, transcript_error) = match self.pipeline_manager.stop().await {
             Ok(()) => (None, None),
             Err(PipelineStopError::Pipeline(error)) => {
@@ -438,7 +446,7 @@ impl RecordingManager {
         // This ensures microphone is released even if Drop is delayed
         self.state.cleanup();
 
-        RecordingStopOutcome { audio_error, transcript_error }
+        RecordingStopOutcome { audio_error, transcript_error, capture_warning }
     }
 
     /// Save recording after transcription is complete

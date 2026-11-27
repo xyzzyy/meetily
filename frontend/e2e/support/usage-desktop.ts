@@ -128,6 +128,8 @@ export async function installUsageDesktop(page: Page, provider = 'localWhisper')
             case 'get_recording_meeting_name': return state.title;
             case 'get_transcript_history': return state.history;
             case 'get_transcription_status': return { chunks_in_queue: 0, is_processing: false, last_activity_ms: 0 };
+            // Builds without a seasonal icon URL have no icon to show.
+            case 'doodle_sync': return null;
             case 'start_recording_with_devices_and_meeting':
               state.recording = true;
               state.title = args.meetingName;
@@ -141,7 +143,7 @@ export async function installUsageDesktop(page: Page, provider = 'localWhisper')
               state.recording = false;
               save();
               emit('recording-stopped', { message: 'Recording stopped', meeting_name: state.title });
-              return true;
+              return 'stopped';
             case 'api_save_transcript':
               state.meeting = { title: args.meetingTitle, transcripts: args.transcripts };
               save();

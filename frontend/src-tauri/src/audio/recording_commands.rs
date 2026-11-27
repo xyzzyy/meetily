@@ -1074,8 +1074,12 @@ async fn stop_recording_session<R: Runtime>(
         (RecordingStopOutcome::default(), None)
     };
 
-    let (stop_result, manager_for_cleanup) = stop_result;
+    let (mut stop_result, manager_for_cleanup) = stop_result;
 
+    if let Some(error) = stop_result.capture_warning.take() {
+        let _ = app.emit("linux-audio-notice", serde_json::json!({"error": true,
+            "message": format!("Some queued audio could not be preserved: {error:#}. Saving the available recording.")}));
+    }
     let (shutdown_error, mut transcript_incomplete) = recording_stop_errors(stop_result);
 
     // Step 1.5: Clean up transcript listener to release microphone
@@ -2601,6 +2605,7 @@ mod stop_outcome_tests {
         let (shutdown_error, transcript_incomplete) = recording_stop_errors(RecordingStopOutcome {
             audio_error: None,
             transcript_error: Some(anyhow::anyhow!("Final VAD flush failed")),
+            ..Default::default()
         });
         assert!(shutdown_error.is_none());
         assert!(transcript_incomplete);
@@ -2611,6 +2616,7 @@ mod stop_outcome_tests {
         let (shutdown_error, transcript_incomplete) = recording_stop_errors(RecordingStopOutcome {
             audio_error: Some(anyhow::anyhow!("Capture could not stop")),
             transcript_error: Some(anyhow::anyhow!("Final send failed")),
+            ..Default::default()
         });
         assert!(shutdown_error.unwrap().contains("Capture could not stop"));
         assert!(transcript_incomplete);

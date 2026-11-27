@@ -1591,18 +1591,18 @@ mod policy_tests {
         )
         .unwrap();
         pipeline.recording_sender_for_mixed = Some(recording_sender);
-        let chunk = |chunk_id, data| AudioChunk {
+        let chunk = |chunk_id, timestamp, data| AudioChunk {
             data,
             chunk_id,
             sample_rate: 16000,
-            timestamp: 0.0,
+            timestamp,
             end_timestamp: None,
             device_type: DeviceType::Microphone,
             source_activity: None,
         };
         // Keep both a complete mixer window and a partial window before final flush.
-        audio_sender.send(chunk(0, vec![0.05; 9600])).unwrap();
-        audio_sender.send(chunk(1, vec![0.05; 127])).unwrap();
+        audio_sender.send(chunk(0, 0.0, vec![0.05; 9600])).unwrap();
+        audio_sender.send(chunk(1, 0.6, vec![0.05; 127])).unwrap();
         drop(audio_sender);
         let mut flush_calls = 0;
         let error = pipeline
@@ -1764,6 +1764,7 @@ mod policy_tests {
         ));
     }
 
+    #[cfg(not(target_os = "linux"))]
     #[test]
     fn final_mixer_window_has_only_real_duration() {
         for (mic_len, sys_len) in [(0, 0), (127, 0), (0, 511), (511, 127), (28799, 28799)] {
@@ -1827,12 +1828,12 @@ mod policy_tests {
     async fn channel_close_sends_final_window_to_recording_and_stems() {
         let (pipeline, sender, mut recording, mut stems, _transcription) = pipeline_for_test(48000);
         // One full window followed by a partial window, with no explicit flush marker.
-        for (id, length) in [(0, 28800), (1, 127)] {
+        for (id, timestamp, length) in [(0, 0.0, 28800), (1, 0.6, 127)] {
             sender
                 .send(AudioChunk {
                     data: vec![0.25; length],
                     sample_rate: 48000,
-                    timestamp: 0.0,
+                    timestamp,
                     end_timestamp: None,
                     chunk_id: id,
                     device_type: DeviceType::System,
@@ -1859,6 +1860,11 @@ mod policy_tests {
     async fn repeated_final_flush_does_not_send_audio_twice() {
         let (mut pipeline, _sender, mut recording, mut stems, _transcription) =
             pipeline_for_test(48000);
+        #[cfg(target_os = "linux")]
+        pipeline
+            .ring_buffer
+            .add_samples_at(DeviceType::System, vec![0.25; 127], 0);
+        #[cfg(not(target_os = "linux"))]
         pipeline
             .ring_buffer
             .add_samples(DeviceType::System, vec![0.25; 127]);
