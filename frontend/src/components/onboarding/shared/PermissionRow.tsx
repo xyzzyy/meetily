@@ -35,6 +35,7 @@ export function PermissionRow({
   const isAuthorized = status === 'authorized';
   const isDenied = status === 'denied';
   const needsSettings = isDenied || status === 'unverified';
+  const showEnable = !isAuthorized && !needsSettings;
   const isBusy = isPending || disabled;
   const badge = statusBadges[status];
   const BadgeIcon = badge?.icon;
@@ -59,43 +60,44 @@ export function PermissionRow({
         {icon}
       </div>
 
-      <div className="min-w-0 flex-1">
-        <div className="flex min-h-10 flex-wrap items-center justify-between gap-x-3 gap-y-1">
-          <h3 className="font-medium text-neutral-900 dark:text-ink-100">{title}</h3>
-          {badge && BadgeIcon && (
-            <span
-              className={cn(
-                'inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-medium ring-1 ring-inset',
-                badge.className
-              )}
-            >
-              <BadgeIcon className="h-3.5 w-3.5" aria-hidden="true" />
-              {badge.label}
-            </span>
-          )}
+      <div className={cn(
+        'min-w-0 flex-1',
+        showEnable && 'grid items-center gap-x-4 gap-y-3 min-[480px]:grid-cols-[minmax(0,1fr)_auto]'
+      )}>
+        <div className="min-w-0">
+          <div className="flex min-h-10 flex-wrap items-center justify-between gap-x-3 gap-y-1">
+            <h3 className="font-medium text-neutral-900 dark:text-ink-100">{title}</h3>
+            {badge && BadgeIcon && (
+              <span
+                className={cn(
+                  'inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-medium ring-1 ring-inset',
+                  badge.className
+                )}
+              >
+                <BadgeIcon className="h-3.5 w-3.5" aria-hidden="true" />
+                {badge.label}
+              </span>
+            )}
+          </div>
+          <p className="text-sm leading-relaxed text-neutral-600 dark:text-ink-300">{description}</p>
         </div>
 
-        <p className="text-sm leading-relaxed text-neutral-600 dark:text-ink-300">{description}</p>
-
-        {!isAuthorized && (
+        {showEnable && (
+          <Button size="sm" onClick={onAction} disabled={isBusy} className="min-w-[96px] justify-self-end">
+            {isPending && <Loader2 className="animate-spin" aria-hidden="true" />}
+            {isPending ? 'Checking...' : 'Enable'}
+          </Button>
+        )}
+        {needsSettings && (
           <div className="mt-3 flex flex-wrap gap-2">
-            {needsSettings ? (
-              <>
-                <Button variant="outline" size="sm" onClick={onAction} disabled={isBusy}>
-                  <ExternalLink aria-hidden="true" />
-                  Open Settings
-                </Button>
-                {onRetry && (
-                  <Button variant="outline" size="sm" onClick={onRetry} disabled={isBusy}>
-                    {isPending ? <Loader2 className="animate-spin" aria-hidden="true" /> : <RotateCw aria-hidden="true" />}
-                    {isPending ? 'Checking...' : 'Check Again'}
-                  </Button>
-                )}
-              </>
-            ) : (
-              <Button size="sm" onClick={onAction} disabled={isBusy} className="min-w-[96px]">
-                {isPending && <Loader2 className="animate-spin" aria-hidden="true" />}
-                {isPending ? 'Checking...' : 'Enable'}
+            <Button variant="outline" size="sm" onClick={onAction} disabled={isBusy}>
+              <ExternalLink aria-hidden="true" />
+              Open Settings
+            </Button>
+            {onRetry && (
+              <Button variant="outline" size="sm" onClick={onRetry} disabled={isBusy}>
+                {isPending ? <Loader2 className="animate-spin" aria-hidden="true" /> : <RotateCw aria-hidden="true" />}
+                {isPending ? 'Checking...' : 'Check Again'}
               </Button>
             )}
           </div>
