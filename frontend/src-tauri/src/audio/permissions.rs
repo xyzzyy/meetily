@@ -89,39 +89,24 @@ pub async fn request_screen_recording_permission_command() -> Result<(), String>
         .map_err(|e| e.to_string())
 }
 
-/// Trigger system audio permission request and verify it was granted
-/// Returns Ok(true) if permission granted (tap created successfully), Ok(false) if denied
+/// Start system audio capture and check for signal. A silent stream is inconclusive.
 #[cfg(target_os = "macos")]
 pub fn trigger_system_audio_permission() -> Result<bool> {
-    info!("🔐 Triggering Audio Capture permission request...");
+    use futures_util::StreamExt;
+    use std::{future::ready, time::Duration};
 
-    // Try to create a Core Audio capture - this triggers the permission dialog
-    // if NSAudioCaptureUsageDescription is present in Info.plist
-    // NOTE: We only create the tap, don't start streaming - similar to mic permission approach
-    match crate::audio::capture::CoreAudioCapture::new() {
-        Ok(_capture) => {
-            info!("✅ Core Audio tap created successfully");
-            // Sleep briefly to allow permission dialog to appear (if shown)
-            // Similar to microphone permission handling in discovery.rs
-            std::thread::sleep(std::time::Duration::from_millis(500));
-            info!("✅ Audio Capture permission appears to be granted");
-            // Note: On macOS, even with permission denied, tap creation may succeed
-            // but audio will be silence. For onboarding, we just check tap creation.
-            Ok(true)
-        }
-        Err(e) => {
-            let error_msg = e.to_string().to_lowercase();
-            if error_msg.contains("permission") || error_msg.contains("denied") {
-                info!("🔐 Audio Capture permission denied");
-                info!("👉 Please grant Audio Capture permission in System Settings");
-                return Ok(false);
-            }
-            warn!("⚠️ Failed to create Core Audio tap: {}", e);
-            // If tap creation fails for other reasons, still return false
-            // as we can't verify permission status
-            Ok(false)
-        }
-    }
+    // Starting the aggregate device requests permission. A tap can be created
+    // even if permission was denied. Discard the samples as soon as we check them.
+    let mut stream = crate::audio::capture::CoreAudioCapture::new()?.stream()?;
+    let verified = tokio::runtime::Handle::current().block_on(async {
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            stream.any(|sample| ready(sample.is_finite() && sample.abs() > 0.00001)),
+        )
+        .await
+        .unwrap_or(false)
+    });
+    Ok(verified)
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -131,8 +116,7 @@ pub fn trigger_system_audio_permission() -> Result<bool> {
     Ok(true)
 }
 
-/// Tauri command to trigger system audio permission request
-/// Returns true if permission was granted (stream created), false if denied
+/// Check whether the app receives system audio.
 #[tauri::command]
 pub async fn trigger_system_audio_permission_command() -> Result<bool, String> {
     // Run in blocking task to avoid blocking the async runtime
