@@ -39,6 +39,7 @@ export function PermissionRow({
   const isBusy = isPending || disabled;
   const badge = statusBadges[status];
   const BadgeIcon = badge?.icon;
+  const checkingLabel = `Checking ${title} access`;
 
   return (
     <div
@@ -48,6 +49,7 @@ export function PermissionRow({
       )}
     >
       <div
+        aria-hidden="true"
         className={cn(
           'flex size-10 flex-shrink-0 items-center justify-center rounded-full',
           isAuthorized
@@ -66,36 +68,59 @@ export function PermissionRow({
       )}>
         <div className="min-w-0">
           <div className="flex min-h-10 flex-wrap items-center justify-between gap-x-3 gap-y-1">
-            <h3 className="font-medium text-neutral-900 dark:text-ink-100">{title}</h3>
-            {badge && BadgeIcon && (
-              <span
-                className={cn(
-                  'inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-medium ring-1 ring-inset',
-                  badge.className
-                )}
-              >
-                <BadgeIcon className="h-3.5 w-3.5" aria-hidden="true" />
-                {badge.label}
-              </span>
-            )}
+            <h2 className="font-medium text-neutral-900 dark:text-ink-100">{title}</h2>
+            <div role="status">
+              {isPending && <span className="sr-only">{checkingLabel}</span>}
+              {badge && BadgeIcon && (
+                <span
+                  aria-hidden={isPending || undefined}
+                  className={cn(
+                    'inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-medium ring-1 ring-inset',
+                    badge.className
+                  )}
+                >
+                  <BadgeIcon className="h-3.5 w-3.5" aria-hidden="true" />
+                  <span className="sr-only">{title}: </span>
+                  {badge.label}
+                </span>
+              )}
+            </div>
           </div>
           <p className="text-sm leading-relaxed text-neutral-600 dark:text-ink-300">{description}</p>
         </div>
 
         {showEnable && (
-          <Button size="sm" onClick={onAction} disabled={isBusy} className="min-w-[96px] justify-self-end">
+          <Button
+            size="sm"
+            onClick={onAction}
+            disabled={isBusy}
+            aria-label={isPending ? checkingLabel : `Enable ${title}`}
+            className="min-w-[96px] justify-self-end"
+          >
             {isPending && <Loader2 className="animate-spin" aria-hidden="true" />}
             {isPending ? 'Checking...' : 'Enable'}
           </Button>
         )}
         {needsSettings && (
           <div className="mt-3 flex flex-wrap gap-2">
-            <Button variant="outline" size="sm" onClick={onAction} disabled={isBusy}>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={onAction}
+              disabled={isBusy}
+              aria-label={`Open Settings for ${title}`}
+            >
               <ExternalLink aria-hidden="true" />
               Open Settings
             </Button>
             {onRetry && (
-              <Button variant="outline" size="sm" onClick={onRetry} disabled={isBusy}>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={onRetry}
+                disabled={isBusy}
+                aria-label={isPending ? checkingLabel : `Check Again for ${title}`}
+              >
                 {isPending ? <Loader2 className="animate-spin" aria-hidden="true" /> : <RotateCw aria-hidden="true" />}
                 {isPending ? 'Checking...' : 'Check Again'}
               </Button>

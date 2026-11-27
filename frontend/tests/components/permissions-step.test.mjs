@@ -102,9 +102,11 @@ test('onboarding recovers from a denied mic and an unverified system audio check
   // Start from the same state as a new setup. Neither check has verified access yet.
   assert.equal(app.button('Finish Setup').props.disabled, true);
   for (const title of ['Microphone', 'System Audio']) {
-    await app.click(app.button('Enable', app.row(title)));
-    assert.ok(app.button('Open Settings', app.row(title)));
-    assert.ok(app.button('Check Again', app.row(title)));
+    const enable = app.button('Enable', app.row(title));
+    assert.equal(enable.props['aria-label'], `Enable ${title}`);
+    await app.click(enable);
+    assert.equal(app.button('Open Settings', app.row(title)).props['aria-label'], `Open Settings for ${title}`);
+    assert.equal(app.button('Check Again', app.row(title)).props['aria-label'], `Check Again for ${title}`);
   }
   assert.equal(app.row('Microphone').props.status, 'denied');
   assert.equal(app.row('System Audio').props.status, 'unverified');
@@ -149,6 +151,8 @@ test('denied and unverified rows read differently and only the checked row shows
   act(() => { pendingClick = app.button('Check Again', app.row('System Audio')).props.onClick(); });
 
   assert.ok(app.button('Checking...', app.row('System Audio')));
+  const audioStatus = () => app.row('System Audio').findByProps({ role: 'status' });
+  assert.equal(audioStatus().findByProps({ className: 'sr-only', children: 'Checking System Audio access' }).type, 'span');
   assert.equal(app.button('Checking...', app.row('Microphone')), undefined);
   assert.ok(app.button('Check Again', app.row('Microphone')));
   for (const title of ['Microphone', 'System Audio']) {
@@ -159,6 +163,7 @@ test('denied and unverified rows read differently and only the checked row shows
 
   await act(async () => { finishCheck(true); await pendingClick; });
   assert.ok(text('System Audio', 'Access granted'));
+  assert.ok(audioStatus().findAllByType('span').some(node => node.children.includes('Access granted')));
   assert.equal(app.row('System Audio').findAllByType('button').length, 0);
   assert.equal(app.button('Check Again', app.row('Microphone')).props.disabled, false);
 });
