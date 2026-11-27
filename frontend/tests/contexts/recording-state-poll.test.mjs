@@ -29,6 +29,8 @@ async function mountState() {
       if (name === 'react') return React;
       if (name === '@/services/recordingService') return { recordingService };
       if (name === 'sonner') return { toast: {} };
+      if (name === '@tauri-apps/api/event') return { listen: async () => () => {} };
+      if (name === '@/lib/audioDevices') return { resolveDeviceLabel: async id => id };
       throw new Error(`Unexpected import: ${name}`);
     },
     console: { log() {}, error() {} },

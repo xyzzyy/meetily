@@ -3,7 +3,7 @@
     <h1>Meetily Branch</h1>
     <p><strong>A privacy-first AI meeting assistant that runs entirely on your machine.</strong></p>
     <p>
-        <img src="https://img.shields.io/badge/version-0.4.1-yellow" alt="Version 0.4.1" />
+        <img src="https://img.shields.io/badge/version-0.5.0-yellow" alt="Version 0.5.0" />
         <img src="https://img.shields.io/badge/license-MIT-blue" alt="MIT License" />
         <img src="https://img.shields.io/badge/platforms-macOS%20%7C%20Windows%20%7C%20Linux-lightgrey" alt="Platforms" />
         <img src="https://img.shields.io/badge/built%20with-Tauri%202%20%2B%20Rust-orange" alt="Tauri and Rust" />
@@ -47,7 +47,7 @@ Meetily records your meetings, transcribes them live, and writes summaries witho
 
 ## How Meetily Branch differs from upstream
 
-Meetily Branch tracks upstream Meetily 0.4.1. It adds a few protections so you can run it on the same machine as the official app without risk to the official app's data:
+Meetily Branch tracks upstream Meetily 0.5.0. It adds a few protections so you can run it on the same machine as the official app without risk to the official app's data:
 
 - **Separate identity.** The app is named `Meetily Branch` and uses the bundle identifier `com.meetily.ai.branch`, so the operating system treats it as a different application from `com.meetily.ai`.
 - **Read-only model sharing.** If official Meetily has already downloaded models, Branch can **read** them so you don't download them twice. Downloads and deletions are confined to Branch's own models folder. Absolute paths and paths containing a `..` component are rejected, so a lookup can't escape the models directories.

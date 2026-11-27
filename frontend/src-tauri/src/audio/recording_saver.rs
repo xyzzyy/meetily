@@ -121,8 +121,8 @@ impl RecordingSaver {
             // Write updated metadata to disk if folder exists
             if let Some(folder) = &self.meeting_folder {
                 let metadata_clone = metadata.clone();
-                if let Err(e) = self.write_metadata(folder, &metadata_clone) {
-                    warn!("Failed to update metadata with device info: {}", e);
+                if let Err(_) = self.write_metadata(folder, &metadata_clone) {
+                    warn!("Failed to update metadata with device info");
                 }
             }
         }
@@ -149,8 +149,8 @@ impl RecordingSaver {
 
         // NEW: Save incrementally to disk
         if let Some(folder) = &self.meeting_folder {
-            if let Err(e) = self.write_transcripts_json(folder) {
-                warn!("Failed to write incremental transcript update: {}", e);
+            if let Err(_) = self.write_transcripts_json(folder) {
+                warn!("Failed to write incremental transcript update");
             }
         }
     }
@@ -369,21 +369,20 @@ impl RecordingSaver {
         // Write to temp file with error handling
         std::fs::write(&temp_path, &json_string)
             .map_err(|e| {
-                error!("Failed to write transcript temp file to {}: {}", temp_path.display(), e);
+                error!("Failed to write transcript temp file");
                 anyhow::anyhow!("Failed to write temp file: {}", e)
             })?;
 
         // Verify temp file was written correctly
         if !temp_path.exists() {
-            error!("Temp transcript file does not exist after write: {}", temp_path.display());
+            error!("Temp transcript file does not exist after write");
             return Err(anyhow::anyhow!("Temp file verification failed"));
         }
 
         // Atomic rename
         std::fs::rename(&temp_path, &transcript_path)
             .map_err(|e| {
-                error!("Failed to rename transcript file from {} to {}: {}",
-                       temp_path.display(), transcript_path.display(), e);
+                error!("Failed to replace transcript file");
                 anyhow::anyhow!("Failed to rename transcript file: {}", e)
             })?;
 
@@ -480,23 +479,17 @@ impl RecordingSaver {
         // Save final transcripts.json with validation
         if let Some(folder) = &self.meeting_folder {
             if let Err(e) = self.write_transcripts_json(folder) {
-                error!("❌ Failed to write final transcripts: {}", e);
+                error!("Failed to write final transcripts");
                 return Err(format!("Failed to save transcripts: {}", e));
             }
 
             // Verify transcripts were written correctly
             let transcript_path = folder.join("transcripts.json");
             if !transcript_path.exists() {
-                error!(
-                    "❌ Transcript file was not created at: {}",
-                    transcript_path.display()
-                );
+                error!("Transcript file was not created");
                 return Err("Transcript file verification failed".to_string());
             }
-            info!(
-                "✅ Transcripts saved and verified at: {}",
-                transcript_path.display()
-            );
+            info!("Transcripts saved and verified");
         }
 
         // Update metadata to completed status with actual recording duration
@@ -515,7 +508,7 @@ impl RecordingSaver {
             });
 
             if let Err(e) = self.write_metadata(folder, &metadata) {
-                error!("❌ Failed to update metadata to completed: {}", e);
+                error!("Failed to update metadata to completed");
                 return Err(format!("Failed to update metadata: {}", e));
             }
 

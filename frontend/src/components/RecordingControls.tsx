@@ -1,5 +1,7 @@
 'use client';
 
+import type { StopOutcome } from '@/services/recordingService';
+
 import { invoke } from '@tauri-apps/api/core';
 import { appDataDir } from '@tauri-apps/api/path';
 import { useCallback, useEffect, useState, useRef } from 'react';
@@ -46,6 +48,7 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
   // Use global recording state context for pause state (syncs with tray operations)
   const recordingState = useRecordingState();
   const isPaused = recordingState.isPaused;
+  const isGloballyStopping = recordingState.isStopping;
   const isStartingRecording = recordingState.isStartingRecording;
 
   const [showPlayback, setShowPlayback] = useState(false);
@@ -116,7 +119,9 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
       const errorMsg = error instanceof Error ? error.message : String(error);
 
       // Check for device-related errors
-      if (errorMsg.includes('microphone') || errorMsg.includes('mic') || errorMsg.includes('input')) {
+      if (errorMsg.startsWith('Your saved ') && errorMsg.includes('Choose a device in Recording Settings.')) {
+        setDeviceError({ title: 'Update Audio Device Selection', message: errorMsg });
+      } else if (errorMsg.includes('microphone') || errorMsg.includes('mic') || errorMsg.includes('input')) {
         setDeviceError({
           title: 'Microphone Not Available',
           message: 'Unable to access your microphone. Please check that:\n• Your microphone is connected\n• The app has microphone permissions\n• No other app is using the microphone'
@@ -149,12 +154,12 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
       const savePath = `${dataDir}/recording-${timestamp}.wav`;
       console.log('Saving recording to:', savePath);
       console.log('About to call stop_recording command');
-      const result = await invoke<boolean>('stop_recording', {
+      const result = await invoke<StopOutcome>('stop_recording', {
         args: {
           save_path: savePath
         }
       });
-      if (!result) {
+      if (result !== 'stopped') {
         setIsProcessing(false);
         return;
       }
@@ -184,6 +189,7 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
       setIsProcessing(false);
       onRecordingStop(false);
     } finally {
+      setIsProcessing(false);
       setIsStopping(false);
       onStopRequestFinished?.();
     }
@@ -191,7 +197,7 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
 
   const handleStopRecording = useCallback(async () => {
     console.log('handleStopRecording called - isRecording:', isRecording, 'isStarting:', isStarting, 'isStopping:', isStopping, 'isStartingRecording:', isStartingRecording);
-    if (!isRecording || isStarting || isStopping || isStartingRecording) {
+    if (!isRecording || isStarting || isStopping || isGloballyStopping || isStartingRecording) {
       console.log('Early return from handleStopRecording due to state check');
       return;
     }
@@ -205,7 +211,7 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
 
     // Immediately trigger the stop action
     await stopRecordingAction();
-  }, [isRecording, isStarting, isStopping, isStartingRecording, stopRecordingAction, onStopInitiated]);
+  }, [isRecording, isStarting, isStopping, isGloballyStopping, isStartingRecording, stopRecordingAction, onStopInitiated]);
 
   const handlePauseRecording = useCallback(async () => {
     if (!isRecording || isPaused || isPausing) return;
@@ -329,7 +335,7 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
     <TooltipProvider>
       <div className="flex flex-col space-y-2">
         <div className="flex items-center space-x-2 bg-white dark:bg-ink-900 rounded-full shadow-lg px-4 py-2">
-          {isProcessing && !isParentProcessing ? (
+          {(isProcessing || isGloballyStopping) && !isParentProcessing ? (
             <div className="flex items-center space-x-2">
               <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-gray-900 dark:border-ink-200"></div>
               <span className="text-sm text-gray-600 dark:text-ink-300">Processing recording...</span>
