@@ -4,14 +4,15 @@ import { cn } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
 import type { PermissionRowProps } from '@/types/onboarding';
 
-export function PermissionRow({ icon, title, description, status, isPending = false, onAction }: PermissionRowProps) {
+export function PermissionRow({ icon, title, description, status, isPending = false, onAction, onRetry }: PermissionRowProps) {
   const isAuthorized = status === 'authorized';
   const isDenied = status === 'denied';
+  const needsSettings = isDenied || status === 'unverified';
   const isChecking = isPending;
 
   const getButtonText = () => {
     if (isChecking) return 'Checking...';
-    if (isDenied) return 'Open Settings';
+    if (needsSettings) return 'Open Settings';
     return 'Enable';
   };
 
@@ -57,7 +58,12 @@ export function PermissionRow({ icon, title, description, status, isPending = fa
       </div>
 
       {/* Right side: Action button or checkmark */}
-      <div className="flex items-center gap-2 flex-shrink-0 ml-3">
+      <div className="flex flex-wrap justify-end items-center gap-2 flex-shrink-0 ml-3">
+        {needsSettings && onRetry && (
+          <Button variant="outline" size="sm" onClick={onRetry} disabled={isChecking}>
+            Check Again
+          </Button>
+        )}
         {!isAuthorized && (
           <Button
             variant={isDenied ? "destructive" : "outline"}

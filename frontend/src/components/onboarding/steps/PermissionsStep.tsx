@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useCallback } from 'react';
+import React, { useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { Mic, Volume2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
@@ -6,90 +6,51 @@ import { OnboardingContainer } from '../OnboardingContainer';
 import { PermissionRow } from '../shared';
 import { useOnboarding } from '@/contexts/OnboardingContext';
 
+const permissionChecks = {
+  microphone: {
+    command: 'trigger_microphone_permission',
+    pane: 'Privacy_Microphone',
+    settingsLabel: 'Microphone',
+  },
+  systemAudio: {
+    command: 'trigger_system_audio_permission_command',
+    pane: 'Privacy_ScreenCapture',
+    settingsLabel: 'Screen & System Audio Recording',
+  },
+} as const;
+
+type AudioPermission = keyof typeof permissionChecks;
+
 export function PermissionsStep() {
   const { setPermissionStatus, setPermissionsSkipped, permissions, completeOnboarding } = useOnboarding();
   const [isPending, setIsPending] = useState(false);
 
-  // Check permissions - only logs current state, doesn't auto-authorize
-  // Actual permission checks are done via explicit user actions (clicking Enable)
-  const checkPermissions = useCallback(async () => {
-    console.log('[PermissionsStep] Current permission states:');
-    console.log(`  - Microphone: ${permissions.microphone}`);
-    console.log(`  - System Audio: ${permissions.systemAudio}`);
-    // Don't auto-set permissions based on device availability
-    // Permissions should only be set after explicit user action via Enable button
-  }, [permissions.microphone, permissions.systemAudio]);
-
-  // Check permissions on mount
-  useEffect(() => {
-    checkPermissions();
-  }, [checkPermissions]);
-
-  // Request microphone permission
-  const handleMicrophoneAction = async () => {
-    if (permissions.microphone === 'denied') {
-      // Try to open system settings
-      try {
-        await invoke('open_system_settings', { preferencePane: 'Privacy_Microphone' });
-      } catch {
-        alert('Please enable microphone access in System Preferences > Security & Privacy > Microphone');
-      }
-      return;
-    }
-
+  const checkPermission = async (permission: AudioPermission) => {
     setIsPending(true);
     try {
-      console.log('[PermissionsStep] Triggering microphone permission...');
-      const granted = await invoke<boolean>('trigger_microphone_permission');
-      console.log('[PermissionsStep] Microphone permission result:', granted);
-
-      if (granted) {
-        setPermissionStatus('microphone', 'authorized');
-      } else {
-        // Permission was denied or dialog was dismissed
-        setPermissionStatus('microphone', 'denied');
-      }
-    } catch (err) {
-      console.error('[PermissionsStep] Failed to request microphone permission:', err);
-      setPermissionStatus('microphone', 'denied');
+      const granted = await invoke<boolean>(permissionChecks[permission].command);
+      const ungranted = permission === 'microphone' ? 'denied' : 'unverified';
+      setPermissionStatus(permission, granted ? 'authorized' : ungranted);
+    } catch (error) {
+      console.error(`[PermissionsStep] Could not check ${permission} access:`, error);
+      setPermissionStatus(permission, 'unverified');
     } finally {
       setIsPending(false);
     }
   };
 
-  // Request system audio permission
-  const handleSystemAudioAction = async () => {
-    if (permissions.systemAudio === 'denied') {
-      // Try to open system settings
-      try {
-        await invoke('open_system_settings', { preferencePane: 'Privacy_ScreenCapture' });
-      } catch {
-        alert('Please enable Audio Capture in System Settings → Privacy & Security → Audio Capture');
-      }
+  const handlePermissionAction = async (permission: AudioPermission) => {
+    const status = permissions[permission];
+    if (status !== 'denied' && status !== 'unverified') {
+      await checkPermission(permission);
       return;
     }
 
-    setIsPending(true);
+    const { pane, settingsLabel } = permissionChecks[permission];
     try {
-      console.log('[PermissionsStep] Triggering Audio Capture permission...');
-      // Backend creates Core Audio tap, captures audio, and verifies it's not silence
-      // Returns true if permission granted and audio verified, false if denied (silence)
-      const granted = await invoke<boolean>('trigger_system_audio_permission_command');
-      console.log('[PermissionsStep] System audio permission result:', granted);
-
-      if (granted) {
-        setPermissionStatus('systemAudio', 'authorized');
-        console.log('[PermissionsStep] Audio Capture permission verified - audio is not silence');
-      } else {
-        // Permission was denied (audio is silence)
-        setPermissionStatus('systemAudio', 'denied');
-        console.log('[PermissionsStep] Audio Capture permission denied - audio is silence');
-      }
-    } catch (err) {
-      console.error('[PermissionsStep] Failed to request system audio permission:', err);
-      setPermissionStatus('systemAudio', 'denied');
-    } finally {
-      setIsPending(false);
+      await invoke('open_system_settings', { preferencePane: pane });
+    } catch {
+      alert(`Open System Settings > Privacy & Security > ${settingsLabel} to allow access.`);
     }
   };
 
@@ -127,20 +88,26 @@ export function PermissionsStep() {
           <PermissionRow
             icon={<Mic className="w-5 h-5" />}
             title="Microphone"
-            description="Required to capture your voice during meetings"
+            description={permissions.microphone === 'unverified'
+              ? 'Meetily could not verify microphone access.'
+              : 'Required to capture your voice during meetings'}
             status={permissions.microphone}
             isPending={isPending}
-            onAction={handleMicrophoneAction}
+            onAction={() => handlePermissionAction('microphone')}
+            onRetry={() => checkPermission('microphone')}
           />
 
           {/* System Audio */}
           <PermissionRow
             icon={<Volume2 className="w-5 h-5" />}
             title="System Audio"
-            description="Click Enable to grant Audio Capture permission"
+            description={permissions.systemAudio === 'unverified'
+              ? 'Meetily did not verify system audio access. Check access in System Settings or play audio and check again.'
+              : 'Play audio on this Mac while Meetily checks access.'}
             status={permissions.systemAudio}
             isPending={isPending}
-            onAction={handleSystemAudioAction}
+            onAction={() => handlePermissionAction('systemAudio')}
+            onRetry={() => checkPermission('systemAudio')}
           />
         </div>
 

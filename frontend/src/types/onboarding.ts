@@ -1,6 +1,6 @@
 export type OnboardingStep = 1 | 2 | 3 | 4;
 
-export type PermissionStatus = 'checking' | 'not_determined' | 'authorized' | 'denied';
+export type PermissionStatus = 'checking' | 'not_determined' | 'authorized' | 'denied' | 'unverified';
 
 export interface OnboardingPermissions {
   microphone: PermissionStatus;
@@ -31,6 +31,7 @@ export interface PermissionRowProps {
   status: PermissionStatus;
   isPending?: boolean;
   onAction: () => void;
+  onRetry?: () => void;
 }
 
 export interface StatusIndicatorProps {

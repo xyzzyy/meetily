@@ -60,7 +60,7 @@ pub mod tray;
 pub mod utils;
 pub mod whisper_engine;
 
-use audio::{list_audio_devices, trigger_audio_permission, AudioDevice};
+use audio::{list_audio_devices, AudioDevice};
 use log::{error as log_error, info as log_info};
 use notifications::commands::NotificationManagerState;
 use std::sync::Arc;
@@ -347,8 +347,23 @@ async fn get_audio_devices() -> Result<Vec<AudioDevice>, String> {
 
 #[tauri::command]
 async fn trigger_microphone_permission() -> Result<bool, String> {
-    trigger_audio_permission()
-        .map_err(|e| format!("Failed to trigger microphone permission: {}", e))
+    #[cfg(target_os = "macos")]
+    {
+        use cidre::{av::{CaptureDevice, MediaType}, blocks};
+
+        let permission = {
+            let (completion, mut callback) = blocks::comp1();
+            CaptureDevice::request_access_for_media_type_ch(MediaType::audio(), &mut callback)
+                .map_err(|error| format!("Could not check microphone access: {error:?}"))?;
+            completion
+        };
+        Ok(permission.await)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        audio::trigger_audio_permission()
+            .map_err(|error| format!("Could not check microphone access: {error}"))
+    }
 }
 
 #[tauri::command]
